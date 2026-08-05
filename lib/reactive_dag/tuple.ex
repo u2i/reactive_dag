@@ -165,6 +165,57 @@ defmodule ReactiveDag.Tuple do
     end
   end
 
+  @doc """
+  Reconcile a cell's tuple set against a host-computed DESIRED key set — the one
+  algorithm the portal's leaf drivers AND cascade's leaf refresh both hand-rolled:
+
+      current  = the cell's current keys
+      want     = `want_keys` (the host computed the desired set + its payload)
+      upsert   each want key   → host writes the spine + its own extension columns
+      vanished = current − want
+      retire   the vanished    → host policy: DELETE (portal) or TOMBSTONE (cascade)
+      ⇒ changed_upserts ++ vanished     (the keys to propagate to parents)
+
+  The library owns the SKELETON and the `current`/`vanished` set math; the two
+  variation points are seams the host supplies:
+
+    * `:upsert` — `(key -> boolean)` called per want-key; returns true iff this
+      key's verdict ACTUALLY changed (so only real changes propagate). The host
+      writes the row here (spine + strength/source_ref/…), because WHAT a present
+      row contains and WHAT counts as "changed" are host domain logic.
+    * `:retire` — how vanished keys leave. `:delete` (the default) uses the spine
+      `delete/2`; a host with a retain-if-vanished policy passes a
+      `(keys -> any)` fun (cascade tombstones). Vanished keys always propagate.
+    * `:current` — the baseline set `vanished` is computed against, as
+      `current − want`. Defaults to `all_keys(cell)`. A host whose "live" set is
+      narrower than all rows passes it explicitly — cascade's retain-if-vanished
+      leaf passes its NON-tombstoned keys, so already-tombstoned keys are neither
+      re-retired nor spuriously reported as newly vanished.
+
+  Returns `{:ok, changed_keys}` where `changed_keys = changed_upserts ++ vanished`.
+  """
+  @spec reconcile(String.t(), [key()] | MapSet.t(), keyword()) :: {:ok, [key()]}
+  def reconcile(cell_id, want_keys, opts) do
+    upsert = Keyword.fetch!(opts, :upsert)
+    retire = Keyword.get(opts, :retire, :delete)
+
+    want_set = MapSet.new(want_keys)
+    want = MapSet.to_list(want_set)
+
+    changed_up = Enum.filter(want, fn key -> upsert.(key) == true end)
+
+    current = Keyword.get_lazy(opts, :current, fn -> all_keys(cell_id) end)
+    vanished = Enum.reject(current, &MapSet.member?(want_set, &1))
+
+    do_retire(cell_id, vanished, retire)
+
+    {:ok, changed_up ++ vanished}
+  end
+
+  defp do_retire(_cell_id, [], _), do: :ok
+  defp do_retire(cell_id, keys, :delete), do: delete(cell_id, keys)
+  defp do_retire(_cell_id, keys, fun) when is_function(fun, 1), do: fun.(keys)
+
   defp query!(sql, params), do: repo().query!(sql, params)
 
   defp repo do
