@@ -94,18 +94,34 @@ defmodule ReactiveDag.Tuple do
     :ok
   end
 
-  @doc "All keys of a cell (any status)."
-  @spec all_keys(String.t()) :: [key()]
-  def all_keys(cell_id) do
-    %{rows: rows} = query!("SELECT key FROM #{table()} WHERE cell_id = $1", [cell_id])
+  @doc """
+  All keys of a cell (any status), optionally narrowed by `:key_scope` (a
+  `t:key_scope/0`) — e.g. only the keys whose i-th segment names one service.
+  """
+  @spec all_keys(String.t(), keyword()) :: [key()]
+  def all_keys(cell_id, opts \\ []) do
+    {scope_sql, scope_params} = key_scope_clause(Keyword.get(opts, :key_scope), 2)
+
+    %{rows: rows} =
+      query!("SELECT key FROM #{table()} WHERE cell_id = $1" <> scope_sql, [cell_id] ++ scope_params)
+
     Enum.map(rows, fn [k] -> k end)
   end
 
-  @doc ~S{Keys of a cell whose status is `"present"`.}
-  @spec present_keys(String.t()) :: [key()]
-  def present_keys(cell_id) do
+  @doc """
+  Keys of a cell whose status is `"present"`, optionally narrowed by
+  `:key_scope` (a `t:key_scope/0`). Equivalent to
+  `keys_by_status(cell, ["present"], key_scope: …)` but unordered.
+  """
+  @spec present_keys(String.t(), keyword()) :: [key()]
+  def present_keys(cell_id, opts \\ []) do
+    {scope_sql, scope_params} = key_scope_clause(Keyword.get(opts, :key_scope), 2)
+
     %{rows: rows} =
-      query!("SELECT key FROM #{table()} WHERE cell_id = $1 AND status = 'present'", [cell_id])
+      query!(
+        "SELECT key FROM #{table()} WHERE cell_id = $1 AND status = 'present'" <> scope_sql,
+        [cell_id] ++ scope_params
+      )
 
     Enum.map(rows, fn [k] -> k end)
   end
@@ -117,21 +133,50 @@ defmodule ReactiveDag.Tuple do
     Map.new(rows, fn [cid, n] -> {cid, n} end)
   end
 
+  @typedoc """
+  A KEY-SCOPE selector — a host-declared narrowing of a spine read to a subset of
+  a cell's keys, WITHOUT the host hand-writing SQL. The library turns each shape
+  into a safe PARAMETERIZED predicate (no string interpolation of host values):
+
+    * `{:prefix, p}`            → `key LIKE p`   (p is a full LIKE pattern, e.g. "app|%")
+    * `{:exact_or_prefix, k, p}`→ `(key = k OR key LIKE p)`  (a bare id OR its children)
+    * `{:segment, i, sep, v}`   → `split_part(key, sep, i) = v`  (the i-th key segment)
+
+  Key GRAMMAR stays the host's — it names which segment / prefix means what; the
+  library only assembles the predicate. `nil` (the default) means no scoping.
+  """
+  @type key_scope ::
+          nil
+          | {:prefix, String.t()}
+          | {:exact_or_prefix, String.t(), String.t()}
+          | {:segment, pos_integer(), String.t(), String.t()}
+
   @doc """
-  Keys of a cell whose status is in `statuses`, ordered by key. Pass `:limit` to
-  cap the result (e.g. a failing-sample). This is the general spine status-read;
-  `present_keys/1` is the `["present"]` special case.
+  Keys of a cell whose status is in `statuses`, ordered by key. Options:
+
+    * `:limit`     — cap the result (e.g. a failing-sample)
+    * `:key_scope` — a `t:key_scope/0` narrowing to a subset of the cell's keys
+
+  This is the general spine status-read; `present_keys/1` is the `["present"]`
+  special case.
   """
   @spec keys_by_status(String.t(), [String.t()], keyword()) :: [key()]
   def keys_by_status(cell_id, statuses, opts \\ []) when is_list(statuses) do
-    limit = Keyword.get(opts, :limit)
-    limit_sql = if limit, do: " LIMIT $3", else: ""
-    params = [cell_id, statuses] ++ if(limit, do: [limit], else: [])
+    {scope_sql, scope_params} = key_scope_clause(Keyword.get(opts, :key_scope), 3)
+    next = 3 + length(scope_params)
+
+    {limit_sql, limit_params} =
+      case Keyword.get(opts, :limit) do
+        nil -> {"", []}
+        n -> {" LIMIT $#{next}", [n]}
+      end
+
+    params = [cell_id, statuses] ++ scope_params ++ limit_params
 
     %{rows: rows} =
       query!(
-        "SELECT key FROM #{table()} WHERE cell_id = $1 AND status = ANY($2) " <>
-          "ORDER BY key" <> limit_sql,
+        "SELECT key FROM #{table()} WHERE cell_id = $1 AND status = ANY($2)" <>
+          scope_sql <> " ORDER BY key" <> limit_sql,
         params
       )
 
@@ -139,16 +184,20 @@ defmodule ReactiveDag.Tuple do
   end
 
   @doc """
-  Status histogram for a cell: `%{status => count}` over all its tuples. The
-  spine read behind a cell's verdict (failing / pending / green rollups are the
-  host's to compute from this).
+  Status histogram for a cell: `%{status => count}` over its tuples (optionally
+  narrowed by `:key_scope`). The spine read behind a cell's verdict (failing /
+  pending / green rollups are the host's to compute from this).
   """
-  @spec status_histogram(String.t()) :: %{String.t() => non_neg_integer()}
-  def status_histogram(cell_id) do
+  @spec status_histogram(String.t(), keyword()) :: %{String.t() => non_neg_integer()}
+  def status_histogram(cell_id, opts \\ []) do
+    {scope_sql, scope_params} = key_scope_clause(Keyword.get(opts, :key_scope), 2)
+
     %{rows: rows} =
-      query!("SELECT status, COUNT(*) FROM #{table()} WHERE cell_id = $1 GROUP BY status", [
-        cell_id
-      ])
+      query!(
+        "SELECT status, COUNT(*) FROM #{table()} WHERE cell_id = $1" <>
+          scope_sql <> " GROUP BY status",
+        [cell_id] ++ scope_params
+      )
 
     Map.new(rows, fn [s, n] -> {s, n} end)
   end
@@ -215,6 +264,23 @@ defmodule ReactiveDag.Tuple do
   defp do_retire(_cell_id, [], _), do: :ok
   defp do_retire(cell_id, keys, :delete), do: delete(cell_id, keys)
   defp do_retire(_cell_id, keys, fun) when is_function(fun, 1), do: fun.(keys)
+
+  # Build a `t:key_scope/0` into `{" AND <predicate>", params}`, numbering
+  # placeholders from `next` (the first unused $N in the caller's query). Host
+  # values ride in the params list — never interpolated into the SQL string.
+  defp key_scope_clause(nil, _next), do: {"", []}
+
+  defp key_scope_clause({:prefix, pat}, next) do
+    {" AND key LIKE $#{next}", [pat]}
+  end
+
+  defp key_scope_clause({:exact_or_prefix, k, pat}, next) do
+    {" AND (key = $#{next} OR key LIKE $#{next + 1})", [k, pat]}
+  end
+
+  defp key_scope_clause({:segment, i, sep, v}, next) when is_integer(i) and i > 0 do
+    {" AND split_part(key, $#{next}, $#{next + 1}) = $#{next + 2}", [sep, i, v]}
+  end
 
   defp query!(sql, params), do: repo().query!(sql, params)
 
