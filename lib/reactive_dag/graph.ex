@@ -82,9 +82,12 @@ defmodule ReactiveDag.Graph do
     end
   end
 
-  defp compute_depth(%Cell{inputs: []}, id, _by_id, memo, _on_stack), do: {0, Map.put(memo, id, 0)}
+  # Field access (cell.inputs), not a %Cell{} match — a host may pass its OWN
+  # cell struct (cascade keeps Cascade.Engine.Cell); the graph math only needs
+  # `.id` and `.inputs`.
+  defp compute_depth(%{inputs: []}, id, _by_id, memo, _on_stack), do: {0, Map.put(memo, id, 0)}
 
-  defp compute_depth(%Cell{inputs: inputs}, id, by_id, memo, on_stack) do
+  defp compute_depth(%{inputs: inputs}, id, by_id, memo, on_stack) do
     on_stack = MapSet.put(on_stack, id)
 
     {max_input_depth, memo} =

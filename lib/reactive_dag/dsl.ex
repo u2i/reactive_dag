@@ -46,8 +46,20 @@ defmodule ReactiveDag.Dsl do
       |> Enum.flat_map(fn {id, node} -> elem(Lowering.walk(id, node, cb), 1) end)
       |> dedup_by_id()
 
+    validate_cells(cells, hooks[:validate])
+  end
+
+  @doc """
+  Validate an ALREADY-assembled cell list (for a host that builds cells itself
+  rather than handing op-expression roots): structural checks (unique ids +
+  inputs resolve + acyclic) then the optional domain hook. `{:ok, cells}` |
+  `{:error, message}`.
+  """
+  @spec validate_cells([term()], (list() -> :ok | {:error, String.t()}) | nil) ::
+          {:ok, [term()]} | {:error, String.t()}
+  def validate_cells(cells, domain_validate \\ nil) do
     with :ok <- validate_structural(cells),
-         :ok <- run_domain(cells, hooks[:validate]) do
+         :ok <- run_domain(cells, domain_validate) do
       {:ok, cells}
     end
   end
