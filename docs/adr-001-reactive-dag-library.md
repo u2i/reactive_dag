@@ -1,7 +1,14 @@
 # ADR-001 — Extract the reactive-DAG engine as `reactive_dag`
 
-**Status:** proposed (skeleton built; neither host migrated yet)
-**Date:** 2026-08-05
+**Status:** accepted & implemented — both hosts fully migrated (path deps); the
+substrate, coordination tuple, reconcile, DSL lowering, and drain loop are all
+shared, both suites green. Only publish/pin (phase 3) remains.
+**Date:** 2026-08-05 (proposed); implemented same cycle.
+
+> This ADR keeps its decision-time framing. Where the build went beyond the
+> original proposal (the tuple ledger DID move into the library as a *spine*;
+> the DSL WAS lifted via `Lowering`/`Dsl`), the sections below are annotated
+> with what actually shipped rather than rewritten.
 
 ## Context
 
@@ -41,8 +48,9 @@ a dependency.
 | Graph build | `ReactiveDag.Graph` | `build/1` (validate + parents + longest-path depths, cycle-checked); `dirty_parents/4` (propagation via the host KeyRule). |
 | Dirty frontier | `ReactiveDag.Frontier` | `reactive_dag_dirty` table; `mark_dirty / next_cell / claim / empty?`; claim-as-delete. Host supplies its repo via config. |
 | Drain loop | `ReactiveDag.Drain` | depth-ordered incremental propagation; `run/2` parameterized by the two seams + an `:on_step` trace hook. |
-| Substrate migration | `ReactiveDag.Migration` (todo) | creates `reactive_dag_dirty` (+ optionally a generic tuple ledger). |
-| Spark DSL extension | `ReactiveDag.Dsl` (todo, phase 2) | the shared `source/observed/derive/ref/compose/target` vocabulary lowering to `Cell`s. |
+| Coordination tuple | `ReactiveDag.Tuple` ✅ | the shared `(cell_id, key, status, freshness)` **spine** over the host's tuple table (`put / present_keys / all_keys / keys_by_status / status_histogram / max_observed_at / reconcile` + a `:key_scope` selector). See "what shipped beyond the proposal". |
+| Nested-expr lowering | `ReactiveDag.Lowering` ✅ | `walk/3` — the nested op-expr → flat-cell recursion both DSLs grew, via host callbacks. |
+| Compile pipeline | `ReactiveDag.Dsl` ✅ | `compile / validate_cells` — resolve → structural-validate with a domain hook. |
 
 ### The two seams (stay app-side)
 
@@ -58,9 +66,14 @@ a dependency.
    leg changed) are expressible because the callback sees which child changed.
    `KeyRule.identity/3` is the default.
 
-The **tuple ledger** (materialized values) is deliberately NOT in the library:
-its storage is exactly what differs (per-key Elixir writes vs set-based SQL), so
-it stays owned by each host's RecomputeStrategy.
+The **tuple ledger** was originally scoped OUT of the library. What actually
+shipped is more precise (see "what shipped beyond the proposal"): the *spine* —
+`(cell_id, key, status, freshness)` + the read/reconcile operators over it — IS
+shared (`ReactiveDag.Tuple`), because both hosts had the identical spine spelled
+two ways. What stays host-side is the *payload* (each host's typed resources,
+joined by `key`) and the *extension columns* (the portal's `strength` modality,
+cascade's tombstone/fingerprint policy). The write executor is still the
+RecomputeStrategy seam.
 
 ## Why not more, why not less
 
@@ -93,19 +106,58 @@ it stays owned by each host's RecomputeStrategy.
 - The per-op `dirty_parents` rules → a `KeyRule` module.
 - `model_dirty` → `reactive_dag_dirty`; `model_tuple` stays portal-owned.
 
-## Phasing
+## Phasing — as executed
 
-1. **Phase 0 (this ADR):** skeleton repo with the interfaces (done; compiles).
-2. **Phase 1:** migrate **cascade** onto `reactive_dag` (path dep), prove the
-   full suite green. De-risks the seam on the app that fits most naturally.
-3. **Phase 2:** lift the Spark DSL into the library; migrate the portal.
-4. **Phase 3:** publish (hex or git), pin both apps.
+1. **Phase 0:** skeleton repo + interfaces. ✅
+2. **Phase 1:** cascade migrated (Frontier/Graph/Drain delegated), full suite
+   green. ✅
+3. **Phase 2:** portal migrated onto the shared Drain (proving the boundary
+   spans set-based SQL recompute too); DSL refs unified **by-name** in both apps;
+   `Lowering.walk` + `Dsl` extracted and adopted by both. ✅
+4. **Beyond the original phase 2** (the shared substrate turned out deeper than
+   just frontier + graph): the coordination-tuple **spine** (`ReactiveDag.Tuple`)
+   + the leaf-`reconcile` skeleton + spine reads with a `:key_scope` selector;
+   and the Drain loop enriched (`on_step` carries `triggered_by` + `duration_us`)
+   so cascade dropped its bespoke trace loop and the portal lowers through
+   `walk`. ✅
+5. **Phase 3 (remaining):** publish (hex or a git tag) and pin both apps off the
+   `path:` deps.
 
-## Open questions
+## What shipped beyond the proposal
 
-- Should the library own a **generic tuple ledger** for hosts that want one, or
-  stay frontier-only? (Cascade has its own `cascade_tuple` shape; the portal
-  joins to first-class tables. Leaning frontier-only + optional ledger helper.)
-- DSL unification (phase 2): cascade's `derive/ref/compose` vs the portal's
-  `guarantee/control/register/op` — is there one vocabulary, or does the library
-  provide primitives each app skins? (Likely primitives + per-app skin.)
+The proposal scoped the library at frontier + graph + two seams, with the tuple
+ledger and DSL left host-side. Migrating both apps revealed the shared surface
+was larger, and in exactly the places the proposal was unsure about:
+
+- **The coordination tuple is shared (spine), not host-only.** Both hosts had a
+  thin `(cell_id, key, status, freshness)` row keyed identically — cascade's
+  `cascade_tuple`, the portal's `model_tuple` — plus a typed *payload* resource
+  joined by `key`. The spine + its read/reconcile operators became
+  `ReactiveDag.Tuple` (host owns the physical table via
+  `config :reactive_dag, tuple_table:`, extension columns and all). This is the
+  resolution of the first open question: **not** frontier-only; the spine is a
+  genuine shared layer, the payload and extension columns are not.
+- **The DSL lowering is shared (primitives), not per-app.** Resolving the second
+  open question: refs are **by-name** in both apps, and the nested-expr → flat-
+  cell recursion is one `Lowering.walk` primitive both DSLs call with their own
+  callbacks. Each app keeps its *vocabulary* (`source/dataset/target` vs
+  `guarantee/control/register`) as a thin skin — **primitives + per-app skin**,
+  as guessed.
+- **`reconcile/3` unified the leaf-write algorithm.** The portal's ~12 leaf
+  drivers and cascade's `refresh_leaf` were the same skeleton (upsert a desired
+  set, retire the vanished); the one real divergence — delete vs tombstone — is
+  now a one-line `:retire` seam.
+
+## The design law behind the seams
+
+Why `RecomputeStrategy` is a seam and not shared code, stated as the principle we
+converged on: **the reactive substrate is shared because *scheduling* is
+purpose-neutral; recompute is not shared because it encodes the app's *purpose*.**
+The portal is a *proof engine* — every node's codomain collapses to a status
+lattice (`present/failing` × strength), which is exactly what set-based SQL is
+total over. Cascade is a *data pipeline* — nodes produce open-typed values (a
+dollar variance, an LLM-extracted record), which needs the BEAM. Purpose →
+codomain (status-lattice vs open value) → executor (SQL vs BEAM). The one
+domain difference that is *not* an executor choice is **modality** (`strength` —
+how well-established a fact is), which the portal computes and cascade has no use
+for; it rides as a tuple extension column, never forced onto cascade.
