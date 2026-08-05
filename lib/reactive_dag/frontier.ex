@@ -5,16 +5,18 @@ defmodule ReactiveDag.Frontier do
   so we go through its repo with parameterized SQL — claim-as-delete is a raw
   `DELETE … RETURNING` that Ash actions don't express cleanly.
 
-  The host supplies its `repo` (its AshPostgres repo module) via config:
+  The host supplies its `repo` (its AshPostgres repo module) via config, and may
+  override the table name (default `reactive_dag_dirty`) so a host adopting the
+  library keeps its existing table without a rename:
 
-      config :reactive_dag, repo: MyApp.Repo
+      config :reactive_dag, repo: MyApp.Repo, dirty_table: "my_dirty"
 
   Coalesced by `(cell, key)`; depth-ordered `next_cell`; atomic `claim`. This is
   the shared substrate both hosts previously hand-rolled (cascade's
   `Cascade.Engine.Frontier`, the portal's `model_dirty` access) — now provided.
   """
 
-  @dirty "reactive_dag_dirty"
+  @default_dirty "reactive_dag_dirty"
 
   @type key :: String.t()
 
@@ -37,7 +39,7 @@ defmodule ReactiveDag.Frontier do
     params = Enum.flat_map(keys, fn k -> [cell, k, reason, now] end)
 
     query!(
-      "INSERT INTO #{@dirty} (cell_id, key, reason, enqueued_at) VALUES #{placeholders} " <>
+      "INSERT INTO #{dirty()} (cell_id, key, reason, enqueued_at) VALUES #{placeholders} " <>
         "ON CONFLICT (cell_id, key) DO NOTHING",
       params
     )
@@ -48,7 +50,7 @@ defmodule ReactiveDag.Frontier do
   @doc "The dirty cell with the smallest depth, or nil if the frontier is empty."
   @spec next_cell(%{String.t() => non_neg_integer()}) :: String.t() | nil
   def next_cell(depths) do
-    %{rows: rows} = query!("SELECT DISTINCT cell_id FROM #{@dirty}", [])
+    %{rows: rows} = query!("SELECT DISTINCT cell_id FROM #{dirty()}", [])
     ids = Enum.map(rows, fn [id] -> id end)
 
     case ids do
@@ -60,14 +62,14 @@ defmodule ReactiveDag.Frontier do
   @doc "Atomically claim (delete-returning) all dirty keys for `cell`."
   @spec claim(String.t()) :: [key()]
   def claim(cell) do
-    %{rows: rows} = query!("DELETE FROM #{@dirty} WHERE cell_id = $1 RETURNING key", [cell])
+    %{rows: rows} = query!("DELETE FROM #{dirty()} WHERE cell_id = $1 RETURNING key", [cell])
     Enum.map(rows, fn [k] -> k end)
   end
 
   @doc "True when nothing is dirty."
   @spec empty?() :: boolean()
   def empty? do
-    %{rows: [[n]]} = query!("SELECT COUNT(*) FROM #{@dirty}", [])
+    %{rows: [[n]]} = query!("SELECT COUNT(*) FROM #{dirty()}", [])
     n == 0
   end
 
@@ -77,4 +79,6 @@ defmodule ReactiveDag.Frontier do
     Application.get_env(:reactive_dag, :repo) ||
       raise "reactive_dag: set `config :reactive_dag, repo: MyApp.Repo`"
   end
+
+  defp dirty, do: Application.get_env(:reactive_dag, :dirty_table, @default_dirty)
 end
