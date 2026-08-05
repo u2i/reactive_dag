@@ -53,7 +53,12 @@ defmodule ReactiveDag.Drain do
         if keys != [] do
           cell = Map.fetch!(plan.cells, cell_id)
           changed = recompute(cell, keys, opts)
-          propagate(plan, cell_id, changed, opts)
+          # A WHOLE-CELL claim ("*") propagates :all: a whole recompute can DELETE
+          # keys, and per-key propagation only carries survivors — it would strand
+          # a vanished key in the parent. So escalate downstream when the claim was
+          # whole, regardless of the per-parent key_rule.
+          prop = if "*" in keys, do: :all, else: changed
+          propagate(plan, cell_id, prop, opts)
           if f = opts[:on_step], do: f.(cell, keys, changed)
         end
 
@@ -76,6 +81,13 @@ defmodule ReactiveDag.Drain do
   end
 
   defp propagate(_plan, _cell_id, [], _opts), do: :ok
+
+  # :all — the cell was claimed whole; every parent recomputes whole too.
+  defp propagate(plan, cell_id, :all, _opts) do
+    plan.parents
+    |> Map.get(cell_id, [])
+    |> Enum.each(&Frontier.mark_dirty(&1, ["*"], "propagated (all) from #{cell_id}"))
+  end
 
   defp propagate(plan, cell_id, changed, opts) do
     key_rule = opts[:key_rule] || ReactiveDag.KeyRule
