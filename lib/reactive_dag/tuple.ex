@@ -117,6 +117,54 @@ defmodule ReactiveDag.Tuple do
     Map.new(rows, fn [cid, n] -> {cid, n} end)
   end
 
+  @doc """
+  Keys of a cell whose status is in `statuses`, ordered by key. Pass `:limit` to
+  cap the result (e.g. a failing-sample). This is the general spine status-read;
+  `present_keys/1` is the `["present"]` special case.
+  """
+  @spec keys_by_status(String.t(), [String.t()], keyword()) :: [key()]
+  def keys_by_status(cell_id, statuses, opts \\ []) when is_list(statuses) do
+    limit = Keyword.get(opts, :limit)
+    limit_sql = if limit, do: " LIMIT $3", else: ""
+    params = [cell_id, statuses] ++ if(limit, do: [limit], else: [])
+
+    %{rows: rows} =
+      query!(
+        "SELECT key FROM #{table()} WHERE cell_id = $1 AND status = ANY($2) " <>
+          "ORDER BY key" <> limit_sql,
+        params
+      )
+
+    Enum.map(rows, fn [k] -> k end)
+  end
+
+  @doc """
+  Status histogram for a cell: `%{status => count}` over all its tuples. The
+  spine read behind a cell's verdict (failing / pending / green rollups are the
+  host's to compute from this).
+  """
+  @spec status_histogram(String.t()) :: %{String.t() => non_neg_integer()}
+  def status_histogram(cell_id) do
+    %{rows: rows} =
+      query!("SELECT status, COUNT(*) FROM #{table()} WHERE cell_id = $1 GROUP BY status", [
+        cell_id
+      ])
+
+    Map.new(rows, fn [s, n] -> {s, n} end)
+  end
+
+  @doc "Most-recent `observed_at` across the given cells, or nil if none have rows."
+  @spec max_observed_at([String.t()]) :: DateTime.t() | nil
+  def max_observed_at(cell_ids) do
+    %{rows: rows} =
+      query!("SELECT max(observed_at) FROM #{table()} WHERE cell_id = ANY($1)", [cell_ids])
+
+    case rows do
+      [[ts]] -> ts
+      _ -> nil
+    end
+  end
+
   defp query!(sql, params), do: repo().query!(sql, params)
 
   defp repo do
