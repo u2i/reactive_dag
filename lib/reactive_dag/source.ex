@@ -15,10 +15,14 @@ defmodule ReactiveDag.Source do
   This split is a design invariant, not an accident: the drain is pure set/graph
   computation over tuples already present — deterministic, re-runnable, and it
   never fails on a network outage. Effectful, non-deterministic, fallible I/O
-  (that's every scanner) stays in phase 1. A scanner is therefore a first-class
-  *node in the graph spec* (so its leaf↔scanner binding is typed and validated),
-  but its EXECUTION is out-of-band. See `ReactiveDag.Dsl.Spine` for the authoring
-  side (`source :id, driver: Mod` + `observed …, fed_by: :id`).
+  (that's every scanner) stays in phase 1.
+
+  A scanner is NOT authored in the graph: the leaf it feeds is an ordinary
+  `observed` cell, and the binding to a scanner lives on the DRIVER — its
+  `leaf_cells/1` names the cells it writes. That's the single source of truth
+  (`verify!/2` checks it), and it handles the real cardinality directly: several
+  drivers can name one leaf (N:1), one driver can name many (1:N), with no
+  cross-reference edge on the leaf.
 
   ## The contract
 
@@ -85,10 +89,10 @@ defmodule ReactiveDag.Source do
 
   @doc """
   Verify every source's declared leaves resolve to real cells in `graph` — the
-  runtime half of the leaf↔scanner binding check (the compile-time half, that
-  `observed.fed_by` names a declared source, is in the spine transformer). Needs
-  the lowered graph, so it can't be a compile-time check when a host expands
-  generators from live data.
+  authoritative scanner↔leaf check. Each driver's `leaf_cells/1` names the cells
+  it writes; this confirms every one is a real cell in the built plan. Needs the
+  lowered graph (a host may expand generator leaves from live data), so it runs at
+  assembly/boot time, not compile time.
 
   Returns `:ok`, or raises `ArgumentError` naming every `{source, dangling_leaf}`.
   """

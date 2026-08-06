@@ -11,21 +11,9 @@ defmodule ReactiveDag.Dsl.Spine.Info do
   each cell's `meta` untouched.
   """
 
-  alias ReactiveDag.Dsl.Spine.{Compose, Node, Observed, Ref, Source}
+  alias ReactiveDag.Dsl.Spine.{Compose, Node, Observed, Ref}
   alias ReactiveDag.Node.{Compute, Join, Reduce}
   alias Spark.Dsl.Extension, as: Ext
-
-  @doc "The declared scanners' driver modules, in declaration order."
-  @spec sources(module()) :: [module()]
-  def sources(module) do
-    module |> entities() |> Enum.filter(&match?(%Source{}, &1)) |> Enum.map(& &1.driver)
-  end
-
-  @doc "The declared `source` entities (id + driver)."
-  @spec source_entities(module()) :: [Source.t()]
-  def source_entities(module) do
-    module |> entities() |> Enum.filter(&match?(%Source{}, &1))
-  end
 
   @doc """
   Lower the module's `graph` block to a `ReactiveDag.Plan`. Structural validation
@@ -98,14 +86,14 @@ defmodule ReactiveDag.Dsl.Spine.Info do
     }
   end
 
-  defp to_cell(id, %Observed{grain: grain, strength: strength, fed_by: fed_by, meta: meta}, _inputs) do
+  defp to_cell(id, %Observed{grain: grain, strength: strength, meta: meta}, _inputs) do
     %ReactiveDag.Cell{
       id: id,
       op: :leaf,
       inputs: [],
       leaf?: true,
       meta:
-        %{grain: grain, strength: strength, fed_by: fed_by}
+        %{grain: grain, strength: strength}
         |> Map.merge(Map.new(meta || []))
     }
   end

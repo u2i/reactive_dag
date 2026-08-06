@@ -25,8 +25,9 @@ defmodule ReactiveDag.DslSpineTest do
     use ReactiveDag.Graph.Dsl
 
     graph do
-      source :fleet_scan, driver: FleetScan
-      observed :machines, grain: :machine, strength: :measured, fed_by: :fleet_scan
+      # an observed leaf declares only its shape — no scanner ref. Which scanner
+      # feeds it is the driver's business (its leaf_cells/1 names this cell).
+      observed :machines, grain: :machine, strength: :measured
 
       node :fleet_health do
         op :reduce
@@ -36,27 +37,19 @@ defmodule ReactiveDag.DslSpineTest do
     end
   end
 
-  test "SCENARIO basic: source/observed/node lower; observed is a leaf; node inputs resolve" do
+  test "SCENARIO basic: observed/node lower; observed is a leaf; node inputs resolve" do
     cells = Basic |> Info.cells() |> Map.new(&{&1.id, &1})
 
-    # the observed leaf
+    # the observed leaf — shape only, no scanner binding on the cell
     assert cells["machines"].leaf?
     assert cells["machines"].op == :leaf
     assert cells["machines"].meta.grain == :machine
     assert cells["machines"].meta.strength == :measured
-    assert cells["machines"].meta.fed_by == :fleet_scan
 
     # the derived node, its op-kind + meta preserved, input edge to the leaf
     assert cells["fleet_health"].op == :reduce
     assert cells["fleet_health"].meta.grain == :machine
     assert cells["fleet_health"].inputs == ["machines"]
-
-    # a source is NOT a cell (it feeds a leaf; it isn't a node)
-    refute Map.has_key?(cells, "fleet_scan")
-  end
-
-  test "SCENARIO basic: sources/1 returns the declared driver modules" do
-    assert Info.sources(Basic) == [FleetScan]
   end
 
   test "SCENARIO basic: plan/1 builds a ReactiveDag.Plan with depths (leaf below its parent)" do
@@ -65,27 +58,9 @@ defmodule ReactiveDag.DslSpineTest do
     assert plan.depths["machines"] < plan.depths["fleet_health"]
   end
 
-  # ── SCENARIO 2: fed_by must name a declared source (compile-time) ───────────
-  test "SCENARIO fed_by: an observed fed_by an UNDECLARED source fails at compile" do
-    err =
-      assert_raise Spark.Error.DslError, fn ->
-        defmodule BadFedBy do
-          use ReactiveDag.Graph.Dsl
-
-          graph do
-            source :fleet_scan, driver: FleetScan
-            # typo: :flet_scan is not declared
-            observed :machines, fed_by: :flet_scan
-          end
-        end
-      end
-
-    assert Exception.message(err) =~ "not a declared source"
-    assert Exception.message(err) =~ "flet_scan"
-  end
-
-  test "SCENARIO fed_by: an observed with NO fed_by is fine (target-only leaf)" do
-    defmodule NoFedBy do
+  # ── SCENARIO 2: an observed is a plain leaf (no scanner authored in the graph) ─
+  test "SCENARIO leaf: an observed lowers to a terminal leaf cell, scanner-agnostic" do
+    defmodule PlainLeaf do
       use ReactiveDag.Graph.Dsl
 
       graph do
@@ -93,7 +68,7 @@ defmodule ReactiveDag.DslSpineTest do
       end
     end
 
-    assert [%{id: "targets", leaf?: true}] = Info.cells(NoFedBy)
+    assert [%{id: "targets", leaf?: true, op: :leaf}] = Info.cells(PlainLeaf)
   end
 
   # ── SCENARIO 3: structural checks (dangling ref, cycle) at compile ──────────
@@ -140,8 +115,7 @@ defmodule ReactiveDag.DslSpineTest do
     use ReactiveDag.Graph.Dsl
 
     graph do
-      source :fleet_scan, driver: FleetScan
-      observed :machines, fed_by: :fleet_scan
+      observed :machines
       node :health do
         op :reduce
         ref :machines
@@ -245,8 +219,7 @@ defmodule ReactiveDag.DslSpineTest do
     use ReactiveDag.Graph.Dsl
 
     graph do
-      source :people_scan, driver: FleetScan
-      observed :active_people, grain: :person, fed_by: :people_scan
+      observed :active_people, grain: :person
 
       # "guarantee" is a DOMAIN op-kind (the library never interprets it); the
       # compliance fields ride in meta. A reconcile-shaped set nests as a compose.

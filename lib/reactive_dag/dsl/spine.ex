@@ -1,12 +1,22 @@
 defmodule ReactiveDag.Dsl.Spine do
   @moduledoc """
   The **shared authoring grammar** for a reactive DAG: one `graph do … end`
-  section carrying the spine entities every host needs — `source`, `observed`,
-  `node`, `ref`, `compose` — plus the `ReactiveDag.Source` seam and the leaf↔
-  scanner validation. Both a data pipeline and a compliance model author against
-  this same grammar; each keeps its own DOMAIN vocabulary as *op-kinds + meta* on
-  the open `node` entity (or, if it needs typed fields, as its own entities added
-  alongside — see "Domain vocabulary" below).
+  section carrying the spine entities every host needs — `observed`, `node`,
+  `ref`, `compose` — plus the `ReactiveDag.Source` seam. Both a data pipeline and
+  a compliance model author against this same grammar; each keeps its own DOMAIN
+  vocabulary as *op-kinds + meta* on the open `node` entity (or, if it needs typed
+  fields, as its own entities added alongside — see "Domain vocabulary" below).
+
+  ## Scanners live on the driver, not the graph
+
+  A **scanner** (`ReactiveDag.Source`) reads external state into leaf cells in a
+  *poll* phase outside the drain. It is NOT authored in the `graph` block: the
+  driver's `leaf_cells/1` names the cells it writes — that IS the scanner↔leaf
+  binding, and the single source of truth `ReactiveDag.Source.verify!/2` checks.
+  So an `observed` leaf just declares its shape; which scanner feeds it is the
+  driver's business. This handles the real cardinality for free — several drivers
+  can name one leaf (N:1), one driver can name many leaves (1:N) — with no
+  cross-reference edge on the leaf.
 
   ## Authoring
 
@@ -14,14 +24,10 @@ defmodule ReactiveDag.Dsl.Spine do
         use ReactiveDag.Dsl.Spine
 
         graph do
-          # a SCANNER — reads external state into a leaf, out-of-band (see
-          # `ReactiveDag.Source`). `driver` must implement that behaviour, checked
-          # at compile time.
-          source :fleet_scan, driver: MyApp.Sources.FleetScan
-
-          # an OBSERVED leaf — the substrate a scanner feeds. `fed_by` names a
-          # declared `source` (validated at compile time: an unknown id fails).
-          observed :machines, grain: :machine, strength: :measured, fed_by: :fleet_scan
+          # an OBSERVED leaf — a cell a scanner writes out-of-band. It declares
+          # only its shape; the scanner that feeds it names it via the driver's
+          # `leaf_cells/1` (see `ReactiveDag.Source`), not a ref here.
+          observed :machines, grain: :machine, strength: :measured
 
           # a derived NODE — an op over input cells named by `ref`. `op` is an OPEN
           # atom: the library schedules the graph; the host's recompute interprets
@@ -72,8 +78,9 @@ defmodule ReactiveDag.Dsl.Spine do
 
   * **Library:** the `graph` section, the spine entities, the `reduce`/`join`/
     `compute` combinators, the structural checks (every `ref`/input resolves, ids
-    unique, acyclic — via `ReactiveDag.Graph.build/1`), the `fed_by → source`
-    compile-time check, and the `ReactiveDag.Source` behaviour + `verify!/2`.
+    unique, acyclic — via `ReactiveDag.Graph.build/1`), and the
+    `ReactiveDag.Source` behaviour + `verify!/2` (each scanner's `leaf_cells/1`
+    resolves to a real cell).
   * **Host:** the meaning of each op-kind that dispatches through a
     `ReactiveDag.RecomputeStrategy`, the `poll` fetch inside each driver, and any
     DOMAIN-typed fields it wants beyond the open `meta:`.
@@ -97,35 +104,27 @@ defmodule ReactiveDag.Dsl.Spine do
 
   `ReactiveDag.Dsl.Spine.Info.plan/1` lowers a module's `graph` block to a
   `ReactiveDag.Plan` (structural validation runs in the transformer at compile
-  time; `plan/1` returns the built plan for the drain). `sources/1` returns the
-  declared scanner driver modules — feed them to `ReactiveDag.Source.verify!/2`
-  once the plan exists.
+  time; `plan/1` returns the built plan for the drain). A host keeps its scanner
+  drivers as a plain module list and checks them against the built plan with
+  `ReactiveDag.Source.verify!(drivers, plan)`.
   """
 
   # ── spine entity structs ──────────────────────────────────────────────────
 
-  defmodule Source do
-    @moduledoc "A declared scanner: `source :id, driver: Mod`. `driver` implements `ReactiveDag.Source`."
-    @type t :: %__MODULE__{id: atom(), driver: module()}
-    defstruct [:id, :driver, __identifier__: nil, __spark_metadata__: nil]
-  end
-
   defmodule Observed do
     @moduledoc """
-    A source-fed leaf: `observed :id, grain:, strength:, fed_by:`. `fed_by` is the
-    first-class edge to a declared `source` (validated at compile time).
+    A source-fed leaf: `observed :id, grain:, strength:`. Which scanner feeds it is
+    the driver's business (its `leaf_cells/1` names this cell) — not a ref here.
     """
     @type t :: %__MODULE__{
             id: atom(),
             grain: atom() | nil,
             strength: atom(),
-            fed_by: atom() | nil,
             meta: keyword()
           }
     defstruct [
       :id,
       :grain,
-      :fed_by,
       strength: :measured,
       meta: [],
       __identifier__: nil,
@@ -199,31 +198,15 @@ defmodule ReactiveDag.Dsl.Spine do
 
   # ── Spark entities ─────────────────────────────────────────────────────────
 
-  @source %Spark.Dsl.Entity{
-    name: :source,
-    target: Source,
-    args: [:id],
-    describe: "A scanner (phase-1 source): reads external state into a leaf, out-of-band.",
-    schema: [
-      id: [type: :atom, required: true, doc: "stable source id (referenced by `observed.fed_by`)."],
-      driver: [
-        type: {:behaviour, ReactiveDag.Source},
-        required: true,
-        doc: "a module implementing `ReactiveDag.Source` (checked at compile time)."
-      ]
-    ]
-  }
-
   @observed %Spark.Dsl.Entity{
     name: :observed,
     target: Observed,
     args: [:id],
-    describe: "A source-fed leaf cell — the substrate a scanner writes.",
+    describe: "A source-fed leaf cell — the substrate a scanner writes (out-of-band).",
     schema: [
-      id: [type: :atom, required: true, doc: "the leaf cell id."],
+      id: [type: :atom, required: true, doc: "the leaf cell id (a scanner's `leaf_cells/1` names it)."],
       grain: [type: :atom, doc: "what each member of the leaf is."],
       strength: [type: :atom, default: :measured, doc: "the observation's fidelity."],
-      fed_by: [type: :atom, doc: "a declared `source :id` — validated at compile time."],
       meta: [type: :keyword_list, default: [], doc: "open host binding merged into the cell's meta."]
     ]
   }
@@ -326,7 +309,7 @@ defmodule ReactiveDag.Dsl.Spine do
   @graph %Spark.Dsl.Section{
     name: :graph,
     describe: "The reactive DAG: scanners, observed leaves, and derived nodes over them.",
-    entities: [@source, @observed, @node, @ref, @compose]
+    entities: [@observed, @node, @ref, @compose]
   }
 
   use Spark.Dsl.Extension,

@@ -8,22 +8,11 @@ defmodule ReactiveDag.AssembleTest do
   use ExUnit.Case, async: true
 
   # ── a spine graph ───────────────────────────────────────────────────────────
-  defmodule FleetScan do
-    @behaviour ReactiveDag.Source
-    @impl true
-    def id, do: :fleet_scan
-    @impl true
-    def leaf_cells(_g), do: ["machines"]
-    @impl true
-    def poll(_), do: {:ok, %{changed: []}}
-  end
-
   defmodule Pipeline do
     use ReactiveDag.Graph.Dsl
 
     graph do
-      source :fleet_scan, driver: FleetScan
-      observed :machines, grain: :machine, fed_by: :fleet_scan
+      observed :machines, grain: :machine
 
       # a spine node authored inline — will be OVERRIDDEN by a resource of the
       # same id in the mixed scenario.

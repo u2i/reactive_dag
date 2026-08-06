@@ -52,14 +52,11 @@ defmodule MyApp.Pipeline do
   use ReactiveDag.Graph.Dsl
 
   graph do
-    # a SCANNER — reads external state into a leaf, out-of-band (phase-1 poll,
-    # NOT a drain op). `driver` must implement `ReactiveDag.Source`, checked at
-    # compile time.
-    source :fleet_scan, driver: MyApp.Sources.FleetScan
-
-    # a source-fed LEAF — the substrate a scanner writes. `fed_by` names a declared
-    # `source`; an unknown id fails the build (compile-time leaf↔scanner check).
-    observed :machines, grain: :machine, strength: :measured, fed_by: :fleet_scan
+    # an OBSERVED leaf — a cell a scanner writes out-of-band (phase-1 poll, NOT a
+    # drain op). It declares only its shape; which scanner feeds it is the driver's
+    # business — its `leaf_cells/1` names this cell (see `ReactiveDag.Source`), so
+    # there's no scanner ref on the leaf.
+    observed :machines, grain: :machine, strength: :measured
 
     # a derived NODE — an op over input cells. Options are set INSIDE the block
     # (like Ash's `attributes do attribute … end`). `op` is an OPEN atom: the
@@ -88,19 +85,23 @@ end
 Introspect + run it:
 
 ```elixir
-plan    = ReactiveDag.Dsl.Spine.Info.plan(MyApp.Pipeline)     # → %ReactiveDag.Plan{}
-sources = ReactiveDag.Dsl.Spine.Info.sources(MyApp.Pipeline)  # → [driver modules]
+plan = ReactiveDag.Dsl.Spine.Info.plan(MyApp.Pipeline)     # → %ReactiveDag.Plan{}
 
-# poll (phase 1): each source writes its leaf, out-of-band.
-# then verify the leaf↔scanner binding against the built graph:
-:ok = ReactiveDag.Source.verify!(sources, plan)
+# a host keeps its scanner drivers as a plain module list (each names the leaves
+# it writes via `leaf_cells/1`). poll (phase 1) writes those leaves out-of-band;
+# verify! checks every named leaf resolves to a real cell in the built plan:
+:ok = ReactiveDag.Source.verify!([MyApp.Sources.FleetScan], plan)
 
 # drain (phase 2): the engine recomputes downstream from the dirty frontier.
 {:ok, _passes} = ReactiveDag.Drain.run(plan, recompute: MyApp.Recompute, key_rule: MyApp.KeyRule)
 ```
 
-**What's checked at compile time:** `driver` implements `ReactiveDag.Source`
-(`{:behaviour, _}`); every `observed.fed_by` names a declared `source`; the graph
+**The scanner↔leaf binding lives on the driver** (its `leaf_cells/1`), not the
+graph — so several drivers can feed one leaf (N:1) and one driver can feed many
+leaves (1:N) with no cross-reference on the leaf. `verify!/2` checks every named
+leaf is a real cell.
+
+**What's checked at compile time:** the graph
 is structurally sound (refs resolve, ids unique, acyclic). A typo fails the build
 with a located `Spark.Error.DslError`, not a silent dead edge.
 

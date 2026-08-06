@@ -8,8 +8,9 @@ defmodule ReactiveDag.Graph.Dsl do
         use ReactiveDag.Graph.Dsl
 
         graph do
-          source :fleet_scan, driver: MyApp.Sources.FleetScan
-          observed :machines, grain: :machine, fed_by: :fleet_scan
+          # a leaf a scanner writes out-of-band — shape only; the scanner names it
+          # via its driver's `leaf_cells/1` (see `ReactiveDag.Source`).
+          observed :machines, grain: :machine
 
           node :health do
             op :reduce
@@ -22,7 +23,6 @@ defmodule ReactiveDag.Graph.Dsl do
   Introspect the result with `ReactiveDag.Dsl.Spine.Info`:
 
       ReactiveDag.Dsl.Spine.Info.plan(MyApp.Pipeline)     # → %ReactiveDag.Plan{}
-      ReactiveDag.Dsl.Spine.Info.sources(MyApp.Pipeline)  # → [driver modules]
 
   A host that wants its OWN typed domain entities (a `guarantee`/`dataset` beyond
   the open `node` op-kind) composes its extension alongside the spine by using
