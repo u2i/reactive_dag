@@ -95,4 +95,81 @@ defmodule ReactiveDag.ReduceCombinatorTest do
     cell = %ReactiveDag.Cell{id: "x", op: :map, meta: %{compute: EchoOp}}
     assert {:ok, ["k"]} = Recompute.recompute(cell, ["k"])
   end
+
+  # ── dirty-key scoping: an arity-2 `read` receives the claimed keys ──────────
+  defmodule Scoped do
+    use Ash.Resource, domain: Domain, data_layer: Ash.DataLayer.Simple, extensions: [ReactiveDag.Node]
+
+    reactive do
+      id :scoped
+      op :fold
+      key_rule :all
+      # arity-2 read: record the scope it was handed, then read only those keys.
+      reduce over: :lines,
+             read: &ReactiveDag.ReduceCombinatorTest.scoped_read/2,
+             group_by: & &1.k,
+             key: & &1,
+             into: fn k, _items -> %{key: k} end,
+             upsert: fn _k, _row -> true end
+    end
+  end
+
+  def scoped_read(:lines, scope) do
+    send(self(), {:read_scope, scope})
+    (scope || ["all"]) |> Enum.map(&%{k: &1})
+  end
+
+  test "arity-2 read is handed the dirty keys (scoped), nil on whole-cell" do
+    cell = ReactiveDag.Node.to_cell(Scoped)
+
+    # specific dirty keys → the read sees exactly them (a datastore scan can filter)
+    {:ok, _} = Recompute.recompute(cell, ["x", "y"])
+    assert_received {:read_scope, ["x", "y"]}
+
+    # whole-cell ("*") → the read sees nil (read everything)
+    {:ok, _} = Recompute.recompute(cell, ["*"])
+    assert_received {:read_scope, nil}
+  end
+
+  # ── coordination_opts: extension columns flow through the payload loop ──────
+  defmodule OptsWriter do
+    @behaviour ReactiveDag.CoordinationWriter
+    @impl true
+    def put(cell_id, key, opts), do: send(ReactiveDag.ReduceCombinatorTest, {:put_opts, cell_id, key, opts})
+    @impl true
+    def delete(_cell_id, _keys), do: :ok
+  end
+
+  defmodule WithCoordOpts do
+    use Ash.Resource, domain: Domain, data_layer: Ash.DataLayer.Simple, extensions: [ReactiveDag.Node]
+
+    reactive do
+      id :with_coord
+      op :fold
+      key_rule :all
+      # the node declares extension-column opts for its coordination write.
+      coordination_opts fn key, row -> [source_ref: %{"fp" => row.fp}, key: key] end
+
+      reduce over: :lines,
+             read: fn :lines -> [%{k: "a", fp: "h1"}] end,
+             group_by: & &1.k,
+             key: & &1.k,
+             into: fn _k, [item] -> %{key: item.k, fp: item.fp} end,
+             upsert: fn _k, _row -> true end
+    end
+  end
+
+  test "coordination_opts flows to the CoordinationWriter (extension columns in the loop)" do
+    Process.register(self(), ReactiveDag.ReduceCombinatorTest)
+    prev = Application.get_env(:reactive_dag, :coordination_writer)
+    Application.put_env(:reactive_dag, :coordination_writer, OptsWriter)
+    on_exit(fn -> Application.put_env(:reactive_dag, :coordination_writer, prev) end)
+
+    cell = ReactiveDag.Node.to_cell(WithCoordOpts)
+    {:ok, _} = Recompute.recompute(cell, ["*"])
+
+    # the Op.put carried the node's extension opts (source_ref fingerprint)
+    assert_received {:put_opts, "with_coord", "a", opts}
+    assert opts[:source_ref] == %{"fp" => "h1"}
+  end
 end

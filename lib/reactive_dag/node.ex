@@ -178,9 +178,10 @@ defmodule ReactiveDag.Node do
     schema: [
       over: [type: :atom, required: true, doc: "the input node id whose payload is read + grouped"],
       read: [
-        type: {:fun, 1},
+        type: {:or, [{:fun, 1}, {:fun, 2}]},
         required: true,
-        doc: "`(over_id -> [item])` — read the input's payload items (host domain: Ash.read etc.)"
+        doc:
+          "`(over_id -> [item])`, or `(over_id, dirty_keys -> [item])` to SCOPE the read to the claimed dirty keys (`nil` = whole-cell). Host domain: `Ash.read` etc."
       ],
       group_by: [type: {:fun, 1}, required: true, doc: "`(item -> group_term)` — the grouping key"],
       key: [
@@ -219,7 +220,11 @@ defmodule ReactiveDag.Node do
     describe: "Declarative left join: index `over` into left/right sides, emit a row per left key.",
     schema: [
       over: [type: :atom, required: true, doc: "the input node id whose payload is read + indexed"],
-      read: [type: {:fun, 1}, required: true, doc: "`(over_id -> [item])` — read the input's items"],
+      read: [
+        type: {:or, [{:fun, 1}, {:fun, 2}]},
+        required: true,
+        doc: "`(over_id -> [item])`, or `(over_id, dirty_keys -> [item])` to scope the read (see `reduce`)."
+      ],
       left: [
         type: {:fun, 1},
         required: true,
@@ -360,6 +365,11 @@ defmodule ReactiveDag.Node do
         type: :atom,
         default: :upsert,
         doc: "the Ash upsert action used to write the node's own payload (default `:upsert`)."
+      ],
+      coordination_opts: [
+        type: {:fun, 2},
+        doc:
+          "`(key, row -> keyword)` — extra opts for the coordination write when the payload loop `Op.put`s a changed key, so a host `CoordinationWriter` can write EXTENSION COLUMNS (e.g. `source_ref`, a fingerprint) during a `reduce`/`join`. Without it, the loop writes spine columns only. (Retain-if-vanish/tombstone is a LEAF concern — reconcile a source-fed leaf via `ReactiveDag.Tuple.reconcile`, not here.)"
       ],
       verdict?: [
         type: :boolean,
@@ -583,6 +593,7 @@ defmodule ReactiveDag.Node do
         over: Ext.get_opt(resource, [:reactive], :over, nil),
         payload_key: Ext.get_opt(resource, [:reactive], :payload_key, nil),
         payload_action: Ext.get_opt(resource, [:reactive], :payload_action, nil),
+        coordination_opts: Ext.get_opt(resource, [:reactive], :coordination_opts, nil),
         verdict: verdict_flag(resource)
       }
       |> Enum.reject(fn {_k, v} -> is_nil(v) end)

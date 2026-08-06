@@ -31,9 +31,14 @@ defmodule ReactiveDag.Node.Recompute do
   # `into` returns ONE row (a fold) or a LIST of rows (a group → many "expand").
   # A single row's key comes from `key.(group)`; list rows must carry their own
   # `:key` (see key resolution in rows_with_keys/3).
-  def recompute(%Cell{meta: %{reduce: %{} = r}} = cell, _keys) do
+  #
+  # SCOPING: `read` may be arity-1 (`over -> items`, whole-cell) or arity-2
+  # (`over, dirty_keys -> items`) so a host can scope the datastore read to the
+  # claimed keys — e.g. `read: fn :fiscal_lines, keys -> FiscalDoc |> filter(keys) end`.
+  # `keys` is the claimed dirty set, or `nil` for a whole-cell recompute (`"*"`).
+  def recompute(%Cell{meta: %{reduce: %{} = r}} = cell, keys) do
     pairs =
-      r.read.(r.over)
+      read_items(r.read, r.over, scope(keys))
       |> Enum.group_by(r.group_by)
       |> Enum.flat_map(fn {group, items} ->
         group |> r.into.(items) |> rows_with_keys(r, group)
@@ -45,8 +50,9 @@ defmodule ReactiveDag.Node.Recompute do
   # a declarative JOIN combinator — read `over` into a LEFT and RIGHT index
   # (both `%{join_key => item}`), then for each left key emit `into.(jk, left,
   # right_or_nil)` (a left join; right may be absent). One row per left key.
-  def recompute(%Cell{meta: %{join: %{} = j}} = cell, _keys) do
-    items = j.read.(j.over)
+  # `read` may be arity-2 for dirty-key scoping (see `reduce` above).
+  def recompute(%Cell{meta: %{join: %{} = j}} = cell, keys) do
+    items = read_items(j.read, j.over, scope(keys))
     left = index(items, j.left)
     right = index(items, j.right)
 
@@ -81,6 +87,22 @@ defmodule ReactiveDag.Node.Recompute do
   # a cell whose meta carries no :compute key at all (e.g. a non-Node plan) —
   # treat like a leaf: pass through.
   def recompute(%Cell{}, keys), do: {:ok, keys}
+
+  # the claimed keys as a read scope: `nil` for a whole-cell recompute (`"*"`),
+  # else the specific dirty keys a scoped `read` can filter its query to.
+  defp scope(keys) do
+    cond do
+      is_nil(keys) -> nil
+      "*" in keys -> nil
+      true -> keys
+    end
+  end
+
+  # call a combinator's `read`: arity-1 (`over -> items`, whole-cell) or arity-2
+  # (`over, scope -> items`) for dirty-key scoping. A whole-cell recompute passes
+  # `nil` scope to the arity-2 form (read everything).
+  defp read_items(read, over, scope) when is_function(read, 2), do: read.(over, scope)
+  defp read_items(read, over, _scope) when is_function(read, 1), do: read.(over)
 
   # normalize an `into` result (one row or a list) into `[{key, row}]`. Key
   # resolution: a row that carries its own `:key` field SELF-IDENTIFIES (expand
@@ -120,16 +142,23 @@ defmodule ReactiveDag.Node.Recompute do
 
   defp materialize(cell, pairs, upsert) do
     write = writer_fn(cell, upsert)
+    coord = cell.meta[:coordination_opts]
 
     Enum.flat_map(pairs, fn {key, row} ->
       if write.(key, row) do
-        ReactiveDag.Op.put(cell, key)
+        # the coordination write goes through Op.put → the host CoordinationWriter,
+        # so extension columns (source_ref, fingerprint, …) a node declares via
+        # `coordination_opts:` are applied in the payload loop — not just the spine.
+        ReactiveDag.Op.put(cell, key, coord_opts(coord, key, row))
         [key]
       else
         []
       end
     end)
   end
+
+  defp coord_opts(nil, _key, _row), do: []
+  defp coord_opts(fun, key, row) when is_function(fun, 2), do: fun.(key, row)
 
   # a verdict row's tuple opts — status/strength if the combinator set them.
   defp verdict_opts(row) when is_map(row) do

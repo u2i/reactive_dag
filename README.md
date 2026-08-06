@@ -88,7 +88,9 @@ the node's resource, or a custom `upsert:`) and `Op.put`s only the changed keys:
 - **`reduce`** — a fold: read `over` into the BEAM, group, `into` returns one row
   per group. (`into` may instead return a **list** of rows — a group → many-rows
   "expand"; each returned row must carry its own `:key`. There is no separate
-  `expand` entity; it's this list-returning shape of `reduce`.)
+  `expand` entity; it's this list-returning shape of `reduce`.) `read` may be
+  arity-2 (`over, dirty_keys -> items`) to **scope** the datastore read to the
+  claimed keys instead of whole-cell — important for large inputs.
 - **`join`** — a two-input left join: index `over` into `left`/`right` sides, emit
   one row per left key joined to its right (right may be absent).
 - **`aggregate`** — a **pure-Ash-query** fold: the datastore groups + aggregates a
