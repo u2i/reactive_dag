@@ -180,6 +180,29 @@ A host can also assemble cells by hand and bring its own strategy/key_rule —
 `ReactiveDag.Graph.build(cells)` + `ReactiveDag.Drain.run(plan, recompute:,
 key_rule:)` — which is how both apps ran before adopting the `Node` surface.
 
+## Mixing both surfaces — the unified model
+
+The two authoring surfaces are not islands: both lower to the same
+`ReactiveDag.Cell`, so `ReactiveDag.assemble/1` builds **one plan from both** —
+a graph authored mostly in a `graph do … end` block, with specific nodes broken
+out as Ash resources (a typed payload table + a `reduce`/`join` combinator), or
+vice-versa.
+
+```elixir
+plan =
+  ReactiveDag.assemble(
+    spine:     [MyApp.Pipeline],                     # `graph do … end` module(s)
+    resources: [MyApp.BudgetRollups, MyApp.FlowSeries],
+    for_each:  &MyApp.Populations.fetch/1            # generator member-fetcher
+  )
+```
+
+Cells merge **by id**. A resource **overrides** a spine node of the same id (the
+resource is the more specific definition) — which is exactly the "graft a resource
+cell over the DSL cell" pattern cascade hand-rolled, now a first-class call. Both
+`:spine` and `:resources` default to `[]`, so `assemble/1` is the superset of
+`ReactiveDag.Dsl.Spine.Info.plan/1` and `ReactiveDag.Node.graph/2`.
+
 Status: **both hosts fully migrated** onto the substrate — the shared engine
 spans a per-key Elixir recompute (cascade) and a set-based SQL recompute (the
 portal), all coordination writes routed through the seam, proven by both suites

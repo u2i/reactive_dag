@@ -32,6 +32,7 @@ defmodule ReactiveDag.MixProject do
       ],
       groups_for_modules: [
         "Authoring DSL": [
+          ReactiveDag,
           ReactiveDag.Graph.Dsl,
           ReactiveDag.Dsl.Spine,
           ReactiveDag.Dsl.Spine.Info,
