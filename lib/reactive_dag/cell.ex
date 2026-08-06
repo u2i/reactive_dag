@@ -10,8 +10,8 @@ defmodule ReactiveDag.Cell do
   `RecomputeStrategy` and `KeyRule`.
 
   `meta` is an open map for app-specific data the compiler wants to carry
-  (compute module, SQL template name, key_rule tag, grain, …). The substrate
-  passes it through untouched.
+  (compute module, SQL template name, key_rule tag, …). The substrate passes it
+  through untouched.
   """
 
   @enforce_keys [:id, :op]

@@ -2,9 +2,10 @@ defmodule ReactiveDag.Node.AggregateRun do
   @moduledoc """
   Runs a pure-Ash-query `aggregate` node: the datastore groups + aggregates the
   node's `over` relationship in ONE query (a relationship aggregate — Postgres does
-  the `GROUP BY`), and each parent-grain row's aggregate values become its payload.
+  the `GROUP BY`), and each parent row's aggregate values become its payload.
 
-  The node's resource IS the group grain (one row per group). The runner:
+  The node's resource is the group's own resource — ONE row per group, aggregating
+  the finer rows reached through `over`. The runner:
 
     1. reads that resource with the relationship aggregates loaded under temporary
        names (`Ash.Query.aggregate(q, tmp, kind, over, field: src)`),

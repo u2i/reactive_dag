@@ -59,7 +59,7 @@ defmodule ReactiveDag.Node.Recompute do
   end
 
   # a PURE-ASH-QUERY aggregate — the datastore groups + aggregates the `over`
-  # relationship. The node's resource (`meta.resource`) IS the group grain: read it
+  # relationship. The node's resource (`meta.resource`) is the group's resource: read it
   # with the relationship aggregates loaded (ONE Ash query; Postgres does the
   # GROUP BY), and each parent row's aggregate values become its payload. This is a
   # WHOLE-CELL recompute (a GROUP BY reprices every group; there's no per-dirty-key

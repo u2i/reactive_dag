@@ -92,7 +92,7 @@ the node's resource, or a custom `upsert:`) and `Op.put`s only the changed keys:
   one row per left key joined to its right (right may be absent).
 - **`aggregate`** — a **pure-Ash-query** fold: the datastore groups + aggregates a
   relationship (`avg`/`sum`/`count`/…) in ONE query — no rows cross into the BEAM.
-  The node's resource IS the group grain; `over` is its `has_many`. Only for
+  The node's resource is the group's resource (one row per group); `over` is its `has_many`. Only for
   relationship aggregates (Ash has no arbitrary `GROUP BY … → rows`); use `reduce`
   for in-BEAM folds. Example: `aggregate over: :readings, avg: [flow: :avg_flow], count: :day_count`.
 

@@ -118,7 +118,7 @@ defmodule ReactiveDag.Node do
         type: :keyword_list,
         default: [],
         doc:
-          "OPEN domain binding for this intermediate cell (grain/strength/source/check/…) — merged into its meta, like the root block's `meta:`."
+          "OPEN domain binding for this intermediate cell (strength/source/check/…) — merged into its meta, like the root block's `meta:`."
       ]
     ]
   }
@@ -238,8 +238,8 @@ defmodule ReactiveDag.Node do
   defmodule Aggregate do
     @moduledoc """
     A PURE-ASH-QUERY reduce: the datastore does the grouping via a RELATIONSHIP
-    aggregate. The node's own resource IS the group grain (one row per group), and
-    `over` names its `has_many` to the rows being aggregated. The library loads
+    aggregate. The node's own resource is the group's resource — ONE row per group
+    — and `over` names its `has_many` to the rows being aggregated. The library loads
     the aggregates in ONE Ash query — Postgres computes the `GROUP BY` — and each
     parent row's aggregate values are its payload. No rows cross into the BEAM; no
     `into`/`read`/`upsert` (contrast the in-BEAM `reduce`, which loads every row).

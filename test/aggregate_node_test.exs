@@ -2,7 +2,7 @@ defmodule ReactiveDag.AggregateNodeTest do
   @moduledoc """
   The pure-Ash-query `aggregate` combinator: the datastore groups + aggregates a
   relationship (avg/count) in one Ash query — no raw rows cross into the BEAM. The
-  node's resource IS the group grain; each parent row's aggregate values are its
+  node's resource is the group's resource (one row per group); each parent row's aggregate values are its
   payload.
   """
   use ExUnit.Case, async: false
@@ -26,7 +26,7 @@ defmodule ReactiveDag.AggregateNodeTest do
     def delete(_c, _k), do: :ok
   end
 
-  # the GROUP GRAIN resource: one row per (plant, month). It has_many raw readings.
+  # the GROUP resource: one row per (plant, month). It has_many raw readings.
   defmodule PlantMonth do
     use Ash.Resource, domain: Domain, data_layer: Ash.DataLayer.Ets, extensions: [ReactiveDag.Node]
     ets do private?(true) end

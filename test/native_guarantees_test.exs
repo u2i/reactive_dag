@@ -6,7 +6,7 @@ defmodule ReactiveDag.NativeGuaranteesTest do
 
     * op-kinds as the set: reconcile / relation / product / fold / union / bind / analysis
     * leaves with domain metadata: observed / declared / workflow
-      (grain / strength / source / check / attest_for / cadence)
+      (strength / source / check / attest_for / cadence)
     * guarantee-level features: addresses, shape, population, conformance (metadata);
       rests_on / depends_on (guarantee→guarantee edges); over (second-order);
       for_each (generator → N instances)
@@ -49,13 +49,12 @@ defmodule ReactiveDag.NativeGuaranteesTest do
 
       compose :reconcile do
         as :"g:store_encrypted/set"
-        meta grain: :"app×store"
         ref :stores
         # an observed leaf WITH domain binding metadata.
         compose :leaf do
           as :"g:store_encrypted/set/1"
           leaf? true
-          meta grain: :"app×store", strength: :measured, source: :probe, check: "store_config"
+          meta strength: :measured, source: :probe, check: "store_config"
         end
       end
     end
@@ -70,7 +69,6 @@ defmodule ReactiveDag.NativeGuaranteesTest do
 
     set = cells["g:store_encrypted/set"]
     assert set.op == :reconcile
-    assert set.meta.grain == :"app×store"
     assert Enum.sort(set.inputs) == ["g:store_encrypted/set/1", "stores"]
 
     leaf = cells["g:store_encrypted/set/1"]
