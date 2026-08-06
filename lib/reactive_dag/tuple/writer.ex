@@ -11,16 +11,14 @@ defmodule ReactiveDag.Tuple.Writer do
   """
   @behaviour ReactiveDag.CoordinationWriter
 
-  alias ReactiveDag.Cell
-
   @impl true
-  def put(%Cell{id: id}, key, opts) do
-    ReactiveDag.Tuple.put(id, key, Keyword.take(opts, [:status, :stale_after, :observed_at]))
+  def put(cell_id, key, opts) do
+    ReactiveDag.Tuple.put(cell_id, key, Keyword.take(opts, [:status, :stale_after, :observed_at]))
   end
 
   @impl true
-  def delete(%Cell{id: id}, keys), do: ReactiveDag.Tuple.delete(id, keys)
+  def delete(cell_id, keys), do: ReactiveDag.Tuple.delete(cell_id, keys)
 
   @impl true
-  def tombstone(%Cell{} = cell, keys), do: delete(cell, keys)
+  def tombstone(cell_id, keys), do: delete(cell_id, keys)
 end

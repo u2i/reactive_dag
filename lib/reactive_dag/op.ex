@@ -40,18 +40,25 @@ defmodule ReactiveDag.Op do
 
   alias ReactiveDag.CoordinationWriter, as: W
 
+  # These accept the CELL (either a ReactiveDag.Cell from the drain, or a host's
+  # own cell struct in a unit test) and extract its id — both expose `.id` — so
+  # an op body reads naturally (`Op.put(cell, key, …)`) regardless of cell type.
+
   @doc "Mark `key` of `cell` present (opts carry host fields: source_ref, strength, …)."
-  @spec put(Cell.t(), key(), keyword()) :: :ok
-  def put(%Cell{} = cell, key, opts \\ []), do: W.writer().put(cell, key, opts)
+  @spec put(struct() | String.t(), key(), keyword()) :: :ok
+  def put(cell, key, opts \\ []), do: W.writer().put(id(cell), key, opts)
 
   @doc "Tombstone `keys` of `cell` (retain-if-vanish, if the writer supports it; else delete)."
-  @spec tombstone(Cell.t(), [key()]) :: :ok
-  def tombstone(%Cell{} = cell, keys) do
+  @spec tombstone(struct() | String.t(), [key()]) :: :ok
+  def tombstone(cell, keys) do
     w = W.writer()
-    if function_exported?(w, :tombstone, 2), do: w.tombstone(cell, keys), else: w.delete(cell, keys)
+    if function_exported?(w, :tombstone, 2), do: w.tombstone(id(cell), keys), else: w.delete(id(cell), keys)
   end
 
   @doc "Hard-delete `keys` of `cell`."
-  @spec delete(Cell.t(), [key()]) :: :ok
-  def delete(%Cell{} = cell, keys), do: W.writer().delete(cell, keys)
+  @spec delete(struct() | String.t(), [key()]) :: :ok
+  def delete(cell, keys), do: W.writer().delete(id(cell), keys)
+
+  defp id(%{id: id}), do: to_string(id)
+  defp id(id) when is_binary(id), do: id
 end

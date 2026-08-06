@@ -18,18 +18,21 @@ defmodule ReactiveDag.CoordinationWriter do
   no extension columns; hosts that have them (cascade) configure their own.
   """
 
-  alias ReactiveDag.Cell
-
   @type key :: String.t()
 
-  @doc "Mark `key` of `cell` present. `opts` may carry host-specific fields (source_ref, strength, stale_after)."
-  @callback put(cell :: Cell.t(), key :: key(), opts :: keyword()) :: :ok
+  # The callbacks take a `cell_id` STRING, not a Cell struct — a writer only ever
+  # needs the id, and `ReactiveDag.Op` extracts it up front so an op may pass
+  # EITHER cell type (a `ReactiveDag.Cell` from the drain, or a host's own cell
+  # in a unit test). This keeps the writer independent of the caller's cell type.
 
-  @doc "Tombstone `keys` of `cell` — vanished-but-retained (a host with a retain policy)."
-  @callback tombstone(cell :: Cell.t(), keys :: [key()]) :: :ok
+  @doc "Mark `key` of `cell_id` present. `opts` may carry host fields (source_ref, strength, stale_after)."
+  @callback put(cell_id :: key(), key :: key(), opts :: keyword()) :: :ok
 
-  @doc "Hard-delete `keys` of `cell`."
-  @callback delete(cell :: Cell.t(), keys :: [key()]) :: :ok
+  @doc "Tombstone `keys` of `cell_id` — vanished-but-retained (a host with a retain policy)."
+  @callback tombstone(cell_id :: key(), keys :: [key()]) :: :ok
+
+  @doc "Hard-delete `keys` of `cell_id`."
+  @callback delete(cell_id :: key(), keys :: [key()]) :: :ok
 
   @optional_callbacks tombstone: 2
 
