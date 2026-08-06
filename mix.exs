@@ -26,6 +26,7 @@ defmodule ReactiveDag.MixProject do
       main: "readme",
       extras: [
         "README.md",
+        "docs/authoring-surface-mapping.md",
         "docs/adr-001-reactive-dag-library.md",
         "docs/adr-002-unified-dsl.md",
         "docs/adr-002-dsl-sketches.md"
