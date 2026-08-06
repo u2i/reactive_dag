@@ -197,7 +197,13 @@ The answer arrives as another command (freeze-exempt, `answers_id` back-pointing
 that settles it and thaws the scope. `{:error, _}` is contained the same way (one
 bad command freezes only its scope). Storage is a seam
 (`ReactiveDag.Commands.Store`, default Postgres `seq`-ordered + `FOR UPDATE SKIP
-LOCKED`); the Oban worker that triggers `run/1` stays host-side, like the drain's.
+LOCKED`; the schema is in `ReactiveDag.Commands.Store.Postgres`); the Oban worker
+that triggers `run/1` stays host-side, like the drain's.
+
+A command is a **frontier row**, not an Ash resource (same category as a dirty-key
+tuple — claimed, not authored). The lib ships no display; a host that wants a
+"pending commands" LiveView adds its own read-only resource over the table, just
+as it would over the dirty-key frontier.
 
 Status: **both hosts run on the substrate** — the shared engine spans a per-key
 Elixir recompute (cascade) and a set-based SQL recompute (the portal), all

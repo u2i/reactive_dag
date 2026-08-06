@@ -13,6 +13,13 @@ defmodule ReactiveDag.Commands do
     * a `blocked` command is a pending human question that freezes its scope
       without stranding the queue (the answer arrives as another command).
 
+  A command is a **frontier row**, not an Ash resource — the same category as a
+  dirty-key tuple: a claimed row in a table, not something authored. The claim is
+  `FOR UPDATE SKIP LOCKED` SQL (not expressible as an Ash action), so the lib owns
+  the enqueue/claim/settle mechanics; how commands are LISTED or shown is host
+  territory (a host may put its own read-only Ash resource over the table for a
+  LiveView — the lib ships none, just as it ships none for the dirty-key frontier).
+
   ## Seams
 
     * `config :reactive_dag, command_executors: %{kind => module}` — the

@@ -2,9 +2,40 @@ defmodule ReactiveDag.Commands.Store.Postgres do
   @moduledoc """
   The default `ReactiveDag.Commands.Store` — a `seq`-ordered Postgres table drained
   with `FOR UPDATE SKIP LOCKED`, coalescing open intents by `dedup_key`, and
-  freezing a scope while it has a blocked/failed command. See `ReactiveDag.Commands`
-  for the required columns; table name from `config :reactive_dag, commands_table:`
-  (default `"commands"`), repo from `config :reactive_dag, repo:`.
+  freezing a scope while it has a blocked/failed command. Table name from
+  `config :reactive_dag, commands_table:` (default `"commands"`), repo from
+  `config :reactive_dag, repo:`.
+
+  ## The schema (host owns the migration)
+
+  The command frontier is a claimed table, not an Ash resource — the host creates
+  it (and, if it wants a LiveView, its own read resource over it; the lib ships no
+  display). The exact schema this store drains:
+
+      CREATE TABLE commands (
+        id           uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+        seq          bigserial NOT NULL,          -- total order (claim order)
+        kind         text NOT NULL,               -- dispatch key → a CommandExecutor
+        scope        text NOT NULL,               -- freeze unit
+        payload      jsonb NOT NULL DEFAULT '{}',
+        status       text NOT NULL DEFAULT 'queued', -- queued|running|done|failed|blocked|discarded
+        dedup_key    text,
+        needs        jsonb,                        -- a blocked cmd's renderable question
+        answers_id   uuid,                         -- an answer → the blocked cmd it settles
+        result       jsonb,
+        error        text,
+        actor        text,
+        run_id       uuid,
+        executed_at  timestamptz,
+        inserted_at  timestamptz NOT NULL DEFAULT now(),
+        updated_at   timestamptz NOT NULL DEFAULT now()
+      );
+
+      -- the claim reads in seq order:
+      CREATE INDEX commands_queued_seq ON commands (seq) WHERE status = 'queued';
+      -- dedup coalesces identical OPEN intents (the enqueue ON CONFLICT target):
+      CREATE UNIQUE INDEX commands_dedup_open
+        ON commands (dedup_key) WHERE status IN ('queued','running');
   """
   @behaviour ReactiveDag.Commands.Store
 
