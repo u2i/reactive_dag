@@ -181,19 +181,39 @@ defmodule ReactiveDag.Node do
     ]
   }
 
+  defmodule Compute do
+    @moduledoc """
+    The ESCAPE HATCH: declare an arbitrary recompute MODULE (a `ReactiveDag.Op`)
+    for a node whose computation the `reduce`/`join` combinators can't express —
+    an LLM call, a PDF/Tigris fetch, a bespoke multi-input recompute. `compute
+    MyApp.EventsExtract` sits in the block alongside the combinators, mirroring
+    Ash's `calculate :x, :type, MyModule` (the arbitrary case is an entity too,
+    not a schema key beside the declarative ones).
+    """
+    defstruct [:module, :__identifier__, :__spark_metadata__]
+  end
+
+  @compute %Spark.Dsl.Entity{
+    name: :compute,
+    target: Compute,
+    args: [:module],
+    describe: "Escape hatch: this node's recompute is `module` (a ReactiveDag.Op).",
+    schema: [module: [type: :atom, required: true, doc: "a module implementing ReactiveDag.Op"]]
+  }
+
   @reactive %Spark.Dsl.Section{
     name: :reactive,
     describe: "Declares this resource as a reactive-DAG node: its op + dependencies.",
-    # legs (ref/compose) are the nested form; dep is the flat form. `reduce`/`join`
-    # are the declarative combinators (else `compute:` for an arbitrary recompute).
-    entities: [@dep, @ref, @compose, @reduce, @join],
+    # Computation is declared with an ENTITY: `reduce`/`join` (declarative) or
+    # `compute Module` (the escape hatch). legs (ref/compose) are the nested
+    # dependency form; dep is the flat form.
+    entities: [@dep, @ref, @compose, @reduce, @join, @compute],
     schema: [
       id: [
         type: :atom,
         doc: "the cell id; defaults to the resource module's short name, snake_cased"
       ],
       op: [type: :atom, required: true, doc: "the op kind (free atom; the host interprets it)"],
-      compute: [type: :atom, doc: "the recompute module for this node (nil for a leaf / a `reduce`)"],
       key_rule: [
         type: {:one_of, [:identity, :all]},
         default: :identity,
@@ -330,10 +350,18 @@ defmodule ReactiveDag.Node do
       end
 
     {:op, root_id, Ext.get_opt(resource, [:reactive], :op, nil),
-     Ext.get_opt(resource, [:reactive], :compute, nil),
+     compute_module(resource),
      Ext.get_opt(resource, [:reactive], :key_rule, :identity),
      Ext.get_opt(resource, [:reactive], :leaf?, false), resource,
      legs ++ flat_refs ++ combinator_refs, extra_meta(resource)}
+  end
+
+  # the escape-hatch `compute Module` entity's module, or nil.
+  defp compute_module(resource) do
+    case Ext.get_entities(resource, [:reactive]) |> Enum.find(&match?(%Compute{}, &1)) do
+      %Compute{module: m} -> m
+      nil -> nil
+    end
   end
 
   # the node's declarative combinator entity (Reduce or Join), or nil.

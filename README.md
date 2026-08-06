@@ -74,8 +74,18 @@ result set through the coordination seam and `Op.put`s only the changed keys:
   one row per left key joined to its right (right may be absent).
 
 Anything the combinators can't express — an LLM call, a PDF/Tigris fetch, a
-bespoke multi-input recompute — uses the module escape hatch: `compute: MyOp`
-where `MyOp` implements `ReactiveDag.Op`. Both coexist on the same block.
+bespoke multi-input recompute — uses the module escape hatch, declared as an
+entity in the same block: `compute MyOp` where `MyOp` implements
+`ReactiveDag.Op`. (Mirrors Ash's `calculate :x, :type, MyModule` — the arbitrary
+case is an entity too, not a schema key beside the declarative ones.) The
+combinators and the escape hatch coexist in the block.
+
+```elixir
+reactive do
+  op :map
+  compute MyApp.Ops.EventsExtract   # arbitrary recompute (LLM, fetch, …)
+end
+```
 
 ```elixir
 # assemble + run a Node-authored graph (no host-written dispatch):
