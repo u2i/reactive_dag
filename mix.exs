@@ -16,7 +16,41 @@ defmodule ReactiveDag.MixProject do
           "three seams: recompute strategy (per-key Elixir or set-based SQL), key rule, " <>
           "and coordination writer.",
       elixirc_paths: elixirc_paths(Mix.env()),
-      deps: deps()
+      deps: deps(),
+      docs: docs()
+    ]
+  end
+
+  defp docs do
+    [
+      main: "readme",
+      extras: [
+        "README.md",
+        "docs/adr-001-reactive-dag-library.md",
+        "docs/adr-002-unified-dsl.md",
+        "docs/adr-002-dsl-sketches.md"
+      ],
+      groups_for_modules: [
+        "Authoring DSL": [
+          ReactiveDag.Graph.Dsl,
+          ReactiveDag.Dsl.Spine,
+          ReactiveDag.Dsl.Spine.Info,
+          ReactiveDag.Node
+        ],
+        Seams: [
+          ReactiveDag.Source,
+          ReactiveDag.RecomputeStrategy,
+          ReactiveDag.KeyRule,
+          ReactiveDag.CoordinationWriter
+        ],
+        Engine: [
+          ReactiveDag.Drain,
+          ReactiveDag.Graph,
+          ReactiveDag.Lowering,
+          ReactiveDag.Plan,
+          ReactiveDag.Cell
+        ]
+      ]
     ]
   end
 

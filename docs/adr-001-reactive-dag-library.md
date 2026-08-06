@@ -59,7 +59,8 @@ a dependency.
    key); the portal dispatches by `cell.op` to a SQL template. The substrate
    only decides *when/order*, never *how* — this is the SQL-vs-Elixir split.
 
-2. **`ReactiveDag.KeyRule`** — `rule(parent, child, changed) -> :all | {:keys, mapped}`.
+2. **`ReactiveDag.KeyRule`** — `rule(parent, child, changed)` returns `:all` or a
+   `{:keys, mapped}` fan-out.
    *How* a change propagates. cascade's uniform `:identity | :all` field is the
    trivial case; the portal's per-op, per-which-input rules (product/relation
    escalate to `:all` when their *fn* leg changed, pass keys when their *members*
@@ -159,7 +160,7 @@ was larger, and in exactly the places the proposal was unsure about:
 - **Node authoring: the resource IS the node (`ReactiveDag.Node`).** Beyond the
   runtime substrate, the library gained an Ash *resource extension* — a resource
   declares its op + dependencies + computation in a `reactive` block, and
-  `Node.graph/2` assembles the whole `Plan` from the node resources (the central
+  `ReactiveDag.Node.graph/2` assembles the whole `Plan` from the node resources (the central
   pipeline module dissolves onto the resources). Computation is declared with
   three combinators — `reduce` (fold), `expand` (group → many rows), `join`
   (two-input left join) — for the common map/reduce shapes, with `compute: Module`

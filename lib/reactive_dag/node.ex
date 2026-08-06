@@ -27,7 +27,7 @@ defmodule ReactiveDag.Node do
   inline sub-ops (`ref`/`compose`) can be added later; the first cut is the flat
   `depends_on` form, which covers the common case.
 
-  The whole graph is assembled by `ReactiveDag.Node.graph/1` over a list of node
+  The whole graph is assembled by `ReactiveDag.Node.graph/2` over a list of node
   resources — each contributes one cell; the union is handed to
   `ReactiveDag.Graph.build/1`. The reactive substrate never reads the resource's
   ATTRIBUTES (those are host payload); it reads only this `reactive` block.
@@ -246,7 +246,7 @@ defmodule ReactiveDag.Node do
       for_each: [
         type: :atom,
         doc:
-          "GENERATOR: expand this node per member of a named population (resolved by graph/2's member-fetcher). The template itself builds no cell; each member builds an instance `<id>.<member>`."
+          "GENERATOR: expand this node per member of a named population (resolved by the :for_each member-fetcher passed to graph). The template itself builds no cell; each member builds an instance <id>.<member>."
       ],
       over: [
         type: :atom,

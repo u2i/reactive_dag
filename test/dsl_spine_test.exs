@@ -1,0 +1,298 @@
+defmodule ReactiveDag.DslSpineTest do
+  @moduledoc """
+  The shared authoring grammar (`ReactiveDag.Dsl.Spine`): a `graph do … end` block
+  lowers to cells; the leaf↔scanner binding is validated at compile time; a domain
+  op-kind + meta survives lowering (the ADR-002 "domain via extension points"
+  prototype gate).
+  """
+  use ExUnit.Case, async: true
+
+  alias ReactiveDag.Dsl.Spine.Info
+
+  # ── shared toy scanners ─────────────────────────────────────────────────────
+  defmodule FleetScan do
+    @behaviour ReactiveDag.Source
+    @impl true
+    def id, do: :fleet_scan
+    @impl true
+    def leaf_cells(_graph), do: ["machines"]
+    @impl true
+    def poll(_opts), do: {:ok, %{changed: []}}
+  end
+
+  # ── SCENARIO 1: basic authoring lowers to the right cells ───────────────────
+  defmodule Basic do
+    use ReactiveDag.Graph.Dsl
+
+    graph do
+      source :fleet_scan, driver: FleetScan
+      observed :machines, grain: :machine, strength: :measured, fed_by: :fleet_scan
+
+      node :fleet_health do
+        op :reduce
+        meta grain: :machine
+        ref :machines
+      end
+    end
+  end
+
+  test "SCENARIO basic: source/observed/node lower; observed is a leaf; node inputs resolve" do
+    cells = Basic |> Info.cells() |> Map.new(&{&1.id, &1})
+
+    # the observed leaf
+    assert cells["machines"].leaf?
+    assert cells["machines"].op == :leaf
+    assert cells["machines"].meta.grain == :machine
+    assert cells["machines"].meta.strength == :measured
+    assert cells["machines"].meta.fed_by == :fleet_scan
+
+    # the derived node, its op-kind + meta preserved, input edge to the leaf
+    assert cells["fleet_health"].op == :reduce
+    assert cells["fleet_health"].meta.grain == :machine
+    assert cells["fleet_health"].inputs == ["machines"]
+
+    # a source is NOT a cell (it feeds a leaf; it isn't a node)
+    refute Map.has_key?(cells, "fleet_scan")
+  end
+
+  test "SCENARIO basic: sources/1 returns the declared driver modules" do
+    assert Info.sources(Basic) == [FleetScan]
+  end
+
+  test "SCENARIO basic: plan/1 builds a ReactiveDag.Plan with depths (leaf below its parent)" do
+    plan = Info.plan(Basic)
+    assert %ReactiveDag.Plan{} = plan
+    assert plan.depths["machines"] < plan.depths["fleet_health"]
+  end
+
+  # ── SCENARIO 2: fed_by must name a declared source (compile-time) ───────────
+  test "SCENARIO fed_by: an observed fed_by an UNDECLARED source fails at compile" do
+    err =
+      assert_raise Spark.Error.DslError, fn ->
+        defmodule BadFedBy do
+          use ReactiveDag.Graph.Dsl
+
+          graph do
+            source :fleet_scan, driver: FleetScan
+            # typo: :flet_scan is not declared
+            observed :machines, fed_by: :flet_scan
+          end
+        end
+      end
+
+    assert Exception.message(err) =~ "not a declared source"
+    assert Exception.message(err) =~ "flet_scan"
+  end
+
+  test "SCENARIO fed_by: an observed with NO fed_by is fine (target-only leaf)" do
+    defmodule NoFedBy do
+      use ReactiveDag.Graph.Dsl
+
+      graph do
+        observed :targets, grain: :thing
+      end
+    end
+
+    assert [%{id: "targets", leaf?: true}] = Info.cells(NoFedBy)
+  end
+
+  # ── SCENARIO 3: structural checks (dangling ref, cycle) at compile ──────────
+  test "SCENARIO structure: a node ref to a NON-EXISTENT cell fails at compile" do
+    err =
+      assert_raise Spark.Error.DslError, fn ->
+        defmodule Dangling do
+          use ReactiveDag.Graph.Dsl
+
+          graph do
+            node :derived do
+              op :reduce
+              ref :nonexistent
+            end
+          end
+        end
+      end
+
+    assert Exception.message(err) =~ "invalid reactive graph"
+  end
+
+  test "SCENARIO structure: a cycle fails at compile" do
+    assert_raise Spark.Error.DslError, ~r/invalid reactive graph/, fn ->
+      defmodule Cyclic do
+        use ReactiveDag.Graph.Dsl
+
+        graph do
+          node :a do
+            op :reduce
+            ref :b
+          end
+
+          node :b do
+            op :reduce
+            ref :a
+          end
+        end
+      end
+    end
+  end
+
+  # ── SCENARIO 4: compose nesting → intermediate cells ────────────────────────
+  defmodule Nested do
+    use ReactiveDag.Graph.Dsl
+
+    graph do
+      source :fleet_scan, driver: FleetScan
+      observed :machines, fed_by: :fleet_scan
+      node :health do
+        op :reduce
+        ref :machines
+      end
+
+      node :variance do
+        op :join
+        ref :machines
+
+        compose :fold do
+          as :rolling
+          meta window: 3
+          ref :health
+        end
+      end
+    end
+  end
+
+  test "SCENARIO compose: a nested compose becomes an intermediate cell wired as an input" do
+    cells = Nested |> Info.cells() |> Map.new(&{&1.id, &1})
+
+    # the named compose intermediate exists with its op + meta
+    assert cells["rolling"].op == :fold
+    assert cells["rolling"].meta.window == 3
+    assert cells["rolling"].inputs == ["health"]
+
+    # the parent node's inputs = the direct ref + the compose intermediate
+    assert Enum.sort(cells["variance"].inputs) == ["machines", "rolling"]
+  end
+
+  # ── SCENARIO 5: the prototype gate — a DOMAIN op-kind + rich meta survives ──
+  # This is the ADR-002 claim: a host expresses its domain (here the portal's
+  # `guarantee`) as an op-kind + meta on the shared `node`, and every domain field
+  # rides through lowering UNTOUCHED — no bespoke entity needed for the common case.
+  defmodule DomainGuarantee do
+    use ReactiveDag.Graph.Dsl
+
+    graph do
+      source :people_scan, driver: FleetScan
+      observed :active_people, grain: :person, fed_by: :people_scan
+
+      # "guarantee" is a DOMAIN op-kind (the library never interprets it); the
+      # compliance fields ride in meta. A reconcile-shaped set nests as a compose.
+      node :g_hire_screened do
+        op :guarantee
+        key_rule :all
+
+        meta claim: "every hire is screened BEFORE they start",
+             addresses: [:CC1_4],
+             shape: :queue,
+             population: :events
+
+        compose :relation do
+          as :"g_hire_screened/set"
+          meta grain: :person
+          ref :active_people
+
+          compose :leaf do
+            as :"g_hire_screened/set/screen"
+            leaf? true
+            meta grain: :person, attest_kind: "background_screen", cadence: :none
+          end
+        end
+      end
+    end
+  end
+
+  test "SCENARIO gate: a domain op-kind + rich meta lowers with every field intact" do
+    cells = DomainGuarantee |> Info.cells() |> Map.new(&{&1.id, &1})
+
+    g = cells["g_hire_screened"]
+    assert g.op == :guarantee
+    assert g.meta.claim == "every hire is screened BEFORE they start"
+    assert g.meta.addresses == [:CC1_4]
+    assert g.meta.shape == :queue
+    assert g.meta.population == :events
+    assert g.inputs == ["g_hire_screened/set"]
+
+    set = cells["g_hire_screened/set"]
+    assert set.op == :relation
+    assert set.meta.grain == :person
+    assert Enum.sort(set.inputs) == ["active_people", "g_hire_screened/set/screen"]
+
+    # the composed workflow leaf, terminal, with its domain binding
+    leaf = cells["g_hire_screened/set/screen"]
+    assert leaf.leaf?
+    assert leaf.meta.attest_kind == "background_screen"
+    assert leaf.meta.cadence == :none
+  end
+
+  test "SCENARIO gate: the whole domain graph still builds a valid Plan (depths ordered)" do
+    plan = Info.plan(DomainGuarantee)
+    # leaf below the set below the guarantee
+    assert plan.depths["active_people"] < plan.depths["g_hire_screened/set"]
+    assert plan.depths["g_hire_screened/set"] < plan.depths["g_hire_screened"]
+  end
+
+  # ── SCENARIO 6: the Source seam — verify!/2 ─────────────────────────────────
+  defmodule GoodSource do
+    @behaviour ReactiveDag.Source
+    @impl true
+    def id, do: :good
+    @impl true
+    def leaf_cells(_graph), do: ["machines"]
+    @impl true
+    def poll(_), do: {:ok, %{changed: []}}
+  end
+
+  defmodule DanglingSource do
+    @behaviour ReactiveDag.Source
+    @impl true
+    def id, do: :dangling
+    @impl true
+    def leaf_cells(_graph), do: ["no_such_cell"]
+    @impl true
+    def poll(_), do: {:ok, %{changed: []}}
+  end
+
+  defmodule FanOutSource do
+    # feeds many leaves, computed from the graph (here: every :leaf op cell)
+    @behaviour ReactiveDag.Source
+    @impl true
+    def id, do: :fanout
+    @impl true
+    def leaf_cells(graph) do
+      graph.cells |> Map.values() |> Enum.filter(& &1.leaf?) |> Enum.map(& &1.id)
+    end
+    @impl true
+    def poll(_), do: {:ok, %{changed: []}}
+  end
+
+  test "SCENARIO verify: passes when every source's leaf_cells resolve" do
+    plan = Info.plan(Basic)
+    assert :ok = ReactiveDag.Source.verify!([GoodSource], plan)
+  end
+
+  test "SCENARIO verify: raises naming the source and the dangling leaf" do
+    plan = Info.plan(Basic)
+
+    err =
+      assert_raise ArgumentError, fn ->
+        ReactiveDag.Source.verify!([DanglingSource], plan)
+      end
+
+    assert Exception.message(err) =~ "DanglingSource"
+    assert Exception.message(err) =~ "no_such_cell"
+  end
+
+  test "SCENARIO verify: a FAN-OUT source (leaf_cells computed from the graph) passes" do
+    plan = Info.plan(Basic)
+    # Basic has one leaf (machines); fan-out returns exactly the graph's leaves.
+    assert :ok = ReactiveDag.Source.verify!([FanOutSource], plan)
+  end
+end

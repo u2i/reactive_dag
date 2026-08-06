@@ -31,7 +31,9 @@ decides *how* or *what a value means*. Each host brings its domain at the seams:
 | Nested-expr lowering | `ReactiveDag.Lowering` | `walk/3` — the nested op-expression → flat-cell recursion both DSLs grew, parameterized by host callbacks (id grammar, ref resolution, cell construction). |
 | Compile pipeline | `ReactiveDag.Dsl` | `compile / validate_cells` — resolve → structural-validate, with a domain-validation hook. |
 | Op contract | `ReactiveDag.Op` | the behaviour a cell's compute module implements (`recompute(cell, keys) -> {:ok, changed}`) + the write API ops call (`put / tombstone / delete`, routed to the `CoordinationWriter`). |
-| **Node authoring** | `ReactiveDag.Node` | an **Ash resource extension**: a resource declares its own op + dependencies + computation in a `reactive do … end` block — the resource *is* the node. `ReactiveDag.Node.graph/2` assembles the whole `Plan` from the node resources. See below. |
+| **Graph authoring** | `ReactiveDag.Graph.Dsl` / `ReactiveDag.Dsl.Spine` | the **shared graph-level DSL**: one `graph do … end` block declares scanners (`source`), source-fed leaves (`observed`), and derived nodes (`node`/`ref`/`compose`) — the whole DAG in one module. `op` is an open atom; domain fields ride in `meta`. See "Authoring a graph" below. |
+| **Node authoring** | `ReactiveDag.Node` | an **Ash resource extension** (the per-resource alternative): a resource declares its own op + dependencies + computation in a `reactive do … end` block — the resource *is* the node. `ReactiveDag.Node.graph/2` assembles the whole `Plan` from the node resources. |
+| **Scanner seam** | `ReactiveDag.Source` | the behaviour a scanner implements (`id / leaf_cells / poll`) — reads external state into a leaf in a *poll* phase outside the drain; `verify!/2` checks every declared leaf resolves to a real cell. |
 
 The host owns its **physical tables** (dirty + tuple, named via config), its
 **op algebra**, its **recompute executor**, and any **extension columns** on the
@@ -39,7 +41,78 @@ tuple (the portal's `strength` modality, cascade's tombstone/fingerprint
 policy). The library owns the spine and the schedule; the domain differences sit
 on named seams, not forks.
 
-## Authoring a node
+## Authoring a graph
+
+The primary surface is one **graph-level DSL** (`ReactiveDag.Graph.Dsl`, backed by
+the `ReactiveDag.Dsl.Spine` extension): a single module declares the whole DAG —
+the scanners that feed it, the source-fed leaves, and the derived nodes over them.
+
+```elixir
+defmodule MyApp.Pipeline do
+  use ReactiveDag.Graph.Dsl
+
+  graph do
+    # a SCANNER — reads external state into a leaf, out-of-band (phase-1 poll,
+    # NOT a drain op). `driver` must implement `ReactiveDag.Source`, checked at
+    # compile time.
+    source :fleet_scan, driver: MyApp.Sources.FleetScan
+
+    # a source-fed LEAF — the substrate a scanner writes. `fed_by` names a declared
+    # `source`; an unknown id fails the build (compile-time leaf↔scanner check).
+    observed :machines, grain: :machine, strength: :measured, fed_by: :fleet_scan
+
+    # a derived NODE — an op over input cells. Options are set INSIDE the block
+    # (like Ash's `attributes do attribute … end`). `op` is an OPEN atom: the
+    # library schedules the graph; the host's recompute interprets the op-kind.
+    node :fleet_health do
+      op :reduce
+      meta grain: :machine     # open host binding; the library never reads it
+      ref :machines            # an input edge (by name)
+    end
+
+    # nested COMPOSE — an anonymous intermediate op-expression, so the algebra
+    # reads as a tree rather than a pile of named nodes.
+    node :variance do
+      op :join
+      ref :machines
+
+      compose :fold do
+        as :rolling
+        ref :fleet_health
+      end
+    end
+  end
+end
+```
+
+Introspect + run it:
+
+```elixir
+plan    = ReactiveDag.Dsl.Spine.Info.plan(MyApp.Pipeline)     # → %ReactiveDag.Plan{}
+sources = ReactiveDag.Dsl.Spine.Info.sources(MyApp.Pipeline)  # → [driver modules]
+
+# poll (phase 1): each source writes its leaf, out-of-band.
+# then verify the leaf↔scanner binding against the built graph:
+:ok = ReactiveDag.Source.verify!(sources, plan)
+
+# drain (phase 2): the engine recomputes downstream from the dirty frontier.
+{:ok, _passes} = ReactiveDag.Drain.run(plan, recompute: MyApp.Recompute, key_rule: MyApp.KeyRule)
+```
+
+**What's checked at compile time:** `driver` implements `ReactiveDag.Source`
+(`{:behaviour, _}`); every `observed.fed_by` names a declared `source`; the graph
+is structurally sound (refs resolve, ids unique, acyclic). A typo fails the build
+with a located `Spark.Error.DslError`, not a silent dead edge.
+
+**Domain vocabulary** lives on the open `op` atom + `meta:` — a compliance host
+writes `node :g, do: (op :guarantee; meta claim: "…", addresses: [:CC6_1])`, a
+pipeline host `node :d, do: (op :map; meta compute: MyOp)`. A host that wants
+*typed* domain fields (compile-checked `{:one_of}` enums, cross-referenced id
+lists) composes its own Spark entities alongside the spine — see
+[docs/adr-002-unified-dsl.md](docs/adr-002-unified-dsl.md) and the worked
+before/after in [docs/adr-002-dsl-sketches.md](docs/adr-002-dsl-sketches.md).
+
+## Authoring a node (per-resource)
 
 A node is an Ash resource with the `ReactiveDag.Node` extension; its `reactive`
 block declares the op, its dependencies, and *how it computes* — the resource
