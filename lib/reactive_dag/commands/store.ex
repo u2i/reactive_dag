@@ -25,6 +25,13 @@ defmodule ReactiveDag.Commands.Store do
   @doc "Set a command's terminal status + fields (`result`/`needs`/`error`)."
   @callback settle(id :: String.t(), status :: String.t(), fields :: keyword()) :: :ok
 
+  @doc """
+  All OUTSTANDING commands — those not yet applied (`queued` / `running` /
+  `blocked`), in `seq` order. The overlay source for pending-aware reads
+  (`ReactiveDag.Commands.pending_effects/0`).
+  """
+  @callback outstanding() :: [command()]
+
   @doc "The configured store module (default: the Postgres store)."
   @spec impl() :: module()
   def impl, do: Application.get_env(:reactive_dag, :commands_store, ReactiveDag.Commands.Store.Postgres)

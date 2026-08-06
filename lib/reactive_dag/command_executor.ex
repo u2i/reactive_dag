@@ -41,4 +41,27 @@ defmodule ReactiveDag.CommandExecutor do
 
   @doc "Apply one command. Runs inside the processor's per-command transaction."
   @callback execute(command(), ctx()) :: outcome()
+
+  @typedoc """
+  A command's ANTICIPATED effect on the coordination tuple — which `(cell_id, key)`
+  it will set and to what `status` — used to overlay outstanding commands onto a
+  read (see `ReactiveDag.Commands.pending_effects/0`). This is the inverse of
+  `execute`, at the coordination grain: what the intent *will* do, before it runs.
+  """
+  @type effect :: %{
+          required(:cell_id) => String.t(),
+          required(:key) => String.t(),
+          required(:status) => String.t()
+        }
+
+  @doc """
+  OPTIONAL: the coordination effects a still-QUEUED/BLOCKED command anticipates —
+  what a "world as it will be once the queue drains" read should reflect. Only the
+  executor knows what its kind of intent means, so only it can project. An executor
+  that omits `project/1` contributes no overlay (its outstanding commands are
+  invisible to pending-aware reads).
+  """
+  @callback project(command()) :: [effect()]
+
+  @optional_callbacks project: 1
 end

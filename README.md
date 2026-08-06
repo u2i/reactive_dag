@@ -205,6 +205,15 @@ tuple — claimed, not authored). The lib ships no display; a host that wants a
 "pending commands" LiveView adds its own read-only resource over the table, just
 as it would over the dirty-key frontier.
 
+**Pending-aware reads.** A query can reflect outstanding commands — *the world as
+it will be once the queue drains*. Since a command's meaning is opaque to the lib,
+an executor optionally implements `project/1` (what coordination effect its queued
+intent anticipates); `ReactiveDag.Commands.overlay/2` then folds outstanding
+commands onto a committed `%{key => status}` base, returning the anticipated status
+per key plus the in-flight commands driving it. Reading an approval-gated verdict
+can thus show `failing → (pending: will-pass)` because an `approve` is queued —
+composes with `Verdict.rollup/2`, and the overlay is a view, never a write.
+
 Status: **both hosts run on the substrate** — the shared engine spans a per-key
 Elixir recompute (cascade) and a set-based SQL recompute (the portal), all
 coordination writes routed through the seam, proven by both suites green. Cascade

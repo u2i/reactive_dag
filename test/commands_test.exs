@@ -95,6 +95,11 @@ defmodule ReactiveDag.CommandsTest do
       :ok
     end
 
+    @impl true
+    def outstanding do
+      all() |> Enum.filter(&(&1["status"] in ~w(queued running blocked))) |> Enum.sort_by(& &1["seq"])
+    end
+
     defp replace(cmds, updated), do: Enum.map(cmds, &if(&1["id"] == updated["id"], do: updated, else: &1))
   end
 
@@ -107,6 +112,10 @@ defmodule ReactiveDag.CommandsTest do
       send(ReactiveDag.CommandsTest, {:approved, cmd["payload"]["thing"]})
       {:done, %{"approved" => cmd["payload"]["thing"]}}
     end
+
+    @impl true
+    # anticipated effect: an approve for `thing` will set (approvals, thing) present.
+    def project(cmd), do: [%{cell_id: "approvals", key: cmd["payload"]["thing"], status: "present"}]
   end
 
   defmodule NeedsHumanExec do
@@ -225,5 +234,47 @@ defmodule ReactiveDag.CommandsTest do
     ReactiveDag.Commands.enqueue!(%{kind: "approve", scope: "d", dedup_key: "k1", payload: %{"thing" => "once"}})
 
     assert length(MemStore.all()) == 1
+  end
+
+  # ── pending-aware reads (optimistic overlay) ────────────────────────────────
+
+  test "pending_effects projects outstanding commands via the executor's project/1" do
+    ReactiveDag.Commands.enqueue!(%{kind: "approve", scope: "a", payload: %{"thing" => "store-1"}})
+    # a kind with an executor that has NO project/1 → invisible to the overlay
+    ReactiveDag.Commands.enqueue!(%{kind: "needs_human", scope: "n"})
+
+    effects = ReactiveDag.Commands.pending_effects()
+
+    # only the projectable approve shows up
+    assert [%{cell_id: "approvals", key: "store-1", status: "present", command_id: _}] = effects
+  end
+
+  test "overlay: a read reflects committed state + anticipated pending mods" do
+    # committed base: store-1 failing, store-2 failing (from the tuple)
+    base = %{"store-1" => "failing", "store-2" => "failing"}
+
+    # an approve for store-1 is queued → the read should anticipate store-1 present
+    ReactiveDag.Commands.enqueue!(%{kind: "approve", scope: "a", payload: %{"thing" => "store-1"}})
+
+    overlaid = ReactiveDag.Commands.overlay("approvals", base)
+
+    # store-1: anticipated present, with the pending command attached
+    assert overlaid["store-1"].status == "present"
+    assert [%{status: "present"}] = overlaid["store-1"].pending
+
+    # store-2: no outstanding command → committed value, no pending
+    assert overlaid["store-2"] == %{status: "failing", pending: []}
+  end
+
+  test "overlay: later command wins on a (cell,key) collision" do
+    ReactiveDag.Commands.enqueue!(%{kind: "approve", scope: "a", payload: %{"thing" => "store-1"}})
+    # a second, later approve for the SAME key (different scope so both stay open)
+    ReactiveDag.Commands.enqueue!(%{kind: "answer", scope: "b", payload: %{"thing" => "store-1"}})
+
+    overlaid = ReactiveDag.Commands.overlay("approvals", %{"store-1" => "failing"})
+
+    # both are present-projecting; both listed, anticipated status is present
+    assert overlaid["store-1"].status == "present"
+    assert length(overlaid["store-1"].pending) == 2
   end
 end

@@ -115,6 +115,30 @@ defmodule ReactiveDag.Commands.Store.Postgres do
     :ok
   end
 
+  @impl true
+  def outstanding do
+    %{rows: rows} =
+      repo().query!(
+        """
+        SELECT id, kind, scope, payload, dedup_key, actor, answers_id
+        FROM #{table()} WHERE status IN ('queued','running','blocked') ORDER BY seq
+        """,
+        []
+      )
+
+    Enum.map(rows, fn [id, kind, scope, payload, dedup_key, actor, answers_id] ->
+      %{
+        "id" => Ecto.UUID.cast!(id),
+        "kind" => kind,
+        "scope" => scope,
+        "payload" => payload,
+        "dedup_key" => dedup_key,
+        "actor" => actor,
+        "answers_id" => answers_id && Ecto.UUID.cast!(answers_id)
+      }
+    end)
+  end
+
   defp repo do
     Application.get_env(:reactive_dag, :repo) ||
       raise "reactive_dag: set `config :reactive_dag, repo: MyApp.Repo`"

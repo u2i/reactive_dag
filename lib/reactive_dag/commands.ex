@@ -20,6 +20,23 @@ defmodule ReactiveDag.Commands do
   territory (a host may put its own read-only Ash resource over the table for a
   LiveView — the lib ships none, just as it ships none for the dirty-key frontier).
 
+  ## Pending-aware reads (optimistic overlay)
+
+  A read can reflect **outstanding** commands — "the world as it will be once the
+  queue drains" — via `overlay/2`. Because a command's meaning is opaque to the
+  lib, each executor optionally implements `c:ReactiveDag.CommandExecutor.project/1`,
+  declaring the coordination effect its still-queued intent anticipates
+  (`{cell_id, key, status}`). `overlay/2` folds those onto a committed
+  `%{key => status}` base (e.g. from `ReactiveDag.Tuple`):
+
+      base     = ReactiveDag.Tuple.keys_by_status("approvals", ~w(present failing))  # committed
+      overlaid = ReactiveDag.Commands.overlay("approvals", base)
+      # overlaid[key] => %{status: anticipated, pending: [outstanding commands]}
+
+  This composes with a verdict rollup (feed the overlaid statuses to
+  `ReactiveDag.Verdict.rollup/2`) without the read layer depending on the command
+  layer — the overlay is a view, never a write.
+
   ## Seams
 
     * `config :reactive_dag, command_executors: %{kind => module}` — the
@@ -144,6 +161,52 @@ defmodule ReactiveDag.Commands do
 
   defp claim(run_id), do: store().claim(run_id, freeze_exempt())
   defp set_status!(id, status, fields), do: store().settle(id, status, fields)
+
+  # ── pending-aware reads (optimistic overlay) ────────────────────────────────
+
+  @doc """
+  The anticipated coordination effects of every OUTSTANDING command — each command
+  projected via its executor's optional `project/1` — as
+  `[%{cell_id, key, status, command_id}]`, in `seq` order. Commands whose kind has
+  no executor, or whose executor omits `project/1`, contribute nothing (their intent
+  is opaque to a pending-aware read). Later commands in `seq` order win on a
+  `(cell_id, key)` collision (the queue would apply them last).
+  """
+  @spec pending_effects() :: [%{cell_id: String.t(), key: String.t(), status: String.t(), command_id: String.t()}]
+  def pending_effects do
+    for cmd <- store().outstanding(),
+        mod = Map.get(executors(), cmd["kind"]),
+        is_atom(mod) and function_exported?(mod, :project, 1),
+        eff <- mod.project(cmd) do
+      %{cell_id: eff.cell_id, key: eff.key, status: eff.status, command_id: cmd["id"]}
+    end
+  end
+
+  @doc """
+  Overlay outstanding commands onto a base per-key status map for one cell — the
+  "world as it will be once the queue drains" view. `base` is `%{key => status}`
+  (e.g. from `ReactiveDag.Tuple`); returns `%{key => %{status:, pending: [...]}}`
+  where `status` is the ANTICIPATED status (base, or the last pending effect's) and
+  `pending` lists the outstanding commands that will touch this key. Keys with no
+  outstanding command keep their base status and `pending: []`.
+  """
+  @spec overlay(String.t(), %{String.t() => String.t()}) ::
+          %{String.t() => %{status: String.t(), pending: [map()]}}
+  def overlay(cell_id, base) do
+    effects =
+      pending_effects()
+      |> Enum.filter(&(&1.cell_id == cell_id))
+      |> Enum.group_by(& &1.key)
+
+    keys = Map.keys(base) ++ Map.keys(effects)
+
+    Map.new(Enum.uniq(keys), fn key ->
+      pend = Map.get(effects, key, [])
+      # the anticipated status: the last pending effect wins, else the committed base.
+      status = if pend == [], do: Map.get(base, key), else: List.last(pend).status
+      {key, %{status: status, pending: Enum.map(pend, &Map.take(&1, [:command_id, :status]))}}
+    end)
+  end
 
   # ── config ──────────────────────────────────────────────────────────────────
   defp store, do: ReactiveDag.Commands.Store.impl()
