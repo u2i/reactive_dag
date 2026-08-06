@@ -29,4 +29,29 @@ defmodule ReactiveDag.Op do
   always correct, just less efficient.
   """
   @callback recompute(cell :: Cell.t(), keys :: [key()]) :: {:ok, [key()]}
+
+  # ── the coordination-write API ops call ────────────────────────────────────
+  # An op writes its PAYLOAD however it likes (its typed resource — host domain),
+  # then records each key's coordination verdict through these, which route to
+  # the host-configured `ReactiveDag.CoordinationWriter`. This replaces ops
+  # reaching into a host `Frontier.put_tuple` directly: the cell carries its id,
+  # so there's no per-op `@cell` module attribute, and the extension-column write
+  # stays host policy behind the writer seam.
+
+  alias ReactiveDag.CoordinationWriter, as: W
+
+  @doc "Mark `key` of `cell` present (opts carry host fields: source_ref, strength, …)."
+  @spec put(Cell.t(), key(), keyword()) :: :ok
+  def put(%Cell{} = cell, key, opts \\ []), do: W.writer().put(cell, key, opts)
+
+  @doc "Tombstone `keys` of `cell` (retain-if-vanish, if the writer supports it; else delete)."
+  @spec tombstone(Cell.t(), [key()]) :: :ok
+  def tombstone(%Cell{} = cell, keys) do
+    w = W.writer()
+    if function_exported?(w, :tombstone, 2), do: w.tombstone(cell, keys), else: w.delete(cell, keys)
+  end
+
+  @doc "Hard-delete `keys` of `cell`."
+  @spec delete(Cell.t(), [key()]) :: :ok
+  def delete(%Cell{} = cell, keys), do: W.writer().delete(cell, keys)
 end
