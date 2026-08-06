@@ -1,6 +1,6 @@
 defmodule ReactiveDag.VerdictNodeTest do
   @moduledoc """
-  A VERDICT-only node (`verdict true`): its computed result lives in the
+  A VERDICT-only node (`verdict? true`): its computed result lives in the
   coordination tuple (status/strength), with NO payload table of its own. A
   `reduce`/`join` on it writes each row's status/strength straight into the tuple
   via `Op.put` — no resource, no `upsert:`, no attributes. This is the "purely
@@ -29,7 +29,7 @@ defmodule ReactiveDag.VerdictNodeTest do
   end
 
   # THE VERDICT NODE: no data_layer table, no attributes, no upsert. A reconcile
-  # that emits a per-key status. `verdict true` = the result IS the tuple row.
+  # that emits a per-key status. `verdict? true` = the result IS the tuple row.
   defmodule StoreEncrypted do
     use Ash.Resource, domain: Domain, data_layer: Ash.DataLayer.Simple, extensions: [ReactiveDag.Node]
 
@@ -37,7 +37,7 @@ defmodule ReactiveDag.VerdictNodeTest do
       id :store_encrypted
       op :reconcile
       key_rule :all
-      verdict true
+      verdict? true
 
       # a toy "reconcile": declared stores vs observed-encrypted — a store missing
       # from the observed set is `failing`, else `present`. Emits status per key.
@@ -86,8 +86,32 @@ defmodule ReactiveDag.VerdictNodeTest do
   test "a verdict node needs NO resource, NO upsert, NO attributes — it doesn't raise" do
     cell = ReactiveDag.Node.to_cell(StoreEncrypted)
     # the reduce has no upsert: and the node has no backing resource; without
-    # `verdict true` this would raise. It doesn't, because verdict is intentional.
+    # `verdict? true` this would raise. It doesn't, because verdict is intentional.
     assert cell.meta.reduce.upsert == nil
     assert {:ok, _} = Recompute.recompute(cell, ["*"])
+  end
+
+  test "a verdict? node that ALSO declares payload attributes raises (the half-state)" do
+    # verdict? nodes store nothing but the tuple — payload attributes would be
+    # silently dropped, so the library refuses at lowering time.
+    assert_raise RuntimeError, ~r/declares payload attribute/, fn ->
+      defmodule BadVerdict do
+        use Ash.Resource, domain: Domain, data_layer: Ash.DataLayer.Ets, extensions: [ReactiveDag.Node]
+        ets do private?(true) end
+
+        attributes do
+          attribute :key, :string, primary_key?: true, allow_nil?: false, public?: true
+          attribute :avg, :float, public?: true            # ← payload on a verdict node
+        end
+
+        reactive do
+          op :fold
+          verdict? true
+          reduce over: :x, read: fn _ -> [] end, group_by: & &1, key: &"#{&1}", into: fn _, _ -> %{} end
+        end
+      end
+
+      ReactiveDag.Node.to_cell(BadVerdict)
+    end
   end
 end

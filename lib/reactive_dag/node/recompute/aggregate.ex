@@ -1,4 +1,4 @@
-defmodule ReactiveDag.Node.AggregateRun do
+defmodule ReactiveDag.Node.Recompute.Aggregate do
   @moduledoc """
   Runs a pure-Ash-query `aggregate` node: the datastore groups + aggregates the
   node's `over` relationship in ONE query (a relationship aggregate — Postgres does

@@ -22,7 +22,7 @@ decides *how* or *what a value means*. Each host brings its domain at the seams:
 
 | Layer | Module | What it provides |
 |---|---|---|
-| Node IR | `ReactiveDag.Cell` | domain-neutral node; `op` is a **free atom** the library never interprets; app fields ride in `meta` (with an `Access` impl so `cell[:field]` reads meta transparently). |
+| Node IR | `ReactiveDag.Cell` | domain-neutral node; `op` is an **optional free-atom label** (load-bearing only for an op-dispatching `RecomputeStrategy` like `SetOp`); app fields ride in `meta` (with an `Access` impl so `cell[:field]` reads meta transparently). |
 | Compiled plan | `ReactiveDag.Plan` | pure data: `cells / parents / depths`. |
 | Graph math | `ReactiveDag.Graph` | `build/1` (validate + parent edges + longest-path depths + cycle check); `dirty_parents/4` (propagation via the host `KeyRule`). |
 | Dirty frontier | `ReactiveDag.Frontier` | claim-as-delete over the host's dirty table; `mark_dirty / next_cell / claim / empty?`. |
@@ -32,7 +32,7 @@ decides *how* or *what a value means*. Each host brings its domain at the seams:
 | Compile pipeline | `ReactiveDag.Dsl` | `compile / validate_cells` — resolve → structural-validate, with a domain-validation hook. |
 | Op contract | `ReactiveDag.Op` | the behaviour a cell's compute module implements (`recompute(cell, keys) -> {:ok, changed}`) + the write API ops call (`put / tombstone / delete`, routed to the `CoordinationWriter`). |
 | **Node authoring** | `ReactiveDag.Node` | the authoring surface — an **Ash resource extension**: a resource declares its op + dependencies + computation in a `reactive do … end` block. The resource *is* the node **and** its own payload table. `ReactiveDag.Node.graph/2` assembles the `Plan` from the node resources. |
-| **Payload loop** | `ReactiveDag.Node.Payload` | writes a combinator's row into the node's own resource (the default; omit `upsert:`). A `verdict true` node stores nothing of its own — its result is the coordination tuple. |
+| **Payload loop** | `ReactiveDag.Node.Payload` | writes a combinator's row into the node's own resource (the default; omit `upsert:`). A `verdict? true` node stores nothing of its own — its result is the coordination tuple. |
 | **Scanner seam** | `ReactiveDag.Source` | the behaviour a scanner implements (`id / leaf_cells / poll`) — reads external state into a leaf in a *poll* phase outside the drain; `verify!/2` checks every declared leaf resolves to a real cell. |
 
 The host owns its **physical tables** (dirty + tuple, named via config), its
@@ -146,7 +146,7 @@ defmodule MyApp.StoreEncrypted do
   reactive do
     op :reconcile
     key_rule :all
-    verdict true                       # result lives in the tuple, not a table
+    verdict? true                       # result lives in the tuple, not a table
     reduce over: :stores,
            read: …, group_by: …, key: …,
            into: fn store, [r | _] -> %{key: store, status: (if r.enc, do: "present", else: "failing")} end

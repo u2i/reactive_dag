@@ -32,7 +32,7 @@ defmodule ReactiveDag.MixProject do
         Authoring: [
           ReactiveDag.Node,
           ReactiveDag.Node.Payload,
-          ReactiveDag.Node.AggregateRun
+          ReactiveDag.Node.Recompute.Aggregate
         ],
         Seams: [
           ReactiveDag.Source,

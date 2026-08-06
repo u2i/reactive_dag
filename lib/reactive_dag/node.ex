@@ -43,19 +43,61 @@ defmodule ReactiveDag.Node do
   the `payload_action` upsert (default `:upsert`); set those in the `reactive`
   block if they're named otherwise.
 
-  ## Variations
+  ## Which computation? (reduce / join / aggregate / compute)
 
-  * **Tableless node** (no payload of its own — a pure combinator or a verdict):
-    use `data_layer: Ash.DataLayer.Simple`, add no attributes, and either supply an
-    `upsert:` (write elsewhere) or a `compute Module` escape hatch.
-  * **Escape hatch** (`compute MyOp`, a `ReactiveDag.Op`): for recompute the
-    combinators can't express (an LLM call, a fetch, a bespoke multi-input join).
-  * **Nested composition** (`ref`/`compose`): the algebra reads as an expression
-    tree; `depends_on [:a, :b]` is the flat input-edge form.
+  | you want to… | use | rows into BEAM? | needs |
+  |---|---|---|---|
+  | fold one input's rows into per-group summaries | `reduce` | all of `over` | a `read`/`group_by`/`into` |
+  | same, but one group → many output rows | `reduce` (`into` returns a list) | all of `over` | list rows carry own `:key` |
+  | left-join two inputs by key | `join` | all of `over` | `left`/`right`/`into` |
+  | group + `avg`/`sum`/`count` a relationship | `aggregate` | **none** (datastore GROUP BY) | a `has_many` on this resource |
+  | anything else (LLM, fetch, bespoke) | `compute Mod` | up to the module | a `ReactiveDag.Op` |
 
-  The whole graph is assembled by `ReactiveDag.Node.graph/2` over a list of node
-  resources. The substrate reads only the `reactive` block for the graph; the
-  resource's attributes are the payload the node writes.
+  Rule of thumb: `aggregate` when the fold is a datastore aggregate over a
+  relationship (pushdown, no rows in memory); `reduce` for any other in-BEAM fold;
+  `compute` when no combinator fits.
+
+  ## Node shapes (what scaffolding a node needs)
+
+  | shape | data_layer | attributes | actions | `reactive` |
+  |---|---|---|---|---|
+  | **payload** (materializes typed rows) | AshPostgres/Ets | the payload columns | an `:upsert` action | a combinator, no `upsert:` |
+  | **verdict** (`verdict? true`) | `Ash.DataLayer.Simple` | none | none | a combinator; rows carry `:status` |
+  | **write-elsewhere** | Simple | none | none | a combinator + a custom `upsert:` |
+  | **escape hatch** | Simple | none | none | `compute Mod` |
+
+  A payload node's `into` row is written into the resource itself (the payload
+  loop, `ReactiveDag.Node.Payload`); the cell key maps to the `payload_key`
+  attribute (default `:key`) via the `payload_action` upsert (default `:upsert`).
+
+  ## Cell ids (the vocabulary of every edge)
+
+  A node's cell id defaults to the resource module's short name, snake-cased
+  (`MyApp.FlowMonth` → `:flow_month`); set `id:` to override. **This id is what
+  every edge names** — `depends_on [:flow_month]`, `ref :flow_month`, and the ids
+  passed to `graph/2`. If an edge doesn't resolve, it's almost always an id that
+  doesn't match a node's (defaulted or explicit) id.
+
+  ## Assembling + running
+
+  `ReactiveDag.Node.graph/2` builds a `ReactiveDag.Plan` from a list of node
+  resources; the substrate reads only the `reactive` block. Then:
+
+      plan = ReactiveDag.Node.graph([FlowMonth, FiscalLines, …], for_each: &fetch/1)
+      ReactiveDag.Drain.run(plan,
+        recompute: ReactiveDag.Node.Recompute,
+        key_rule:  ReactiveDag.Node.KeyRule)
+
+  ## Config
+
+      config :reactive_dag,
+        repo:                MyApp.Repo,        # REQUIRED (raises if unset)
+        tuple_table:         "my_tuple",        # coordination spine table (must match your migration)
+        dirty_table:         "my_dirty",        # frontier table (must match your migration)
+        coordination_writer: MyApp.Writer       # optional; a spine-only default ships
+
+  `tuple_table`/`dirty_table` default silently, so a name that doesn't match your
+  migration yields empty results with no error — set them explicitly.
   """
 
   defmodule Ref do
@@ -319,11 +361,11 @@ defmodule ReactiveDag.Node do
         default: :upsert,
         doc: "the Ash upsert action used to write the node's own payload (default `:upsert`)."
       ],
-      verdict: [
+      verdict?: [
         type: :boolean,
         default: false,
         doc:
-          "VERDICT-ONLY node: its computed result lives entirely in the coordination tuple (`status`/`strength`), with NO payload table of its own. A `reduce`/`join` on a verdict node writes each row's `:status`/`:strength` straight into the tuple via `Op.put` — no resource, no `upsert:`, no attributes needed. Use for nodes whose output fits the tuple's fixed schema (e.g. a compliance verdict), as opposed to nodes that materialize typed rows."
+          "VERDICT-ONLY node (named `verdict?` to match `leaf?`): its computed result lives entirely in the coordination tuple (`status`/`strength`), with NO payload table of its own. A `reduce`/`join` on a verdict node writes each row's `:status`/`:strength` straight into the tuple via `Op.put` — no resource, no `upsert:`, no attributes needed. Use for nodes whose output fits the tuple's fixed schema (e.g. a compliance verdict), as opposed to nodes that materialize typed rows. (Distinct from `ReactiveDag.Verdict`, the read-side status rollup.)"
       ],
       source: [
         type: :atom,
@@ -483,9 +525,36 @@ defmodule ReactiveDag.Node do
   end
 
   # `true` when the node is verdict-only, else nil (so it's dropped from meta and
-  # `meta[:verdict]` stays falsy for the common payload-bearing case).
+  # `meta[:verdict]` stays falsy for the common payload-bearing case). Guards the
+  # half-state: a verdict node stores nothing but the tuple, so declaring payload
+  # attributes on it is a mistake (the verdict write ignores them) — raise rather
+  # than silently drop the columns.
   defp verdict_flag(resource) do
-    if Ext.get_opt(resource, [:reactive], :verdict, false), do: true, else: nil
+    if Ext.get_opt(resource, [:reactive], :verdict?, false) do
+      case payload_attributes(resource) do
+        [] ->
+          true
+
+        extra ->
+          raise """
+          reactive_dag: node #{inspect(resource)} is `verdict? true` but declares \
+          payload attribute(s) #{inspect(extra)}. A verdict node's result lives in \
+          the coordination tuple — those attributes would never be written. Drop \
+          them (use `data_layer: Ash.DataLayer.Simple`, no attributes), or remove \
+          `verdict?` to make it a payload node.
+          """
+      end
+    else
+      nil
+    end
+  end
+
+  # public, non-primary-key attributes — the payload columns a verdict node must not have.
+  defp payload_attributes(resource) do
+    resource
+    |> Ash.Resource.Info.public_attributes()
+    |> Enum.reject(& &1.primary_key?)
+    |> Enum.map(& &1.name)
   end
 
   # the OPEN host binding folded into a cell's meta: the `meta:` keyword list, the

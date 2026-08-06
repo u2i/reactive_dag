@@ -27,10 +27,10 @@ defmodule ReactiveDag.Node.Recompute do
   @impl true
   def recompute(%Cell{leaf?: true}, keys), do: {:ok, keys}
 
-  # a declarative REDUCE/EXPAND combinator — read `over` → group_by → into each
-  # group. `into` returns ONE row (a fold) or a LIST of rows (an expand: group →
-  # many). Each row's key comes from `key.(group)` for a fold, or from the row
-  # itself for an expand (see key resolution in rows_with_keys/3).
+  # a declarative REDUCE combinator — read `over` → group_by → into each group.
+  # `into` returns ONE row (a fold) or a LIST of rows (a group → many "expand").
+  # A single row's key comes from `key.(group)`; list rows must carry their own
+  # `:key` (see key resolution in rows_with_keys/3).
   def recompute(%Cell{meta: %{reduce: %{} = r}} = cell, _keys) do
     pairs =
       r.read.(r.over)
@@ -66,7 +66,7 @@ defmodule ReactiveDag.Node.Recompute do
   # scoping), so the changed set is every group whose aggregate value moved.
   def recompute(%Cell{meta: %{aggregate: %{} = agg, resource: resource}} = cell, _keys)
       when not is_nil(resource) do
-    {:ok, ReactiveDag.Node.AggregateRun.recompute(cell, resource, agg)}
+    {:ok, ReactiveDag.Node.Recompute.Aggregate.recompute(cell, resource, agg)}
   end
 
   def recompute(%Cell{meta: %{compute: nil}, id: id}, keys) do
@@ -106,7 +106,7 @@ defmodule ReactiveDag.Node.Recompute do
 
   # write each {key, row}, Op.put the changed keys, return them. Shared by
   # reduce/expand + join. Three write modes, in precedence order:
-  #   * VERDICT node (`verdict true`) — no payload; the row's `:status`/`:strength`
+  #   * VERDICT node (`verdict? true`) — no payload; the row's `:status`/`:strength`
   #     go straight into the tuple (Op.put opts). The result IS the coordination row.
   #   * host `upsert:` callback (override) — `(key, row) -> changed?`.
   #   * the LIB closing the loop into the node's OWN resource (`meta.resource`).
@@ -148,8 +148,8 @@ defmodule ReactiveDag.Node.Recompute do
       nil ->
         raise """
         reactive_dag: node #{inspect(id)} has a reduce/join with no `upsert:`, no
-        backing resource, and is not `verdict true`. Either give the node an
-        AshPostgres resource (its rows ARE its payload), mark it `verdict true` (its
+        backing resource, and is not `verdict? true`. Either give the node an
+        AshPostgres resource (its rows ARE its payload), mark it `verdict? true` (its
         result lives in the coordination tuple), or supply an explicit `upsert:`.
         """
 
