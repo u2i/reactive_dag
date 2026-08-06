@@ -25,9 +25,8 @@ defmodule ReactiveDag.DslSpineTest do
     use ReactiveDag.Graph.Dsl
 
     graph do
-      # an observed leaf declares only its shape — no scanner ref. Which scanner
-      # feeds it is the driver's business (its leaf_cells/1 names this cell).
-      observed :machines, grain: :machine, strength: :measured
+      # the common 1:1 case — leaf + its scanner in ONE declaration.
+      observed :machines, grain: :machine, strength: :measured, scan: FleetScan
 
       node :fleet_health do
         op :reduce
@@ -37,14 +36,15 @@ defmodule ReactiveDag.DslSpineTest do
     end
   end
 
-  test "SCENARIO basic: observed/node lower; observed is a leaf; node inputs resolve" do
+  test "SCENARIO basic: observed/node lower; observed is a leaf carrying its scanner" do
     cells = Basic |> Info.cells() |> Map.new(&{&1.id, &1})
 
-    # the observed leaf — shape only, no scanner binding on the cell
+    # the observed leaf — shape + the inline scanner binding
     assert cells["machines"].leaf?
     assert cells["machines"].op == :leaf
     assert cells["machines"].meta.grain == :machine
     assert cells["machines"].meta.strength == :measured
+    assert cells["machines"].meta.scan == FleetScan
 
     # the derived node, its op-kind + meta preserved, input edge to the leaf
     assert cells["fleet_health"].op == :reduce
@@ -58,8 +58,29 @@ defmodule ReactiveDag.DslSpineTest do
     assert plan.depths["machines"] < plan.depths["fleet_health"]
   end
 
-  # ── SCENARIO 2: an observed is a plain leaf (no scanner authored in the graph) ─
-  test "SCENARIO leaf: an observed lowers to a terminal leaf cell, scanner-agnostic" do
+  # ── SCENARIO 1b: inline scanners are discoverable (Info.scanners + Source.drivers) ─
+  test "SCENARIO scanner: inline `scan:` drivers are discovered from the graph" do
+    # from the DSL module
+    assert Info.scanners(Basic) == [FleetScan]
+
+    # from the lowered plan (reads meta.scan off leaf cells), unioned with extras
+    plan = Info.plan(Basic)
+    assert ReactiveDag.Source.drivers(plan) == [FleetScan]
+    assert ReactiveDag.Source.drivers(plan, [OtherScan]) == [FleetScan, OtherScan]
+  end
+
+  defmodule OtherScan do
+    @behaviour ReactiveDag.Source
+    @impl true
+    def id, do: :other
+    @impl true
+    def leaf_cells(_g), do: []
+    @impl true
+    def poll(_), do: {:ok, %{changed: []}}
+  end
+
+  # ── SCENARIO 2: an observed WITHOUT a scanner is a plain leaf (target-only) ──
+  test "SCENARIO leaf: an observed with no scan: is a terminal leaf, scanner nil" do
     defmodule PlainLeaf do
       use ReactiveDag.Graph.Dsl
 
@@ -68,7 +89,9 @@ defmodule ReactiveDag.DslSpineTest do
       end
     end
 
-    assert [%{id: "targets", leaf?: true, op: :leaf}] = Info.cells(PlainLeaf)
+    assert [%{id: "targets", leaf?: true, op: :leaf} = c] = Info.cells(PlainLeaf)
+    assert c.meta.scan == nil
+    assert Info.scanners(PlainLeaf) == []
   end
 
   # ── SCENARIO 3: structural checks (dangling ref, cycle) at compile ──────────

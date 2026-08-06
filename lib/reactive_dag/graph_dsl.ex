@@ -8,9 +8,9 @@ defmodule ReactiveDag.Graph.Dsl do
         use ReactiveDag.Graph.Dsl
 
         graph do
-          # a leaf a scanner writes out-of-band — shape only; the scanner names it
-          # via its driver's `leaf_cells/1` (see `ReactiveDag.Source`).
-          observed :machines, grain: :machine
+          # a leaf a scanner writes out-of-band; `scan:` inlines the scanner
+          # (the 1:1 case — see `ReactiveDag.Source`).
+          observed :machines, grain: :machine, scan: MyApp.Sources.FleetScan
 
           node :health do
             op :reduce

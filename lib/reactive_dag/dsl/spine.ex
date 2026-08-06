@@ -7,16 +7,18 @@ defmodule ReactiveDag.Dsl.Spine do
   vocabulary as *op-kinds + meta* on the open `node` entity (or, if it needs typed
   fields, as its own entities added alongside — see "Domain vocabulary" below).
 
-  ## Scanners live on the driver, not the graph
+  ## Scanners
 
   A **scanner** (`ReactiveDag.Source`) reads external state into leaf cells in a
-  *poll* phase outside the drain. It is NOT authored in the `graph` block: the
-  driver's `leaf_cells/1` names the cells it writes — that IS the scanner↔leaf
-  binding, and the single source of truth `ReactiveDag.Source.verify!/2` checks.
-  So an `observed` leaf just declares its shape; which scanner feeds it is the
-  driver's business. This handles the real cardinality for free — several drivers
-  can name one leaf (N:1), one driver can name many leaves (1:N) — with no
-  cross-reference edge on the leaf.
+  *poll* phase outside the drain. The common case is 1:1 — one scanner feeds one
+  leaf — so they're authored TOGETHER as one declaration: `observed :machines,
+  scan: MyApp.Sources.FleetScan`. `ReactiveDag.Source.drivers/2` reads the inline
+  scanners off the graph; `verify!/2` checks their leaves resolve.
+
+  A scanner that fans out (writes cells no single `observed` owns) omits `scan:`
+  and names its cells via its own `leaf_cells/1` instead — passed to `drivers/2`
+  as an `extra`. So each scanner↔leaf relationship has ONE home, picked by
+  cardinality: the leaf owns it when 1:1, the driver owns it when fan-out.
 
   ## Authoring
 
@@ -24,10 +26,10 @@ defmodule ReactiveDag.Dsl.Spine do
         use ReactiveDag.Dsl.Spine
 
         graph do
-          # an OBSERVED leaf — a cell a scanner writes out-of-band. It declares
-          # only its shape; the scanner that feeds it names it via the driver's
-          # `leaf_cells/1` (see `ReactiveDag.Source`), not a ref here.
-          observed :machines, grain: :machine, strength: :measured
+          # an OBSERVED leaf a scanner writes out-of-band. `scan:` inlines the
+          # scanner (the 1:1 case — leaf + scanner in one declaration).
+          observed :machines, grain: :machine, strength: :measured,
+            scan: MyApp.Sources.FleetScan
 
           # a derived NODE — an op over input cells named by `ref`. `op` is an OPEN
           # atom: the library schedules the graph; the host's recompute interprets
@@ -104,27 +106,39 @@ defmodule ReactiveDag.Dsl.Spine do
 
   `ReactiveDag.Dsl.Spine.Info.plan/1` lowers a module's `graph` block to a
   `ReactiveDag.Plan` (structural validation runs in the transformer at compile
-  time; `plan/1` returns the built plan for the drain). A host keeps its scanner
-  drivers as a plain module list and checks them against the built plan with
-  `ReactiveDag.Source.verify!(drivers, plan)`.
+  time; `plan/1` returns the built plan for the drain). `Info.scanners/1` (or
+  `ReactiveDag.Source.drivers/2`) returns the inline `scan:` drivers; check them
+  against the plan with `ReactiveDag.Source.verify!/2`.
   """
 
   # ── spine entity structs ──────────────────────────────────────────────────
 
   defmodule Observed do
     @moduledoc """
-    A source-fed leaf: `observed :id, grain:, strength:`. Which scanner feeds it is
-    the driver's business (its `leaf_cells/1` names this cell) — not a ref here.
+    A source-fed leaf: `observed :id, grain:, strength:, scan: DriverModule`.
+
+    `scan:` inlines the scanner that feeds this leaf — the common 1:1 case (a leaf
+    and its scanner travel together, so they're one declaration). It's the
+    authoritative binding: `ReactiveDag.Source.verify!/2` discovers scanners by
+    walking `observed` cells' `scan:`, and it's how a driver learns its leaf — not
+    a second copy of a binding declared elsewhere.
+
+    A driver that fans out (writes cells no single `observed` owns — e.g. many
+    guarantee sub-cells) omits `scan:` on those leaves and names them via its own
+    `leaf_cells/1` instead. So each scanner↔leaf relationship has ONE home, chosen
+    by cardinality: the leaf owns it when 1:1, the driver owns it when fan-out.
     """
     @type t :: %__MODULE__{
             id: atom(),
             grain: atom() | nil,
             strength: atom(),
+            scan: module() | nil,
             meta: keyword()
           }
     defstruct [
       :id,
       :grain,
+      :scan,
       strength: :measured,
       meta: [],
       __identifier__: nil,
@@ -204,9 +218,13 @@ defmodule ReactiveDag.Dsl.Spine do
     args: [:id],
     describe: "A source-fed leaf cell — the substrate a scanner writes (out-of-band).",
     schema: [
-      id: [type: :atom, required: true, doc: "the leaf cell id (a scanner's `leaf_cells/1` names it)."],
+      id: [type: :atom, required: true, doc: "the leaf cell id."],
       grain: [type: :atom, doc: "what each member of the leaf is."],
       strength: [type: :atom, default: :measured, doc: "the observation's fidelity."],
+      scan: [
+        type: {:behaviour, ReactiveDag.Source},
+        doc: "the scanner (a `ReactiveDag.Source`) that feeds this leaf — the 1:1 inline binding."
+      ],
       meta: [type: :keyword_list, default: [], doc: "open host binding merged into the cell's meta."]
     ]
   }

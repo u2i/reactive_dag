@@ -17,12 +17,19 @@ defmodule ReactiveDag.Source do
   never fails on a network outage. Effectful, non-deterministic, fallible I/O
   (that's every scanner) stays in phase 1.
 
-  A scanner is NOT authored in the graph: the leaf it feeds is an ordinary
-  `observed` cell, and the binding to a scanner lives on the DRIVER — its
-  `leaf_cells/1` names the cells it writes. That's the single source of truth
-  (`verify!/2` checks it), and it handles the real cardinality directly: several
-  drivers can name one leaf (N:1), one driver can name many (1:N), with no
-  cross-reference edge on the leaf.
+  The scanner↔leaf binding has ONE home, chosen by cardinality:
+
+    * **1:1 (the common case) — inline on the leaf.** `observed :machines, scan:
+      MyApp.Sources.FleetScan` co-locates the leaf and its scanner in one
+      declaration (they travel together). `ReactiveDag.Source.drivers/2` reads
+      these off the graph.
+    * **fan-out (rare) — on the driver.** A scanner that writes cells no single
+      `observed` owns (e.g. many guarantee sub-cells) omits `scan:` and names its
+      cells via its own `leaf_cells/1`; the host passes it as an `extra` driver.
+
+  Either way `verify!/2` confirms every named leaf is a real cell in the built
+  plan. `leaf_cells/1` is the general contract both paths satisfy (an inline
+  `scan:` driver's leaf is just the `observed` it's attached to).
 
   ## The contract
 
@@ -115,5 +122,27 @@ defmodule ReactiveDag.Source do
               "source(s) feed a leaf cell absent from the graph: " <>
                 Enum.map_join(dangling, ", ", fn {m, l} -> "#{inspect(m)} -> #{l}" end)
     end
+  end
+
+  @doc """
+  The scanner drivers feeding a lowered `graph`: the inline ones declared on
+  `observed :x, scan: Driver` (read from each leaf cell's `meta.scan`), unioned
+  with any `extra` fan-out drivers a host passes (drivers that name their cells via
+  `leaf_cells/1` because no single leaf owns them). This is the full scanner set —
+  feed it to `verify!/2`, poll it in phase 1.
+  """
+  @spec drivers(graph(), [module()]) :: [module()]
+  def drivers(graph, extra \\ []) do
+    inline =
+      graph.cells
+      |> Map.values()
+      |> Enum.flat_map(fn cell ->
+        case cell.meta[:scan] do
+          nil -> []
+          driver -> [driver]
+        end
+      end)
+
+    (inline ++ extra) |> Enum.uniq()
   end
 end

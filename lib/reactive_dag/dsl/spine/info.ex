@@ -26,6 +26,23 @@ defmodule ReactiveDag.Dsl.Spine.Info do
     module |> cells() |> ReactiveDag.Graph.build()
   end
 
+  @doc """
+  The scanner driver modules declared inline on this graph's `observed` leaves
+  (`observed :x, scan: Driver`), de-duplicated. These are the 1:1-bound scanners;
+  fan-out drivers (registered via their own `leaf_cells/1`) are not here. Feed the
+  union to `ReactiveDag.Source.verify!/2`.
+  """
+  @spec scanners(module()) :: [module()]
+  def scanners(module) do
+    module
+    |> entities()
+    |> Enum.flat_map(fn
+      %Observed{scan: driver} when not is_nil(driver) -> [driver]
+      _ -> []
+    end)
+    |> Enum.uniq()
+  end
+
   @doc "Every `ReactiveDag.Cell` the module's `graph` block lowers to (no graph math)."
   @spec cells(module()) :: [ReactiveDag.Cell.t()]
   def cells(module) do
@@ -86,14 +103,14 @@ defmodule ReactiveDag.Dsl.Spine.Info do
     }
   end
 
-  defp to_cell(id, %Observed{grain: grain, strength: strength, meta: meta}, _inputs) do
+  defp to_cell(id, %Observed{grain: grain, strength: strength, scan: scan, meta: meta}, _inputs) do
     %ReactiveDag.Cell{
       id: id,
       op: :leaf,
       inputs: [],
       leaf?: true,
       meta:
-        %{grain: grain, strength: strength}
+        %{grain: grain, strength: strength, scan: scan}
         |> Map.merge(Map.new(meta || []))
     }
   end

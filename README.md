@@ -53,10 +53,10 @@ defmodule MyApp.Pipeline do
 
   graph do
     # an OBSERVED leaf — a cell a scanner writes out-of-band (phase-1 poll, NOT a
-    # drain op). It declares only its shape; which scanner feeds it is the driver's
-    # business — its `leaf_cells/1` names this cell (see `ReactiveDag.Source`), so
-    # there's no scanner ref on the leaf.
-    observed :machines, grain: :machine, strength: :measured
+    # drain op). `scan:` inlines the scanner that feeds it — the common 1:1 case,
+    # leaf and scanner in one declaration.
+    observed :machines, grain: :machine, strength: :measured,
+      scan: MyApp.Sources.FleetScan
 
     # a derived NODE — an op over input cells. Options are set INSIDE the block
     # (like Ash's `attributes do attribute … end`). `op` is an OPEN atom: the
@@ -87,18 +87,20 @@ Introspect + run it:
 ```elixir
 plan = ReactiveDag.Dsl.Spine.Info.plan(MyApp.Pipeline)     # → %ReactiveDag.Plan{}
 
-# a host keeps its scanner drivers as a plain module list (each names the leaves
-# it writes via `leaf_cells/1`). poll (phase 1) writes those leaves out-of-band;
-# verify! checks every named leaf resolves to a real cell in the built plan:
-:ok = ReactiveDag.Source.verify!([MyApp.Sources.FleetScan], plan)
+# the inline `scan:` drivers are read off the graph (union in any fan-out drivers
+# as extras). poll (phase 1) writes their leaves out-of-band; verify! checks every
+# named leaf resolves to a real cell in the built plan:
+drivers = ReactiveDag.Source.drivers(plan)
+:ok = ReactiveDag.Source.verify!(drivers, plan)
 
 # drain (phase 2): the engine recomputes downstream from the dirty frontier.
 {:ok, _passes} = ReactiveDag.Drain.run(plan, recompute: MyApp.Recompute, key_rule: MyApp.KeyRule)
 ```
 
-**The scanner↔leaf binding lives on the driver** (its `leaf_cells/1`), not the
-graph — so several drivers can feed one leaf (N:1) and one driver can feed many
-leaves (1:N) with no cross-reference on the leaf. `verify!/2` checks every named
+**The scanner↔leaf binding has one home, picked by cardinality:** the common 1:1
+case inlines on the leaf (`observed :x, scan: Driver`); a fan-out driver that
+writes cells no single leaf owns omits `scan:` and names them via its own
+`leaf_cells/1` (passed to `drivers/2` as an extra). `verify!/2` checks every named
 leaf is a real cell.
 
 **What's checked at compile time:** the graph
