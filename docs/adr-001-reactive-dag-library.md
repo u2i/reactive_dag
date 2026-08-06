@@ -147,6 +147,27 @@ was larger, and in exactly the places the proposal was unsure about:
   drivers and cascade's `refresh_leaf` were the same skeleton (upsert a desired
   set, retire the vanished); the one real divergence — delete vs tombstone — is
   now a one-line `:retire` seam.
+- **A THIRD seam appeared: the coordination write (`CoordinationWriter`).** Ops
+  used to write tuples via the host frontier directly; now via
+  `ReactiveDag.Op.put/tombstone/delete`, routed to a host-configured
+  `CoordinationWriter`. Why a seam and not a pure `Tuple` call: the write touches
+  each host's *extension columns* in the same atomic upsert (cascade
+  `source_ref`/tombstone, portal `strength`), so it's host policy. A spine-only
+  default ships. Every op/driver in both apps now writes through this — the
+  library owns the single INSERT/DELETE path (except a couple of genuinely
+  multi-grain writes that stay host-side, e.g. the portal's concern-table prune).
+- **Node authoring: the resource IS the node (`ReactiveDag.Node`).** Beyond the
+  runtime substrate, the library gained an Ash *resource extension* — a resource
+  declares its op + dependencies + computation in a `reactive` block, and
+  `Node.graph/2` assembles the whole `Plan` from the node resources (the central
+  pipeline module dissolves onto the resources). Computation is declared with
+  three combinators — `reduce` (fold), `expand` (group → many rows), `join`
+  (two-input left join) — for the common map/reduce shapes, with `compute: Module`
+  (a `ReactiveDag.Op`) as the escape hatch for LLM/fetch/bespoke recomputes. This
+  is the Ash calculation model (DSL for common, module for arbitrary) applied to
+  DAG nodes. `Node.Recompute`/`Node.KeyRule` run a Node graph with no host-written
+  dispatch. Cascade authors several ops this way; full adoption of either app's
+  pipeline remains a deliberate migration (escape-hatch ops gain nothing from it).
 
 ## The design law behind the seams
 

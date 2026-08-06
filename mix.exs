@@ -10,9 +10,11 @@ defmodule ReactiveDag.MixProject do
       elixir: "~> 1.18",
       description:
         "Reactive DAG engine as an Ash extension: a dirty frontier + depth-ordered " <>
-          "incremental drain + change propagation, with the substrate tables and " <>
-          "Spark DSL provided. Bring your own op algebra (KeyRule) and recompute " <>
-          "strategy (per-key Elixir or set-based SQL).",
+          "incremental drain + change propagation + a shared coordination-tuple spine. " <>
+          "Author nodes as Ash resources (the `ReactiveDag.Node` extension) with " <>
+          "reduce/join/expand combinators, or bring your own cells. Domain plugs in at " <>
+          "three seams: recompute strategy (per-key Elixir or set-based SQL), key rule, " <>
+          "and coordination writer.",
       elixirc_paths: elixirc_paths(Mix.env()),
       deps: deps()
     ]
