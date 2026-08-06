@@ -13,10 +13,14 @@ defmodule ReactiveDag.NodeTest do
   end
 
   defmodule AgendaDocs do
+    # an OBSERVED-style leaf: cascade's source+observed pair collapses onto the
+    # leaf resource — the driver binding (source/driver) rides on the leaf itself.
     use Ash.Resource, domain: Domain, data_layer: Ash.DataLayer.Simple, extensions: [ReactiveDag.Node]
     reactive do
-      op :source
+      op :leaf
       leaf? true
+      source :agenda_scan
+      driver FakeAgendaDriver
     end
   end
 
@@ -109,6 +113,13 @@ defmodule ReactiveDag.NodeTest do
     leaf = ReactiveDag.Node.to_cell(AgendaDocs)
     assert leaf.leaf? == true
     assert leaf.inputs == []
+  end
+
+  test "an observed-style leaf carries its source/driver binding in meta" do
+    leaf = ReactiveDag.Node.to_cell(AgendaDocs)
+    assert leaf.meta.source == :agenda_scan
+    assert leaf.meta.driver == FakeAgendaDriver
+    assert leaf.meta.compute == nil
   end
 
   test "a nested compose lowers to an intermediate cell via Lowering.walk" do

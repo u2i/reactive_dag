@@ -111,6 +111,14 @@ defmodule ReactiveDag.Node do
         doc: "how a child key maps to this cell's key on propagation"
       ],
       leaf?: [type: :boolean, default: false, doc: "true for a source-fed leaf (no compute)"],
+      source: [
+        type: :atom,
+        doc: "for a leaf: the source binding id its refresh dispatches on (host-defined)"
+      ],
+      driver: [
+        type: :atom,
+        doc: "for a leaf: the driver module that polls the outside world (host `Source` behaviour)"
+      ],
       depends_on: [
         type: {:list, :atom},
         default: [],
@@ -177,7 +185,11 @@ defmodule ReactiveDag.Node do
     {:op, cell_id(resource) |> to_string(), Ext.get_opt(resource, [:reactive], :op, nil),
      Ext.get_opt(resource, [:reactive], :compute, nil),
      Ext.get_opt(resource, [:reactive], :key_rule, :identity),
-     Ext.get_opt(resource, [:reactive], :leaf?, false), resource, legs ++ flat_refs}
+     Ext.get_opt(resource, [:reactive], :leaf?, false), resource, legs ++ flat_refs,
+     %{
+       source: Ext.get_opt(resource, [:reactive], :source, nil),
+       driver: Ext.get_opt(resource, [:reactive], :driver, nil)
+     }}
   end
 
   defp walk_cbs do
@@ -186,10 +198,10 @@ defmodule ReactiveDag.Node do
         %Ref{} -> :ref
         %Dep{} -> :ref
         %Compose{} -> :op
-        {:op, _, _, _, _, _, _, _} -> :op
+        {:op, _, _, _, _, _, _, _, _} -> :op
       end,
       legs: fn
-        {:op, _, _, _, _, _, _, legs} -> legs
+        {:op, _, _, _, _, _, _, legs, _} -> legs
         %Compose{legs: legs} -> legs
       end,
       leg_id: fn parent, i, leg ->
@@ -206,13 +218,14 @@ defmodule ReactiveDag.Node do
     }
   end
 
-  defp build_cell(id, {:op, _id, op, compute, key_rule, leaf?, resource, _legs}, input_ids) do
+  defp build_cell(id, {:op, _id, op, compute, key_rule, leaf?, resource, _legs, extra}, input_ids) do
     %ReactiveDag.Cell{
       id: id,
       op: op,
       inputs: input_ids,
       leaf?: leaf?,
-      meta: %{resource: resource, compute: compute, key_rule: key_rule}
+      meta:
+        Map.merge(%{resource: resource, compute: compute, key_rule: key_rule}, extra)
     }
   end
 
