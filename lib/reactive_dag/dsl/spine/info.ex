@@ -12,6 +12,7 @@ defmodule ReactiveDag.Dsl.Spine.Info do
   """
 
   alias ReactiveDag.Dsl.Spine.{Compose, Node, Observed, Ref, Source}
+  alias ReactiveDag.Node.{Compute, Join, Reduce}
   alias Spark.Dsl.Extension, as: Ext
 
   @doc "The declared scanners' driver modules, in declaration order."
@@ -80,7 +81,9 @@ defmodule ReactiveDag.Dsl.Spine.Info do
         %Node{} -> :op
       end,
       legs: fn
-        %Node{legs: legs} -> legs
+        # a node's legs are its explicit ref/compose inputs PLUS an implicit input
+        # edge to a combinator's `over:` node (the thing a reduce/join reads).
+        %Node{legs: legs} = n -> legs ++ combinator_refs(n)
         %Compose{legs: legs} -> legs
         %Observed{} -> []
       end,
@@ -107,13 +110,16 @@ defmodule ReactiveDag.Dsl.Spine.Info do
     }
   end
 
-  defp to_cell(id, %Node{op: op, key_rule: kr, leaf?: leaf?, meta: meta}, inputs) do
+  defp to_cell(id, %Node{op: op, key_rule: kr, leaf?: leaf?, meta: meta} = n, inputs) do
     %ReactiveDag.Cell{
       id: id,
       op: op,
       inputs: inputs,
       leaf?: leaf? || false,
-      meta: Map.merge(%{key_rule: kr}, Map.new(meta || []))
+      meta:
+        %{key_rule: kr}
+        |> Map.merge(Map.new(meta || []))
+        |> Map.merge(combinator_meta(n))
     }
   end
 
@@ -125,5 +131,26 @@ defmodule ReactiveDag.Dsl.Spine.Info do
       leaf?: leaf? || false,
       meta: Map.merge(%{key_rule: kr}, Map.new(meta || []))
     }
+  end
+
+  # a node's declarative combinator (Reduce | Join) or Compute escape hatch, folded
+  # into meta under the SAME keys `ReactiveDag.Node.Recompute` reads — so a spine
+  # node with a combinator runs identically to a resource-authored one.
+  defp combinator_meta(%Node{computation: comp}) do
+    case comp do
+      [%Reduce{} = r | _] -> %{reduce: r}
+      [%Join{} = j | _] -> %{join: j}
+      [%Compute{module: m} | _] -> %{compute: m}
+      _ -> %{}
+    end
+  end
+
+  # a reduce/join reads `over:` — an implicit input edge to that node.
+  defp combinator_refs(%Node{computation: comp}) do
+    case comp do
+      [%Reduce{over: over} | _] when not is_nil(over) -> [%Ref{to: over}]
+      [%Join{over: over} | _] when not is_nil(over) -> [%Ref{to: over}]
+      _ -> []
+    end
   end
 end

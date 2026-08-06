@@ -104,6 +104,18 @@ sources = ReactiveDag.Dsl.Spine.Info.sources(MyApp.Pipeline)  # → [driver modu
 is structurally sound (refs resolve, ids unique, acyclic). A typo fails the build
 with a located `Spark.Error.DslError`, not a silent dead edge.
 
+**How a node computes** — two ways, mixable in one graph:
+
+- **op-kind dispatch** — `node :recon do op :reconcile end` carries only its op
+  atom; the host's `ReactiveDag.RecomputeStrategy` (e.g. a set-based-SQL template
+  registry keyed by op-kind) supplies the computation. Centralized per op-kind.
+- **a per-node executor** — `node :rollups do op :fold; reduce over: …, … end`
+  carries its own computation via a `reduce`/`join` combinator or a `compute
+  Module` escape hatch. These are the **same** entities the per-resource
+  `ReactiveDag.Node` surface uses, lowering to the same `meta.reduce`/`meta.join`/
+  `meta.compute` — so `ReactiveDag.Node.Recompute` runs a spine node exactly like
+  a resource-authored one.
+
 **Domain vocabulary** lives on the open `op` atom + `meta:` — a compliance host
 writes `node :g, do: (op :guarantee; meta claim: "…", addresses: [:CC6_1])`, a
 pipeline host `node :d, do: (op :map; meta compute: MyOp)`. A host that wants

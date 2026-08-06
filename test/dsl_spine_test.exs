@@ -172,6 +172,71 @@ defmodule ReactiveDag.DslSpineTest do
     assert Enum.sort(cells["variance"].inputs) == ["machines", "rolling"]
   end
 
+  # ── SCENARIO 4b: a spine node carries its OWN executor (reduce / compute) ────
+  # The compute-authoring parity with ReactiveDag.Node: a spine node can inline a
+  # reduce/join combinator or a compute module, lowering to the SAME meta the
+  # resource surface produces — so ReactiveDag.Node.Recompute runs it either way.
+  defmodule FakeOp do
+    @behaviour ReactiveDag.Op
+    @impl true
+    def recompute(_cell, keys), do: {:ok, keys}
+  end
+
+  defmodule WithExecutors do
+    use ReactiveDag.Graph.Dsl
+
+    graph do
+      observed :fiscal_lines, grain: :line
+
+      # a REDUCE authored on the spine node itself
+      node :rollups do
+        op :fold
+        key_rule :all
+
+        reduce over: :fiscal_lines,
+               read: &__MODULE__.read/1,
+               group_by: &__MODULE__.grp/1,
+               key: &__MODULE__.key/1,
+               into: &__MODULE__.into/2,
+               upsert: &__MODULE__.up/2
+      end
+
+      # a COMPUTE escape hatch on a spine node
+      node :extract do
+        op :map
+        compute FakeOp
+        ref :fiscal_lines
+      end
+    end
+
+    def read(:fiscal_lines), do: []
+    def grp(r), do: r.fund
+    def key(f), do: "#{f}"
+    def into(_f, rows), do: %{n: length(rows)}
+    def up(_k, _row), do: true
+  end
+
+  test "SCENARIO executor: a spine reduce lowers to meta.reduce + an implicit over edge" do
+    cells = WithExecutors |> Info.cells() |> Map.new(&{&1.id, &1})
+
+    r = cells["rollups"]
+    assert r.op == :fold
+    # `over: :fiscal_lines` becomes an input edge — no explicit ref needed
+    assert r.inputs == ["fiscal_lines"]
+    # the combinator rides in meta as the SAME struct the resource surface uses,
+    # so ReactiveDag.Node.Recompute runs it identically
+    assert %ReactiveDag.Node.Reduce{} = r.meta.reduce
+  end
+
+  test "SCENARIO executor: a spine compute lowers to meta.compute (the escape hatch)" do
+    cells = WithExecutors |> Info.cells() |> Map.new(&{&1.id, &1})
+
+    e = cells["extract"]
+    assert e.op == :map
+    assert e.meta.compute == FakeOp
+    assert e.inputs == ["fiscal_lines"]
+  end
+
   # ── SCENARIO 5: the prototype gate — a DOMAIN op-kind + rich meta survives ──
   # This is the ADR-002 claim: a host expresses its domain (here the portal's
   # `guarantee`) as an op-kind + meta on the shared `node`, and every domain field

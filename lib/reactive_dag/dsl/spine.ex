@@ -48,21 +48,41 @@ defmodule ReactiveDag.Dsl.Spine do
         end
       end
 
+  ## How a node computes
+
+  A `node` says how it recomputes in one of two ways — the same choice the two
+  host apps embody:
+
+  1. **op-kind dispatch (no executor on the node).** `node :recon do op :reconcile
+     end` — the node carries only its `op` atom; the host's
+     `ReactiveDag.RecomputeStrategy` (e.g. a set-based-SQL template registry keyed
+     by op-kind) supplies the computation. Computation is CENTRALIZED per op-kind.
+  2. **a per-node executor.** `node :rollups do op :fold; reduce over: …, … end` —
+     the node carries its own computation via a `reduce`/`join` combinator or a
+     `compute Module` escape hatch. These are the SAME entities the
+     `ReactiveDag.Node` resource surface uses; they lower to the same
+     `meta.reduce`/`meta.join`/`meta.compute`, so `ReactiveDag.Node.Recompute`
+     runs a spine node identically to a resource-authored one.
+
+  Both coexist in one graph, and both surfaces (`node` and `ReactiveDag.Node`)
+  now express computation the same way — so `ReactiveDag.assemble/1` yields
+  uniform cells regardless of where a node was authored.
+
   ## What the library owns vs the host
 
-  * **Library:** the `graph` section, the five spine entities, the structural
-    checks (every `ref`/input resolves, ids unique, acyclic — via
-    `ReactiveDag.Graph.build/1`), the `fed_by → source` compile-time check, and
-    the `ReactiveDag.Source` behaviour + `verify!/2`.
-  * **Host:** the meaning of each `op` (its recompute, via the
-    `ReactiveDag.RecomputeStrategy` seam), the `poll` fetch inside each driver,
-    and any DOMAIN-typed fields it wants beyond the open `meta:`.
+  * **Library:** the `graph` section, the spine entities, the `reduce`/`join`/
+    `compute` combinators, the structural checks (every `ref`/input resolves, ids
+    unique, acyclic — via `ReactiveDag.Graph.build/1`), the `fed_by → source`
+    compile-time check, and the `ReactiveDag.Source` behaviour + `verify!/2`.
+  * **Host:** the meaning of each op-kind that dispatches through a
+    `ReactiveDag.RecomputeStrategy`, the `poll` fetch inside each driver, and any
+    DOMAIN-typed fields it wants beyond the open `meta:`.
 
   ## Domain vocabulary (op-kinds vs. typed entities)
 
   A host expresses its domain two ways, and can mix them:
 
-  1. **op-kind + meta (default).** `node :g, op: :guarantee, meta: [claim: "…"]`.
+  1. **op-kind + meta (default).** `node :g do op :guarantee; meta claim: "…" end`.
      Zero host-side DSL code; the op-kind is a free atom and the fields ride in
      `meta`. Best when the domain fields don't need their own compile-time typing.
   2. **A typed host entity.** If a domain concept has fields that deserve Spark
@@ -161,7 +181,8 @@ defmodule ReactiveDag.Dsl.Spine do
             leaf?: boolean() | nil,
             key_rule: :identity | :all,
             meta: keyword(),
-            legs: list()
+            legs: list(),
+            computation: list()
           }
     defstruct [
       :id,
@@ -170,6 +191,7 @@ defmodule ReactiveDag.Dsl.Spine do
       key_rule: :identity,
       meta: [],
       legs: [],
+      computation: [],
       __identifier__: nil,
       __spark_metadata__: nil
     ]
@@ -232,12 +254,58 @@ defmodule ReactiveDag.Dsl.Spine do
              %{@compose_base | entities: [legs: [@ref, child]]}
            end)
 
+  # ── computation entities (shared with the resource surface) ─────────────────
+  # A spine `node` can carry its own per-node executor, exactly like a
+  # `ReactiveDag.Node` resource: a `reduce`/`join` combinator (declarative) or a
+  # `compute Module` escape hatch. These reuse the SAME target structs as the
+  # resource extension (`ReactiveDag.Node.Reduce/Join/Compute`), so a spine node
+  # lowers to the identical `meta.reduce`/`meta.join`/`meta.compute` — and
+  # `ReactiveDag.Node.Recompute` runs it with no knowledge of which surface
+  # authored it. A node either dispatches on its `op` atom (host registry) OR
+  # carries an executor here; both are valid.
+  @reduce %Spark.Dsl.Entity{
+    name: :reduce,
+    target: ReactiveDag.Node.Reduce,
+    describe: "Declarative fold: read `over`, group by `group_by`, reduce each group with `into`.",
+    schema: [
+      over: [type: :atom, required: true, doc: "the input node id whose payload is read + grouped."],
+      read: [type: {:fun, 1}, required: true, doc: "`(over_id -> [item])` — read the input's payload."],
+      group_by: [type: {:fun, 1}, required: true, doc: "`(item -> group_term)` — the grouping key."],
+      key: [type: {:fun, 1}, required: true, doc: "`(group_term -> cell_key_string)` — the output tuple key."],
+      into: [type: {:fun, 2}, required: true, doc: "`(group_term, [item] -> row)` — reduce a group to a row."],
+      upsert: [type: {:fun, 2}, required: true, doc: "`(key, row -> boolean)` — write payload + return true iff CHANGED."]
+    ]
+  }
+
+  @join %Spark.Dsl.Entity{
+    name: :join,
+    target: ReactiveDag.Node.Join,
+    describe: "Declarative left join: index `over` into left/right sides, emit a row per left key.",
+    schema: [
+      over: [type: :atom, required: true, doc: "the input node id whose payload is read + indexed."],
+      read: [type: {:fun, 1}, required: true, doc: "`(over_id -> [item])` — read the input's items."],
+      left: [type: {:fun, 1}, required: true, doc: "`(item -> join_key | nil)` — the LEFT side's key."],
+      right: [type: {:fun, 1}, required: true, doc: "`(item -> join_key | nil)` — the RIGHT side's key."],
+      key: [type: {:fun, 1}, required: true, doc: "`(join_key -> cell_key_string)` — the output tuple key."],
+      into: [type: {:fun, 3}, required: true, doc: "`(join_key, left, right_or_nil -> row)` — the joined row."],
+      upsert: [type: {:fun, 2}, required: true, doc: "`(key, row -> boolean)` — write payload + return true iff CHANGED."]
+    ]
+  }
+
+  @compute %Spark.Dsl.Entity{
+    name: :compute,
+    target: ReactiveDag.Node.Compute,
+    args: [:module],
+    describe: "Escape hatch: this node's recompute is `module` (a `ReactiveDag.Op`).",
+    schema: [module: [type: :atom, required: true, doc: "a module implementing `ReactiveDag.Op`."]]
+  }
+
   @node %Spark.Dsl.Entity{
     name: :node,
     target: Node,
     args: [:id],
     describe: "A derived node: an op over input cells (by `ref`/`compose`). `op` is an open atom.",
-    entities: [legs: [@ref, @compose]],
+    entities: [legs: [@ref, @compose], computation: [@reduce, @join, @compute]],
     schema: [
       id: [type: :atom, required: true, doc: "the cell id."],
       op: [type: :atom, required: true, doc: "the op kind (open atom; the host's recompute interprets it)."],
