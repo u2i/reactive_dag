@@ -113,11 +113,27 @@ defmodule ReactiveDag.Node do
       leaf?: [type: :boolean, default: false, doc: "true for a source-fed leaf (no compute)"],
       source: [
         type: :atom,
-        doc: "for a leaf: the source binding id its refresh dispatches on (host-defined)"
+        doc: "convenience: a leaf's source binding id (also merged into meta)"
       ],
       driver: [
         type: :atom,
-        doc: "for a leaf: the driver module that polls the outside world (host `Source` behaviour)"
+        doc: "convenience: a leaf's driver module (also merged into meta)"
+      ],
+      meta: [
+        type: :keyword_list,
+        default: [],
+        doc:
+          "OPEN host binding — anything the host's recompute/refresh needs and the library never interprets (cascade: source/driver; portal leaf: source/check/org_kind/strength/attest_for/cadence). Merged into the cell's meta."
+      ],
+      for_each: [
+        type: :atom,
+        doc:
+          "GENERATOR: expand this node per member of a named population (resolved by graph/2's member-fetcher). The template itself builds no cell; each member builds an instance `<id>.<member>`."
+      ],
+      over: [
+        type: :atom,
+        doc:
+          "SECOND-ORDER: this node's population is computed from the graph itself (e.g. :findings | :register | :controls). Carried in meta for a host post-build hook; the library does not resolve it."
       ],
       depends_on: [
         type: {:list, :atom},
@@ -144,10 +160,21 @@ defmodule ReactiveDag.Node do
   contributes its root cell PLUS an intermediate cell per nested `compose` leg
   (lowered through `ReactiveDag.Lowering.walk`). The union is validated and
   depth-ordered by `ReactiveDag.Graph.build/1`.
+
+  Pass `:for_each` to expand GENERATOR nodes: a `(population_atom -> [member])`
+  fun. A node with `for_each: :pop` builds no template cell — instead, for each
+  member it builds an instance sub-tree rooted at `<id>.<member.id>`, with the
+  member's `meta` merged onto every instance cell (the host's per-member stamp,
+  e.g. a probe filter). A member is any map with an `:id` (+ optional `:meta`).
+  Without a fetcher, a generator node is skipped (and logged by the caller).
   """
-  @spec graph([module()]) :: ReactiveDag.Plan.t()
-  def graph(resources) do
-    resources |> Enum.flat_map(&cells/1) |> ReactiveDag.Graph.build()
+  @spec graph([module()], keyword()) :: ReactiveDag.Plan.t()
+  def graph(resources, opts \\ []) do
+    fetch = Keyword.get(opts, :for_each)
+
+    resources
+    |> Enum.flat_map(&cells(&1, fetch))
+    |> ReactiveDag.Graph.build()
   end
 
   @doc """
@@ -156,14 +183,37 @@ defmodule ReactiveDag.Node do
   `ReactiveDag.Lowering.walk` — a `ref`/`dep` resolves to an existing cell id
   (no new cell), a `compose` recurses into an intermediate cell.
   """
-  @spec cells(module()) :: [ReactiveDag.Cell.t()]
-  def cells(resource) do
-    id = cell_id(resource) |> to_string()
-    {^id, cells} = ReactiveDag.Lowering.walk(id, root_node(resource), walk_cbs())
-    cells
+  @spec cells(module(), (atom() -> [map()]) | nil) :: [ReactiveDag.Cell.t()]
+  def cells(resource, fetch \\ nil) do
+    case Ext.get_opt(resource, [:reactive], :for_each, nil) do
+      nil ->
+        {_id, cells} = lower(resource, cell_id(resource) |> to_string(), %{})
+        cells
+
+      pop when is_function(fetch, 1) ->
+        # GENERATOR: template builds no cell; expand one instance per member.
+        base = cell_id(resource) |> to_string()
+
+        fetch.(pop)
+        |> Enum.flat_map(fn member ->
+          {_id, cells} = lower(resource, "#{base}.#{member.id}", Map.get(member, :meta, %{}))
+          cells
+        end)
+
+      _pop ->
+        # a generator with no fetcher supplied — build nothing (caller decides).
+        []
+    end
   end
 
-  @doc "The root cell id a node resource lowers to."
+  # lower a resource's reactive block rooted at `root_id`, merging `stamp` (a
+  # per-member metadata map, empty for a non-generator) onto every cell.
+  defp lower(resource, root_id, stamp) do
+    {id, cells} = ReactiveDag.Lowering.walk(root_id, root_node(resource, root_id), walk_cbs())
+    {id, Enum.map(cells, &%{&1 | meta: Map.merge(&1.meta, stamp)})}
+  end
+
+  @doc "The root cell a NON-generator node resource lowers to."
   @spec to_cell(module()) :: ReactiveDag.Cell.t()
   def to_cell(resource) do
     id = cell_id(resource) |> to_string()
@@ -172,24 +222,38 @@ defmodule ReactiveDag.Node do
 
   # ── lowering: the reactive block → a node the walk callbacks understand ─────
   # The root node and every `compose` leg share one internal shape:
-  #   {:op, id, op, compute, key_rule, leaf?, resource, legs}
-  # where legs are the Ref/Dep/Compose entities. `resource` is nil for a compose
-  # (an intermediate cell has no backing resource).
-  defp root_node(resource) do
+  #   {:op, id, op, compute, key_rule, leaf?, resource, legs, extra}
+  # where legs are the Ref/Dep/Compose entities and `extra` is the open host
+  # binding merged into meta. `resource` is nil for a compose (an intermediate
+  # cell has no backing resource). `root_id` lets a generator instance re-root.
+  defp root_node(resource, root_id) do
     legs =
       Ext.get_entities(resource, [:reactive])
-      |> Enum.filter(&match?(%Ref{}, &1) or match?(%Compose{}, &1) or match?(%Dep{}, &1))
+      |> Enum.filter(&(match?(%Ref{}, &1) or match?(%Compose{}, &1) or match?(%Dep{}, &1)))
 
     flat_refs = Ext.get_opt(resource, [:reactive], :depends_on, []) |> Enum.map(&%Ref{to: &1})
 
-    {:op, cell_id(resource) |> to_string(), Ext.get_opt(resource, [:reactive], :op, nil),
+    {:op, root_id, Ext.get_opt(resource, [:reactive], :op, nil),
      Ext.get_opt(resource, [:reactive], :compute, nil),
      Ext.get_opt(resource, [:reactive], :key_rule, :identity),
      Ext.get_opt(resource, [:reactive], :leaf?, false), resource, legs ++ flat_refs,
-     %{
-       source: Ext.get_opt(resource, [:reactive], :source, nil),
-       driver: Ext.get_opt(resource, [:reactive], :driver, nil)
-     }}
+     extra_meta(resource)}
+  end
+
+  # the OPEN host binding folded into a cell's meta: the `meta:` keyword list plus
+  # the source/driver/over conveniences. The library never reads these.
+  defp extra_meta(resource) do
+    Ext.get_opt(resource, [:reactive], :meta, [])
+    |> Map.new()
+    |> Map.merge(
+      %{
+        source: Ext.get_opt(resource, [:reactive], :source, nil),
+        driver: Ext.get_opt(resource, [:reactive], :driver, nil),
+        over: Ext.get_opt(resource, [:reactive], :over, nil)
+      }
+      |> Enum.reject(fn {_k, v} -> is_nil(v) end)
+      |> Map.new()
+    )
   end
 
   defp walk_cbs do

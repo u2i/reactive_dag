@@ -149,6 +149,85 @@ defmodule ReactiveDag.NodeTest do
     assert "meeting_shell_nested" in plan.parents["projected_meetings"]
   end
 
+  # ── portal-flavored: rich leaf bindings, generator (for_each), second-order ──
+
+  defmodule EdrAgents do
+    # portal `observed` leaf: rich live-data binding via the open meta:.
+    use Ash.Resource, domain: Domain, data_layer: Ash.DataLayer.Simple, extensions: [ReactiveDag.Node]
+    reactive do
+      op :leaf
+      leaf? true
+      meta source: :probe, check: "edr", strength: :measured, source_table: "probe_results"
+    end
+  end
+
+  defmodule RuleConcerns do
+    # portal generator: one guarantee template → N instances over a population.
+    use Ash.Resource, domain: Domain, data_layer: Ash.DataLayer.Simple, extensions: [ReactiveDag.Node]
+    reactive do
+      id :rule_concern
+      op :guarantee
+      compute FakeGuarantee
+      for_each :walk_risks
+      ref :edr_agents
+    end
+  end
+
+  defmodule Readiness do
+    # portal second-order: population computed from the graph (over: :findings).
+    use Ash.Resource, domain: Domain, data_layer: Ash.DataLayer.Simple, extensions: [ReactiveDag.Node]
+    reactive do
+      id :readiness
+      op :analysis
+      compute FakeReadiness
+      over :findings
+    end
+  end
+
+  test "a rich leaf carries an arbitrary host binding via the open meta:" do
+    leaf = ReactiveDag.Node.to_cell(EdrAgents)
+    assert leaf.leaf?
+    assert leaf.meta.source == :probe
+    assert leaf.meta.check == "edr"
+    assert leaf.meta.strength == :measured
+    assert leaf.meta.source_table == "probe_results"
+  end
+
+  test "a for_each generator expands to one instance sub-tree per member, stamped" do
+    members = [
+      %{id: "r1", meta: %{probe_filter: "r1"}},
+      %{id: "r2", meta: %{probe_filter: "r2"}}
+    ]
+
+    cells = ReactiveDag.Node.cells(RuleConcerns, fn :walk_risks -> members end)
+    ids = cells |> Enum.map(& &1.id) |> Enum.sort()
+
+    # instances `rule_concern.r1` / `.r2` — NO bare template cell.
+    assert ids == ["rule_concern.r1", "rule_concern.r2"]
+    refute "rule_concern" in ids
+
+    # each instance carries its member stamp merged into meta.
+    r1 = Enum.find(cells, &(&1.id == "rule_concern.r1"))
+    assert r1.meta.probe_filter == "r1"
+    assert r1.inputs == ["edr_agents"]
+  end
+
+  test "a generator with no fetcher builds nothing" do
+    assert ReactiveDag.Node.cells(RuleConcerns, nil) == []
+  end
+
+  test "second-order `over` rides in meta for a host post-build hook" do
+    assert ReactiveDag.Node.to_cell(Readiness).meta.over == :findings
+  end
+
+  test "graph/2 expands generators via the member-fetcher" do
+    fetch = fn :walk_risks -> [%{id: "r1", meta: %{}}, %{id: "r2", meta: %{}}] end
+    plan = ReactiveDag.Node.graph([EdrAgents, RuleConcerns], for_each: fetch)
+    assert plan.depths["rule_concern.r1"] > plan.depths["edr_agents"]
+    assert "rule_concern.r1" in plan.parents["edr_agents"]
+    assert "rule_concern.r2" in plan.parents["edr_agents"]
+  end
+
   test "graph/1 assembles a valid depth-ordered plan from the node resources" do
     plan = ReactiveDag.Node.graph(@resources)
 
