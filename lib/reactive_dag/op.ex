@@ -44,8 +44,13 @@ defmodule ReactiveDag.Op do
   # own cell struct in a unit test) and extract its id — both expose `.id` — so
   # an op body reads naturally (`Op.put(cell, key, …)`) regardless of cell type.
 
-  @doc "Mark `key` of `cell` present (opts carry host fields: source_ref, strength, …)."
-  @spec put(struct() | String.t(), key(), keyword()) :: :ok
+  @doc """
+  Mark `key` of `cell` present (opts carry host fields: source_ref, strength, …).
+  Returns whatever the configured writer's `put` returns — `:ok`, or a boolean
+  CHANGED signal an op can use (a writer that guards its upsert with
+  `IS DISTINCT FROM` reports whether the row actually flipped).
+  """
+  @spec put(struct() | String.t(), key(), keyword()) :: :ok | boolean()
   def put(cell, key, opts \\ []), do: W.writer().put(id(cell), key, opts)
 
   @doc "Tombstone `keys` of `cell` (retain-if-vanish, if the writer supports it; else delete)."

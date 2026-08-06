@@ -25,8 +25,14 @@ defmodule ReactiveDag.CoordinationWriter do
   # EITHER cell type (a `ReactiveDag.Cell` from the drain, or a host's own cell
   # in a unit test). This keeps the writer independent of the caller's cell type.
 
-  @doc "Mark `key` of `cell_id` present. `opts` may carry host fields (source_ref, strength, stale_after)."
-  @callback put(cell_id :: key(), key :: key(), opts :: keyword()) :: :ok
+  @doc """
+  Mark `key` of `cell_id` present. `opts` may carry host fields (source_ref,
+  strength, stale_after). May return `:ok`, or a boolean CHANGED signal (true iff
+  the row's verdict actually changed) — a writer that upserts with a
+  `WHERE … IS DISTINCT FROM` guard can report the flip, which an op uses as its
+  changed-key signal. `ReactiveDag.Op.put` returns whatever the writer returns.
+  """
+  @callback put(cell_id :: key(), key :: key(), opts :: keyword()) :: :ok | boolean()
 
   @doc "Tombstone `keys` of `cell_id` — vanished-but-retained (a host with a retain policy)."
   @callback tombstone(cell_id :: key(), keys :: [key()]) :: :ok
