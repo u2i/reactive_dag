@@ -27,26 +27,35 @@ defmodule ReactiveDag.Node.Recompute do
   @impl true
   def recompute(%Cell{leaf?: true}, keys), do: {:ok, keys}
 
-  # a declarative `reduce` combinator (the common fold) — run it generically:
-  # read `over` → group_by → into → upsert each (host writes payload + reports
-  # changed) → Op.put the changed keys. The author wrote only group/reduce/upsert.
+  # a declarative REDUCE/EXPAND combinator — read `over` → group_by → into each
+  # group. `into` returns ONE row (a fold) or a LIST of rows (an expand: group →
+  # many). Each row's key comes from `key.(group)` for a fold, or from the row
+  # itself for an expand (see key resolution in emit_rows/3).
   def recompute(%Cell{meta: %{reduce: %{} = r}} = cell, _keys) do
-    changed =
+    pairs =
       r.read.(r.over)
       |> Enum.group_by(r.group_by)
       |> Enum.flat_map(fn {group, items} ->
-        key = r.key.(group)
-        row = r.into.(group, items)
-
-        if r.upsert.(key, row) do
-          ReactiveDag.Op.put(cell, key)
-          [key]
-        else
-          []
-        end
+        group |> r.into.(items) |> rows_with_keys(r, group)
       end)
 
-    {:ok, changed}
+    {:ok, materialize(cell, pairs, r.upsert)}
+  end
+
+  # a declarative JOIN combinator — read `over` into a LEFT and RIGHT index
+  # (both `%{join_key => item}`), then for each left key emit `into.(jk, left,
+  # right_or_nil)` (a left join; right may be absent). One row per left key.
+  def recompute(%Cell{meta: %{join: %{} = j}} = cell, _keys) do
+    items = j.read.(j.over)
+    left = index(items, j.left)
+    right = index(items, j.right)
+
+    pairs =
+      Enum.flat_map(left, fn {jk, litem} ->
+        j.into.(jk, litem, Map.get(right, jk)) |> rows_with_keys(j, jk)
+      end)
+
+    {:ok, materialize(cell, pairs, j.upsert)}
   end
 
   def recompute(%Cell{meta: %{compute: nil}, id: id}, keys) do
@@ -61,4 +70,45 @@ defmodule ReactiveDag.Node.Recompute do
   # a cell whose meta carries no :compute key at all (e.g. a non-Node plan) —
   # treat like a leaf: pass through.
   def recompute(%Cell{}, keys), do: {:ok, keys}
+
+  # normalize an `into` result (one row or a list) into `[{key, row}]`. Key
+  # resolution: a row that carries its own `:key` field SELF-IDENTIFIES (expand
+  # rows must, since one group → many keys); otherwise the spec's `key` fn is
+  # applied to the group term (the fold case, one row per group). Row-key wins so
+  # the `length == 1` ambiguity (a group that expands to exactly one row) is moot.
+  defp rows_with_keys(row_or_rows, spec, group_term) do
+    key_fn = Map.get(spec, :key)
+
+    row_or_rows
+    |> List.wrap()
+    |> Enum.map(fn row ->
+      key =
+        cond do
+          is_map(row) and is_map_key(row, :key) -> row.key
+          is_function(key_fn, 1) -> key_fn.(group_term)
+          true -> raise "reactive_dag: cannot resolve a coordination key for row #{inspect(row)}"
+        end
+
+      {key, row}
+    end)
+  end
+
+  # upsert each {key, row} (host writes payload + reports changed), Op.put the
+  # changed keys, return them. Shared by reduce/expand + join.
+  defp materialize(cell, pairs, upsert) do
+    Enum.flat_map(pairs, fn {key, row} ->
+      if upsert.(key, row) do
+        ReactiveDag.Op.put(cell, key)
+        [key]
+      else
+        []
+      end
+    end)
+  end
+
+  # index items by a side's key fn; `key_fn.(item)` returns the join key, or nil
+  # for an item not on this side (so a single input can be split into left/right).
+  defp index(items, key_fn) do
+    for item <- items, jk = key_fn.(item), not is_nil(jk), into: %{}, do: {jk, item}
+  end
 end

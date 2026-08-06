@@ -135,12 +135,58 @@ defmodule ReactiveDag.Node do
     ]
   }
 
+  defmodule Join do
+    @moduledoc """
+    A declarative LEFT JOIN: read an input's payload, index it into a LEFT and a
+    RIGHT side (each a `%{join_key => item}` built from a per-side key fn), then
+    emit one row per left key joined to its right item (right may be absent). The
+    common two-input reconcile/variance shape — the author writes the two side
+    keys + the join row, not the read/write/changed plumbing.
+    """
+    defstruct [:over, :read, :left, :right, :key, :into, :upsert, :__identifier__, :__spark_metadata__]
+  end
+
+  @join %Spark.Dsl.Entity{
+    name: :join,
+    target: Join,
+    describe: "Declarative left join: index `over` into left/right sides, emit a row per left key.",
+    schema: [
+      over: [type: :atom, required: true, doc: "the input node id whose payload is read + indexed"],
+      read: [type: {:fun, 1}, required: true, doc: "`(over_id -> [item])` — read the input's items"],
+      left: [
+        type: {:fun, 1},
+        required: true,
+        doc: "`(item -> join_key | nil)` — the LEFT side's key (nil = not on the left)"
+      ],
+      right: [
+        type: {:fun, 1},
+        required: true,
+        doc: "`(item -> join_key | nil)` — the RIGHT side's key (nil = not on the right)"
+      ],
+      key: [
+        type: {:fun, 1},
+        required: true,
+        doc: "`(join_key -> cell_key_string)` — the output tuple key"
+      ],
+      into: [
+        type: {:fun, 3},
+        required: true,
+        doc: "`(join_key, left_item, right_item_or_nil -> row)` — the joined output row"
+      ],
+      upsert: [
+        type: {:fun, 2},
+        required: true,
+        doc: "`(key, row -> boolean)` — write payload + return true iff CHANGED (lib does Op.put)"
+      ]
+    ]
+  }
+
   @reactive %Spark.Dsl.Section{
     name: :reactive,
     describe: "Declares this resource as a reactive-DAG node: its op + dependencies.",
-    # legs (ref/compose) are the nested form; dep is the flat form. `reduce` is the
-    # declarative fold combinator (else use `compute:` for an arbitrary recompute).
-    entities: [@dep, @ref, @compose, @reduce],
+    # legs (ref/compose) are the nested form; dep is the flat form. `reduce`/`join`
+    # are the declarative combinators (else `compute:` for an arbitrary recompute).
+    entities: [@dep, @ref, @compose, @reduce, @join],
     schema: [
       id: [
         type: :atom,
@@ -276,41 +322,49 @@ defmodule ReactiveDag.Node do
 
     flat_refs = Ext.get_opt(resource, [:reactive], :depends_on, []) |> Enum.map(&%Ref{to: &1})
 
-    # a `reduce over: :x` implies an input edge to :x (the node it folds).
-    reduce_refs =
-      case reduce(resource) do
+    # a `reduce`/`join over: :x` implies an input edge to :x (the node it reads).
+    combinator_refs =
+      case combinator(resource) do
         nil -> []
-        r -> [%Ref{to: r.over}]
+        c -> [%Ref{to: c.over}]
       end
 
     {:op, root_id, Ext.get_opt(resource, [:reactive], :op, nil),
      Ext.get_opt(resource, [:reactive], :compute, nil),
      Ext.get_opt(resource, [:reactive], :key_rule, :identity),
      Ext.get_opt(resource, [:reactive], :leaf?, false), resource,
-     legs ++ flat_refs ++ reduce_refs, extra_meta(resource)}
+     legs ++ flat_refs ++ combinator_refs, extra_meta(resource)}
   end
 
-  # the single `reduce` entity of a node, or nil.
-  defp reduce(resource) do
-    Ext.get_entities(resource, [:reactive]) |> Enum.find(&match?(%Reduce{}, &1))
+  # the node's declarative combinator entity (Reduce or Join), or nil.
+  defp combinator(resource) do
+    Ext.get_entities(resource, [:reactive])
+    |> Enum.find(&(match?(%Reduce{}, &1) or match?(%Join{}, &1)))
   end
 
   # the OPEN host binding folded into a cell's meta: the `meta:` keyword list, the
-  # source/driver/over conveniences, and the `reduce` spec (which the generic
-  # recompute strategy runs — see ReactiveDag.Node.Recompute).
+  # source/driver/over conveniences, and the combinator spec under its kind key
+  # (`:reduce` | `:join`) — which ReactiveDag.Node.Recompute runs.
   defp extra_meta(resource) do
+    combinator_meta =
+      case combinator(resource) do
+        %Reduce{} = r -> %{reduce: r}
+        %Join{} = j -> %{join: j}
+        nil -> %{}
+      end
+
     Ext.get_opt(resource, [:reactive], :meta, [])
     |> Map.new()
     |> Map.merge(
       %{
         source: Ext.get_opt(resource, [:reactive], :source, nil),
         driver: Ext.get_opt(resource, [:reactive], :driver, nil),
-        over: Ext.get_opt(resource, [:reactive], :over, nil),
-        reduce: reduce(resource)
+        over: Ext.get_opt(resource, [:reactive], :over, nil)
       }
       |> Enum.reject(fn {_k, v} -> is_nil(v) end)
       |> Map.new()
     )
+    |> Map.merge(combinator_meta)
   end
 
   defp walk_cbs do
