@@ -160,6 +160,45 @@ typed value that doesn't fit the tuple, so it materializes rows into its own
 resource. The line between them is exactly whether the result fits the tuple's
 fixed schema.
 
+## Human input — the command frontier
+
+Scanners feed leaves out-of-band; but a **human** edit (a managed list, an
+approval) must enter the graph *in order* and *atomically with its consequences*.
+That's `ReactiveDag.Commands` — a second frontier, for INTENTS instead of dirty
+keys. It's the drain pattern one layer up:
+
+- a human-managed list / an approval is a **leaf** a command's executor writes;
+- a **command** is the ordered, transactional intent to write it;
+- the processor claims commands in `seq` order (**serialized** — no interleaving),
+  runs each via its host `ReactiveDag.CommandExecutor` (dispatched by `kind`),
+  and on success kicks the model drain — so the leaf write and its downstream
+  propagation happen in one pass.
+
+```elixir
+# a host executor: apply one intent (write leaves), return an outcome
+defmodule MyApp.ApproveExec do
+  @behaviour ReactiveDag.CommandExecutor
+  def execute(cmd, _ctx) do
+    # … write the approval leaf via Op.put / an Ash upsert …
+    {:done, %{approved: cmd["payload"]["thing"]}}
+  end
+end
+
+config :reactive_dag, command_executors: %{"approve" => MyApp.ApproveExec}
+
+ReactiveDag.Commands.enqueue!(%{kind: "approve", scope: "app-7", payload: %{"thing" => "x"}})
+ReactiveDag.Commands.run(on_settled: fn _cmd, _r -> MyApp.kick_drain() end)
+```
+
+**Human-in-the-loop is first-class.** An executor that returns `{:blocked, needs}`
+parks the command as a pending question and **freezes its scope** — later
+same-scope commands wait rather than racing ahead — without stranding the queue.
+The answer arrives as another command (freeze-exempt, `answers_id` back-pointing)
+that settles it and thaws the scope. `{:error, _}` is contained the same way (one
+bad command freezes only its scope). Storage is a seam
+(`ReactiveDag.Commands.Store`, default Postgres `seq`-ordered + `FOR UPDATE SKIP
+LOCKED`); the Oban worker that triggers `run/1` stays host-side, like the drain's.
+
 Status: **both hosts run on the substrate** — the shared engine spans a per-key
 Elixir recompute (cascade) and a set-based SQL recompute (the portal), all
 coordination writes routed through the seam, proven by both suites green. Cascade

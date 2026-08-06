@@ -38,7 +38,13 @@ defmodule ReactiveDag.MixProject do
           ReactiveDag.Source,
           ReactiveDag.RecomputeStrategy,
           ReactiveDag.KeyRule,
-          ReactiveDag.CoordinationWriter
+          ReactiveDag.CoordinationWriter,
+          ReactiveDag.CommandExecutor
+        ],
+        "Command frontier": [
+          ReactiveDag.Commands,
+          ReactiveDag.Commands.Store,
+          ReactiveDag.Commands.Store.Postgres
         ],
         Engine: [
           ReactiveDag.Drain,
