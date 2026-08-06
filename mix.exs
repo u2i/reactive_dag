@@ -26,17 +26,10 @@ defmodule ReactiveDag.MixProject do
       main: "readme",
       extras: [
         "README.md",
-        "docs/authoring-surface-mapping.md",
-        "docs/adr-001-reactive-dag-library.md",
-        "docs/adr-002-unified-dsl.md",
-        "docs/adr-002-dsl-sketches.md"
+        "docs/adr-001-reactive-dag-library.md"
       ],
       groups_for_modules: [
-        "Authoring DSL": [
-          ReactiveDag,
-          ReactiveDag.Graph.Dsl,
-          ReactiveDag.Dsl.Spine,
-          ReactiveDag.Dsl.Spine.Info,
+        Authoring: [
           ReactiveDag.Node,
           ReactiveDag.Node.Payload
         ],

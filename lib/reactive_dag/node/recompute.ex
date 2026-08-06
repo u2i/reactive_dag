@@ -93,11 +93,20 @@ defmodule ReactiveDag.Node.Recompute do
     end)
   end
 
-  # write each {key, row} to payload, Op.put the changed keys, return them. Shared
-  # by reduce/expand + join. The WRITE is either:
-  #   * a host `upsert:` callback (override) — `(key, row) -> changed?`, or
-  #   * the LIB closing the loop into the node's OWN resource (`meta.resource`) —
-  #     the default when no `upsert:` is given (see ReactiveDag.Node.Payload).
+  # write each {key, row}, Op.put the changed keys, return them. Shared by
+  # reduce/expand + join. Three write modes, in precedence order:
+  #   * VERDICT node (`verdict true`) — no payload; the row's `:status`/`:strength`
+  #     go straight into the tuple (Op.put opts). The result IS the coordination row.
+  #   * host `upsert:` callback (override) — `(key, row) -> changed?`.
+  #   * the LIB closing the loop into the node's OWN resource (`meta.resource`).
+  defp materialize(%Cell{meta: %{verdict: true}} = cell, pairs, _upsert) do
+    # a verdict-only node: the computed row lives in the tuple, not a payload table.
+    Enum.map(pairs, fn {key, row} ->
+      ReactiveDag.Op.put(cell, key, verdict_opts(row))
+      key
+    end)
+  end
+
   defp materialize(cell, pairs, upsert) do
     write = writer_fn(cell, upsert)
 
@@ -111,6 +120,14 @@ defmodule ReactiveDag.Node.Recompute do
     end)
   end
 
+  # a verdict row's tuple opts — status/strength if the combinator set them.
+  defp verdict_opts(row) when is_map(row) do
+    [status: row[:status], strength: row[:strength]]
+    |> Enum.reject(fn {_k, v} -> is_nil(v) end)
+  end
+
+  defp verdict_opts(_), do: []
+
   # `(key, row) -> changed?`. An explicit `upsert:` wins; otherwise the row is
   # written into the node's own resource (the unified "resource IS payload" shape).
   defp writer_fn(_cell, upsert) when is_function(upsert, 2), do: upsert
@@ -119,10 +136,10 @@ defmodule ReactiveDag.Node.Recompute do
     case meta[:resource] do
       nil ->
         raise """
-        reactive_dag: node #{inspect(id)} has a reduce/join with no `upsert:` and no
-        backing resource. Give the node an AshPostgres resource (its rows ARE its
-        payload) so the library can write it, or supply an explicit `upsert:` to
-        write elsewhere.
+        reactive_dag: node #{inspect(id)} has a reduce/join with no `upsert:`, no
+        backing resource, and is not `verdict true`. Either give the node an
+        AshPostgres resource (its rows ARE its payload), mark it `verdict true` (its
+        result lives in the coordination tuple), or supply an explicit `upsert:`.
         """
 
       resource ->

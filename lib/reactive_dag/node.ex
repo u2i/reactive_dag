@@ -54,9 +54,8 @@ defmodule ReactiveDag.Node do
     tree; `depends_on [:a, :b]` is the flat input-edge form.
 
   The whole graph is assembled by `ReactiveDag.Node.graph/2` over a list of node
-  resources (or mixed with a `ReactiveDag.Dsl.Spine` graph via
-  `ReactiveDag.assemble/1`). The substrate reads only the `reactive` block for the
-  graph; the resource's attributes are the payload the node writes.
+  resources. The substrate reads only the `reactive` block for the graph; the
+  resource's attributes are the payload the node writes.
   """
 
   defmodule Dep do
@@ -266,6 +265,12 @@ defmodule ReactiveDag.Node do
         default: :upsert,
         doc: "the Ash upsert action used to write the node's own payload (default `:upsert`)."
       ],
+      verdict: [
+        type: :boolean,
+        default: false,
+        doc:
+          "VERDICT-ONLY node: its computed result lives entirely in the coordination tuple (`status`/`strength`), with NO payload table of its own. A `reduce`/`join` on a verdict node writes each row's `:status`/`:strength` straight into the tuple via `Op.put` — no resource, no `upsert:`, no attributes needed. Use for nodes whose output fits the tuple's fixed schema (e.g. a compliance verdict), as opposed to nodes that materialize typed rows."
+      ],
       source: [
         type: :atom,
         doc: "convenience: a leaf's source binding id (also merged into meta)"
@@ -416,6 +421,12 @@ defmodule ReactiveDag.Node do
     |> Enum.find(&(match?(%Reduce{}, &1) or match?(%Join{}, &1)))
   end
 
+  # `true` when the node is verdict-only, else nil (so it's dropped from meta and
+  # `meta[:verdict]` stays falsy for the common payload-bearing case).
+  defp verdict_flag(resource) do
+    if Ext.get_opt(resource, [:reactive], :verdict, false), do: true, else: nil
+  end
+
   # the OPEN host binding folded into a cell's meta: the `meta:` keyword list, the
   # source/driver/over conveniences, and the combinator spec under its kind key
   # (`:reduce` | `:join`) — which ReactiveDag.Node.Recompute runs.
@@ -435,7 +446,8 @@ defmodule ReactiveDag.Node do
         driver: Ext.get_opt(resource, [:reactive], :driver, nil),
         over: Ext.get_opt(resource, [:reactive], :over, nil),
         payload_key: Ext.get_opt(resource, [:reactive], :payload_key, nil),
-        payload_action: Ext.get_opt(resource, [:reactive], :payload_action, nil)
+        payload_action: Ext.get_opt(resource, [:reactive], :payload_action, nil),
+        verdict: verdict_flag(resource)
       }
       |> Enum.reject(fn {_k, v} -> is_nil(v) end)
       |> Map.new()
