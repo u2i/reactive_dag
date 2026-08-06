@@ -129,32 +129,48 @@ before/after in [docs/adr-002-dsl-sketches.md](docs/adr-002-dsl-sketches.md).
 
 ## Authoring a node (per-resource)
 
-A node is an Ash resource with the `ReactiveDag.Node` extension; its `reactive`
-block declares the op, its dependencies, and *how it computes* — the resource
-carries both the node definition and (via its own attributes) the payload. The
-computation is declared inline for the common shapes, with an escape hatch to a
-module for anything bespoke — the Ash calculation model:
+A node is an Ash resource with the `ReactiveDag.Node` extension. **The resource IS
+the node and its own payload table** — its `reactive` block is the computation, its
+`attributes` are the rows it materializes. The library **closes the payload loop**:
+`into` returns a row and the lib writes it into *this* resource — no `upsert:`
+needed for the common case.
 
 ```elixir
 defmodule MyApp.BudgetRollups do
-  use Ash.Resource, extensions: [ReactiveDag.Node]
+  use Ash.Resource, data_layer: AshPostgres.DataLayer,   # its OWN payload table
+    extensions: [ReactiveDag.Node]
+
+  attributes do
+    attribute :key, :string, primary_key?: true          # the payload columns
+    attribute :fund, :string
+    attribute :total, :float
+  end
+  actions do
+    create :upsert do upsert?(true); upsert_identity(:key); accept([:key, :fund, :total]) end
+  end
 
   reactive do
     op :fold
     key_rule :all
-    # a REDUCE (fold): read → group_by → reduce each group to one row.
+    # read → group_by → reduce each group to one row. `into`'s row is written into
+    # THIS resource (keyed by :key) by the library; it Op.puts only changed keys.
     reduce over: :fiscal_lines,
            read:     fn :fiscal_lines -> FiscalDoc |> Ash.read!() end,
            group_by: fn line -> {line.fund, line.fy} end,
            key:      fn {fund, fy} -> "#{fund}|#{fy}" end,
-           into:     fn {fund, fy}, lines -> %{total: sum(lines)} end,
-           upsert:   fn key, row -> write_payload(key, row) end   # → changed?
+           into:     fn {fund, _fy}, lines -> %{key: …, fund: fund, total: sum(lines)} end
   end
 end
 ```
 
+`upsert:` is an **optional override** — supply it only to write somewhere *other*
+than the node's own resource (e.g. an existing shadow table). A tableless node
+(`data_layer: Ash.DataLayer.Simple`, no attributes) either supplies `upsert:` or
+uses the `compute Module` escape hatch.
+
 Three declarative combinators cover the common map/reduce shapes; each writes the
-result set through the coordination seam and `Op.put`s only the changed keys:
+result set (into the node's resource, or a custom `upsert:`) and `Op.put`s only the
+changed keys:
 
 - **`reduce`** — a fold: `into` returns one row per group.
 - **`expand`** — a `reduce` whose `into` returns a **list** (group → many rows).

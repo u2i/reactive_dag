@@ -93,17 +93,43 @@ defmodule ReactiveDag.Node.Recompute do
     end)
   end
 
-  # upsert each {key, row} (host writes payload + reports changed), Op.put the
-  # changed keys, return them. Shared by reduce/expand + join.
+  # write each {key, row} to payload, Op.put the changed keys, return them. Shared
+  # by reduce/expand + join. The WRITE is either:
+  #   * a host `upsert:` callback (override) — `(key, row) -> changed?`, or
+  #   * the LIB closing the loop into the node's OWN resource (`meta.resource`) —
+  #     the default when no `upsert:` is given (see ReactiveDag.Node.Payload).
   defp materialize(cell, pairs, upsert) do
+    write = writer_fn(cell, upsert)
+
     Enum.flat_map(pairs, fn {key, row} ->
-      if upsert.(key, row) do
+      if write.(key, row) do
         ReactiveDag.Op.put(cell, key)
         [key]
       else
         []
       end
     end)
+  end
+
+  # `(key, row) -> changed?`. An explicit `upsert:` wins; otherwise the row is
+  # written into the node's own resource (the unified "resource IS payload" shape).
+  defp writer_fn(_cell, upsert) when is_function(upsert, 2), do: upsert
+
+  defp writer_fn(%Cell{meta: meta, id: id}, nil) do
+    case meta[:resource] do
+      nil ->
+        raise """
+        reactive_dag: node #{inspect(id)} has a reduce/join with no `upsert:` and no
+        backing resource. Give the node an AshPostgres resource (its rows ARE its
+        payload) so the library can write it, or supply an explicit `upsert:` to
+        write elsewhere.
+        """
+
+      resource ->
+        key_attr = meta[:payload_key] || :key
+        action = meta[:payload_action] || :upsert
+        fn key, row -> ReactiveDag.Node.Payload.upsert(resource, key_attr, key, row, action) == :changed end
+    end
   end
 
   # index items by a side's key fn; `key_fn.(item)` returns the join key, or nil

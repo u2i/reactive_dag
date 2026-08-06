@@ -1,36 +1,62 @@
 defmodule ReactiveDag.Node do
   @moduledoc """
   An **Ash resource extension** that makes a resource a node in a reactive DAG.
-  Instead of a central pipeline module declaring every cell, each node declares
-  its own op + dependencies *on the resource itself* — the resource IS the node,
-  and its rows are the node's payload (a tableless node just adds no attributes
-  beyond its key):
+  The resource IS the node **and** its own payload table: its `reactive` block
+  defines the computation, its `attributes` are the rows the node materializes.
+  This is the intended shape — one resource, both roles.
 
-      defmodule MyApp.Meeting do
+      defmodule MyApp.FlowMonth do
         use Ash.Resource,
           domain: MyApp.Domain,
-          data_layer: AshPostgres.DataLayer,
+          data_layer: AshPostgres.DataLayer,     # the node's OWN payload table
           extensions: [ReactiveDag.Node]
 
-        reactive do
-          id :meeting            # the cell id (defaults to the resource's short name)
-          op :join
-          compute MyApp.Ops.MeetingJoin
-          key_rule :identity
-          depends_on [:meeting_shell, :agenda_docs, :meeting_events, :discussions]
+        attributes do                             # the payload columns
+          attribute :key, :string, primary_key?: true
+          attribute :plant, :string
+          attribute :avg_flow, :float
         end
 
-        attributes do ... end    # the payload columns (omit for a tableless node)
+        actions do
+          create :upsert do upsert?(true); upsert_identity(:key); accept([:key, :plant, :avg_flow]) end
+        end
+
+        reactive do
+          op :fold
+          key_rule :all
+          # `into` returns the row; the LIBRARY writes it into THIS resource
+          # (keyed by :key) and does the coordination Op.put. No `upsert:` needed.
+          reduce over: :dmr_rows,
+                 read: &MyApp.FlowMonth.read/1,
+                 group_by: &MyApp.FlowMonth.group/1,
+                 key: &MyApp.FlowMonth.key/1,
+                 into: &MyApp.FlowMonth.into/2
+        end
       end
 
-  A `depends_on` id is another node's `id` (by-name, the DAG's fan-out). Nested
-  inline sub-ops (`ref`/`compose`) can be added later; the first cut is the flat
-  `depends_on` form, which covers the common case.
+  The library closes the payload loop: a `reduce`/`join` whose `into` returns a
+  row, with **no `upsert:`**, has that row written into the node's own resource
+  (`ReactiveDag.Node.Payload`) with change-detection. Writing into a *different*
+  resource is the explicit deviation — supply a custom `upsert:` for that.
+
+  The cell key maps to the resource's `payload_key` attribute (default `:key`) via
+  the `payload_action` upsert (default `:upsert`); set those in the `reactive`
+  block if they're named otherwise.
+
+  ## Variations
+
+  * **Tableless node** (no payload of its own — a pure combinator or a verdict):
+    use `data_layer: Ash.DataLayer.Simple`, add no attributes, and either supply an
+    `upsert:` (write elsewhere) or a `compute Module` escape hatch.
+  * **Escape hatch** (`compute MyOp`, a `ReactiveDag.Op`): for recompute the
+    combinators can't express (an LLM call, a fetch, a bespoke multi-input join).
+  * **Nested composition** (`ref`/`compose`): the algebra reads as an expression
+    tree; `depends_on [:a, :b]` is the flat input-edge form.
 
   The whole graph is assembled by `ReactiveDag.Node.graph/2` over a list of node
-  resources — each contributes one cell; the union is handed to
-  `ReactiveDag.Graph.build/1`. The reactive substrate never reads the resource's
-  ATTRIBUTES (those are host payload); it reads only this `reactive` block.
+  resources (or mixed with a `ReactiveDag.Dsl.Spine` graph via
+  `ReactiveDag.assemble/1`). The substrate reads only the `reactive` block for the
+  graph; the resource's attributes are the payload the node writes.
   """
 
   defmodule Dep do
@@ -137,9 +163,9 @@ defmodule ReactiveDag.Node do
       ],
       upsert: [
         type: {:fun, 2},
-        required: true,
+        required: false,
         doc:
-          "`(key, row -> boolean)` — write the row's payload (host typed resource) + return true iff it CHANGED. The library does the coordination `Op.put` for changed keys."
+          "OPTIONAL override `(key, row -> boolean)` — write the row's payload + return true iff CHANGED. OMIT it for the common case: the library writes `into`'s row into the node's OWN resource (`ReactiveDag.Node.Payload`) and does the `Op.put`. Supply `upsert:` only to write somewhere other than the node itself."
       ]
     ]
   }
@@ -184,8 +210,8 @@ defmodule ReactiveDag.Node do
       ],
       upsert: [
         type: {:fun, 2},
-        required: true,
-        doc: "`(key, row -> boolean)` — write payload + return true iff CHANGED (lib does Op.put)"
+        required: false,
+        doc: "OPTIONAL override `(key, row -> boolean)`. OMIT it → the library writes the row into the node's own resource (see `ReactiveDag.Node.Payload`)."
       ]
     ]
   }
@@ -229,6 +255,17 @@ defmodule ReactiveDag.Node do
         doc: "how a child key maps to this cell's key on propagation"
       ],
       leaf?: [type: :boolean, default: false, doc: "true for a source-fed leaf (no compute)"],
+      payload_key: [
+        type: :atom,
+        default: :key,
+        doc:
+          "the resource attribute the cell key writes to when the library closes the payload loop (a `reduce`/`join` with no `upsert:`). Defaults to `:key`."
+      ],
+      payload_action: [
+        type: :atom,
+        default: :upsert,
+        doc: "the Ash upsert action used to write the node's own payload (default `:upsert`)."
+      ],
       source: [
         type: :atom,
         doc: "convenience: a leaf's source binding id (also merged into meta)"
@@ -396,7 +433,9 @@ defmodule ReactiveDag.Node do
       %{
         source: Ext.get_opt(resource, [:reactive], :source, nil),
         driver: Ext.get_opt(resource, [:reactive], :driver, nil),
-        over: Ext.get_opt(resource, [:reactive], :over, nil)
+        over: Ext.get_opt(resource, [:reactive], :over, nil),
+        payload_key: Ext.get_opt(resource, [:reactive], :payload_key, nil),
+        payload_action: Ext.get_opt(resource, [:reactive], :payload_action, nil)
       }
       |> Enum.reject(fn {_k, v} -> is_nil(v) end)
       |> Map.new()

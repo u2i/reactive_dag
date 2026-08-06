@@ -37,7 +37,8 @@ defmodule ReactiveDag.MixProject do
           ReactiveDag.Graph.Dsl,
           ReactiveDag.Dsl.Spine,
           ReactiveDag.Dsl.Spine.Info,
-          ReactiveDag.Node
+          ReactiveDag.Node,
+          ReactiveDag.Node.Payload
         ],
         Seams: [
           ReactiveDag.Source,
