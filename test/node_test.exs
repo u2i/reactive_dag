@@ -50,6 +50,42 @@ defmodule ReactiveDag.NodeTest do
     end
   end
 
+  defmodule Resolutions do
+    use Ash.Resource, domain: Domain, data_layer: Ash.DataLayer.Simple, extensions: [ReactiveDag.Node]
+    reactive do
+      op :source
+      leaf? true
+    end
+  end
+
+  defmodule MeetingEvents do
+    use Ash.Resource, domain: Domain, data_layer: Ash.DataLayer.Simple, extensions: [ReactiveDag.Node]
+    reactive do
+      op :source
+      leaf? true
+    end
+  end
+
+  # mirrors cascade's meeting_shell: a union of a by-name ref (agenda_docs) and an
+  # inline composed fold (projected_meetings), the fold nesting two more refs.
+  defmodule ShellNested do
+    use Ash.Resource, domain: Domain, data_layer: Ash.DataLayer.Simple, extensions: [ReactiveDag.Node]
+    reactive do
+      id :meeting_shell_nested
+      op :union
+      compute FakeShell
+      ref :agenda_docs
+
+      compose :fold do
+        as :projected_meetings
+        compute FakeProjected
+        key_rule :all
+        ref :resolutions
+        ref :meeting_events
+      end
+    end
+  end
+
   @resources [AgendaDocs, MeetingShell, Meeting, Meetings]
 
   test "cell_id defaults to the resource's snake short-name, or the explicit id" do
@@ -73,6 +109,33 @@ defmodule ReactiveDag.NodeTest do
     leaf = ReactiveDag.Node.to_cell(AgendaDocs)
     assert leaf.leaf? == true
     assert leaf.inputs == []
+  end
+
+  test "a nested compose lowers to an intermediate cell via Lowering.walk" do
+    cells = ReactiveDag.Node.cells(ShellNested)
+    ids = cells |> Enum.map(& &1.id) |> Enum.sort()
+
+    # root + one intermediate (the composed fold, named by its `as`).
+    assert "meeting_shell_nested" in ids
+    assert "projected_meetings" in ids
+
+    root = Enum.find(cells, &(&1.id == "meeting_shell_nested"))
+    # root's inputs: the by-name ref + the composed cell's id.
+    assert Enum.sort(root.inputs) == ["agenda_docs", "projected_meetings"]
+
+    proj = Enum.find(cells, &(&1.id == "projected_meetings"))
+    assert proj.op == :fold
+    assert proj.meta.compute == FakeProjected
+    assert proj.meta.key_rule == :all
+    assert proj.meta.resource == nil
+    assert Enum.sort(proj.inputs) == ["meeting_events", "resolutions"]
+  end
+
+  test "the nested node assembles into a valid plan (intermediate deeper than its refs)" do
+    plan = ReactiveDag.Node.graph([AgendaDocs, Resolutions, MeetingEvents, ShellNested])
+    assert plan.depths["projected_meetings"] > plan.depths["resolutions"]
+    assert plan.depths["meeting_shell_nested"] > plan.depths["projected_meetings"]
+    assert "meeting_shell_nested" in plan.parents["projected_meetings"]
   end
 
   test "graph/1 assembles a valid depth-ordered plan from the node resources" do
