@@ -93,18 +93,61 @@ defmodule ReactiveDag.Node do
              %{@compose_base | entities: [legs: [@ref, child]]}
            end)
 
+  defmodule Reduce do
+    @moduledoc """
+    A declarative REDUCE (fold): read an input node's payload, group it, and
+    reduce each group to one output row — the common map/fold shape, so the
+    author writes the grouping + reduction, not the read/write/changed plumbing.
+    Anything the combinator can't express (an LLM call, an external fetch, a
+    bespoke join) uses the `compute:` module escape hatch instead.
+    """
+    defstruct [:over, :group_by, :key, :into, :read, :upsert, :__identifier__, :__spark_metadata__]
+  end
+
+  @reduce %Spark.Dsl.Entity{
+    name: :reduce,
+    target: Reduce,
+    describe: "Declarative fold: read `over`, group by `group_by`, reduce each group with `into`.",
+    schema: [
+      over: [type: :atom, required: true, doc: "the input node id whose payload is read + grouped"],
+      read: [
+        type: {:fun, 1},
+        required: true,
+        doc: "`(over_id -> [item])` — read the input's payload items (host domain: Ash.read etc.)"
+      ],
+      group_by: [type: {:fun, 1}, required: true, doc: "`(item -> group_term)` — the grouping key"],
+      key: [
+        type: {:fun, 1},
+        required: true,
+        doc: "`(group_term -> cell_key_string)` — the output tuple key for a group"
+      ],
+      into: [
+        type: {:fun, 2},
+        required: true,
+        doc: "`(group_term, [item] -> row)` — reduce a group to its output row/payload"
+      ],
+      upsert: [
+        type: {:fun, 2},
+        required: true,
+        doc:
+          "`(key, row -> boolean)` — write the row's payload (host typed resource) + return true iff it CHANGED. The library does the coordination `Op.put` for changed keys."
+      ]
+    ]
+  }
+
   @reactive %Spark.Dsl.Section{
     name: :reactive,
     describe: "Declares this resource as a reactive-DAG node: its op + dependencies.",
-    # legs (ref/compose) are the nested form; dep is the flat form. Both allowed.
-    entities: [@dep, @ref, @compose],
+    # legs (ref/compose) are the nested form; dep is the flat form. `reduce` is the
+    # declarative fold combinator (else use `compute:` for an arbitrary recompute).
+    entities: [@dep, @ref, @compose, @reduce],
     schema: [
       id: [
         type: :atom,
         doc: "the cell id; defaults to the resource module's short name, snake_cased"
       ],
       op: [type: :atom, required: true, doc: "the op kind (free atom; the host interprets it)"],
-      compute: [type: :atom, doc: "the recompute module for this node (nil for a leaf)"],
+      compute: [type: :atom, doc: "the recompute module for this node (nil for a leaf / a `reduce`)"],
       key_rule: [
         type: {:one_of, [:identity, :all]},
         default: :identity,
@@ -233,15 +276,28 @@ defmodule ReactiveDag.Node do
 
     flat_refs = Ext.get_opt(resource, [:reactive], :depends_on, []) |> Enum.map(&%Ref{to: &1})
 
+    # a `reduce over: :x` implies an input edge to :x (the node it folds).
+    reduce_refs =
+      case reduce(resource) do
+        nil -> []
+        r -> [%Ref{to: r.over}]
+      end
+
     {:op, root_id, Ext.get_opt(resource, [:reactive], :op, nil),
      Ext.get_opt(resource, [:reactive], :compute, nil),
      Ext.get_opt(resource, [:reactive], :key_rule, :identity),
-     Ext.get_opt(resource, [:reactive], :leaf?, false), resource, legs ++ flat_refs,
-     extra_meta(resource)}
+     Ext.get_opt(resource, [:reactive], :leaf?, false), resource,
+     legs ++ flat_refs ++ reduce_refs, extra_meta(resource)}
   end
 
-  # the OPEN host binding folded into a cell's meta: the `meta:` keyword list plus
-  # the source/driver/over conveniences. The library never reads these.
+  # the single `reduce` entity of a node, or nil.
+  defp reduce(resource) do
+    Ext.get_entities(resource, [:reactive]) |> Enum.find(&match?(%Reduce{}, &1))
+  end
+
+  # the OPEN host binding folded into a cell's meta: the `meta:` keyword list, the
+  # source/driver/over conveniences, and the `reduce` spec (which the generic
+  # recompute strategy runs — see ReactiveDag.Node.Recompute).
   defp extra_meta(resource) do
     Ext.get_opt(resource, [:reactive], :meta, [])
     |> Map.new()
@@ -249,7 +305,8 @@ defmodule ReactiveDag.Node do
       %{
         source: Ext.get_opt(resource, [:reactive], :source, nil),
         driver: Ext.get_opt(resource, [:reactive], :driver, nil),
-        over: Ext.get_opt(resource, [:reactive], :over, nil)
+        over: Ext.get_opt(resource, [:reactive], :over, nil),
+        reduce: reduce(resource)
       }
       |> Enum.reject(fn {_k, v} -> is_nil(v) end)
       |> Map.new()

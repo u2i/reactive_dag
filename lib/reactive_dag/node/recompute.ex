@@ -27,6 +27,28 @@ defmodule ReactiveDag.Node.Recompute do
   @impl true
   def recompute(%Cell{leaf?: true}, keys), do: {:ok, keys}
 
+  # a declarative `reduce` combinator (the common fold) — run it generically:
+  # read `over` → group_by → into → upsert each (host writes payload + reports
+  # changed) → Op.put the changed keys. The author wrote only group/reduce/upsert.
+  def recompute(%Cell{meta: %{reduce: %{} = r}} = cell, _keys) do
+    changed =
+      r.read.(r.over)
+      |> Enum.group_by(r.group_by)
+      |> Enum.flat_map(fn {group, items} ->
+        key = r.key.(group)
+        row = r.into.(group, items)
+
+        if r.upsert.(key, row) do
+          ReactiveDag.Op.put(cell, key)
+          [key]
+        else
+          []
+        end
+      end)
+
+    {:ok, changed}
+  end
+
   def recompute(%Cell{meta: %{compute: nil}, id: id}, keys) do
     Logger.warning("reactive_dag: node #{inspect(id)} has no compute module; passing keys through")
     {:ok, keys}
