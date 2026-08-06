@@ -235,13 +235,72 @@ defmodule ReactiveDag.Node do
     schema: [module: [type: :atom, required: true, doc: "a module implementing ReactiveDag.Op"]]
   }
 
+  defmodule Aggregate do
+    @moduledoc """
+    A PURE-ASH-QUERY reduce: the datastore does the grouping via a RELATIONSHIP
+    aggregate. The node's own resource IS the group grain (one row per group), and
+    `over` names its `has_many` to the rows being aggregated. The library loads
+    the aggregates in ONE Ash query — Postgres computes the `GROUP BY` — and each
+    parent row's aggregate values are its payload. No rows cross into the BEAM; no
+    `into`/`read`/`upsert` (contrast the in-BEAM `reduce`, which loads every row).
+
+    Only expressible as a relationship aggregate: the group must be a resource with
+    a relationship to the input. Arbitrary attribute `GROUP BY` is NOT in Ash 3.x's
+    read API — use the in-BEAM `reduce` (or a `compute` module) for that.
+
+    Each aggregate maps a kind (`:count | :sum | :avg | :min | :max | :first`) to a
+    `{source_field, dest_attribute}` (or, for `:count`, just a dest attribute):
+
+        aggregate over: :dmr_reports,          # has_many on THIS resource
+                  count: :day_count,           # count(dmr_reports) → :day_count
+                  avg: [flow: :avg_flow],      # avg(dmr_reports.flow) → :avg_flow
+                  max: [flow: :peak_flow]
+    """
+    defstruct [
+      :over,
+      :count,
+      :sum,
+      :avg,
+      :min,
+      :max,
+      :first,
+      :__identifier__,
+      :__spark_metadata__
+    ]
+  end
+
+  @agg_kinds [:count, :sum, :avg, :min, :max, :first]
+
+  @aggregate %Spark.Dsl.Entity{
+    name: :aggregate,
+    target: Aggregate,
+    describe:
+      "Pure-Ash relationship aggregate: the datastore groups + aggregates the `over` relationship in one query; each parent row IS a payload row.",
+    schema:
+      [
+        over: [
+          type: :atom,
+          required: true,
+          doc: "a `has_many`/`has_one` relationship on THIS resource — the rows to aggregate per group."
+        ]
+      ] ++
+        Enum.map(@agg_kinds, fn kind ->
+          {kind,
+           [
+             type: {:or, [:atom, :keyword_list]},
+             doc:
+               "#{kind}: an attribute name (for :count) or `[source_field: dest_attribute]` mapping the aggregate onto this resource's attributes."
+           ]}
+        end)
+  }
+
   @reactive %Spark.Dsl.Section{
     name: :reactive,
     describe: "Declares this resource as a reactive-DAG node: its op + dependencies.",
-    # Computation is declared with an ENTITY: `reduce`/`join` (declarative) or
-    # `compute Module` (the escape hatch). legs (ref/compose) are the nested
-    # dependency form; dep is the flat form.
-    entities: [@dep, @ref, @compose, @reduce, @join, @compute],
+    # Computation is declared with an ENTITY: `reduce`/`join`/`aggregate`
+    # (declarative) or `compute Module` (the escape hatch). legs (ref/compose) are
+    # the nested dependency form; dep is the flat form.
+    entities: [@dep, @ref, @compose, @reduce, @join, @aggregate, @compute],
     schema: [
       id: [
         type: :atom,
@@ -415,10 +474,17 @@ defmodule ReactiveDag.Node do
     end
   end
 
-  # the node's declarative combinator entity (Reduce or Join), or nil.
+  # the node's declarative combinator entity whose `over` is an INPUT NODE (Reduce
+  # or Join) — this drives the implicit input edge. NOT Aggregate: its `over` is a
+  # relationship on this resource, not another cell, so it adds no edge.
   defp combinator(resource) do
     Ext.get_entities(resource, [:reactive])
     |> Enum.find(&(match?(%Reduce{}, &1) or match?(%Join{}, &1)))
+  end
+
+  # the node's Aggregate entity (a relationship aggregate), or nil.
+  defp aggregate(resource) do
+    Ext.get_entities(resource, [:reactive]) |> Enum.find(&match?(%Aggregate{}, &1))
   end
 
   # `true` when the node is verdict-only, else nil (so it's dropped from meta and
@@ -438,6 +504,12 @@ defmodule ReactiveDag.Node do
         nil -> %{}
       end
 
+    aggregate_meta =
+      case aggregate(resource) do
+        %Aggregate{} = a -> %{aggregate: a}
+        nil -> %{}
+      end
+
     Ext.get_opt(resource, [:reactive], :meta, [])
     |> Map.new()
     |> Map.merge(
@@ -453,6 +525,7 @@ defmodule ReactiveDag.Node do
       |> Map.new()
     )
     |> Map.merge(combinator_meta)
+    |> Map.merge(aggregate_meta)
   end
 
   defp walk_cbs do

@@ -31,7 +31,8 @@ defmodule ReactiveDag.MixProject do
       groups_for_modules: [
         Authoring: [
           ReactiveDag.Node,
-          ReactiveDag.Node.Payload
+          ReactiveDag.Node.Payload,
+          ReactiveDag.Node.AggregateRun
         ],
         Seams: [
           ReactiveDag.Source,

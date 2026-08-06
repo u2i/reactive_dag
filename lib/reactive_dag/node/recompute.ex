@@ -58,6 +58,17 @@ defmodule ReactiveDag.Node.Recompute do
     {:ok, materialize(cell, pairs, j.upsert)}
   end
 
+  # a PURE-ASH-QUERY aggregate — the datastore groups + aggregates the `over`
+  # relationship. The node's resource (`meta.resource`) IS the group grain: read it
+  # with the relationship aggregates loaded (ONE Ash query; Postgres does the
+  # GROUP BY), and each parent row's aggregate values become its payload. This is a
+  # WHOLE-CELL recompute (a GROUP BY reprices every group; there's no per-dirty-key
+  # scoping), so the changed set is every group whose aggregate value moved.
+  def recompute(%Cell{meta: %{aggregate: %{} = agg, resource: resource}} = cell, _keys)
+      when not is_nil(resource) do
+    {:ok, ReactiveDag.Node.AggregateRun.recompute(cell, resource, agg)}
+  end
+
   def recompute(%Cell{meta: %{compute: nil}, id: id}, keys) do
     Logger.warning("reactive_dag: node #{inspect(id)} has no compute module; passing keys through")
     {:ok, keys}

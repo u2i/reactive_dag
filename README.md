@@ -82,14 +82,19 @@ than the node's own resource (e.g. an existing shadow table). A tableless node
 (`data_layer: Ash.DataLayer.Simple`, no attributes) either supplies `upsert:` or
 uses the `compute Module` escape hatch.
 
-Three declarative combinators cover the common map/reduce shapes; each writes the
-result set (into the node's resource, or a custom `upsert:`) and `Op.put`s only the
-changed keys:
+Declarative combinators cover the common shapes; each writes the result set (into
+the node's resource, or a custom `upsert:`) and `Op.put`s only the changed keys:
 
-- **`reduce`** — a fold: `into` returns one row per group.
+- **`reduce`** — a fold: read `over` into the BEAM, group, `into` returns one row
+  per group.
 - **`expand`** — a `reduce` whose `into` returns a **list** (group → many rows).
 - **`join`** — a two-input left join: index `over` into `left`/`right` sides, emit
   one row per left key joined to its right (right may be absent).
+- **`aggregate`** — a **pure-Ash-query** fold: the datastore groups + aggregates a
+  relationship (`avg`/`sum`/`count`/…) in ONE query — no rows cross into the BEAM.
+  The node's resource IS the group grain; `over` is its `has_many`. Only for
+  relationship aggregates (Ash has no arbitrary `GROUP BY … → rows`); use `reduce`
+  for in-BEAM folds. Example: `aggregate over: :readings, avg: [flow: :avg_flow], count: :day_count`.
 
 Anything the combinators can't express — an LLM call, a PDF/Tigris fetch, a
 bespoke multi-input recompute — uses the module escape hatch, declared as an
