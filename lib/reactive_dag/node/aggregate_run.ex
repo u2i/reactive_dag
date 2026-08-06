@@ -34,8 +34,12 @@ defmodule ReactiveDag.Node.AggregateRun do
       payload = project(row, key_attr, loads)
 
       case ReactiveDag.Node.Payload.upsert(resource, key_attr, cell_key, payload, action) do
-        :changed -> ReactiveDag.Op.put(cell, cell_key) && [cell_key]
-        :unchanged -> []
+        :changed ->
+          ReactiveDag.Op.put(cell, cell_key)
+          [cell_key]
+
+        :unchanged ->
+          []
       end
     end)
   end

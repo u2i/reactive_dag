@@ -30,7 +30,7 @@ defmodule ReactiveDag.Node.Recompute do
   # a declarative REDUCE/EXPAND combinator — read `over` → group_by → into each
   # group. `into` returns ONE row (a fold) or a LIST of rows (an expand: group →
   # many). Each row's key comes from `key.(group)` for a fold, or from the row
-  # itself for an expand (see key resolution in emit_rows/3).
+  # itself for an expand (see key resolution in rows_with_keys/3).
   def recompute(%Cell{meta: %{reduce: %{} = r}} = cell, _keys) do
     pairs =
       r.read.(r.over)

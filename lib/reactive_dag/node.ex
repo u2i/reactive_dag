@@ -58,13 +58,12 @@ defmodule ReactiveDag.Node do
   resource's attributes are the payload the node writes.
   """
 
-  defmodule Dep do
-    @moduledoc "A single by-name dependency edge (an input cell id)."
-    defstruct [:to, :__identifier__, :__spark_metadata__]
-  end
-
   defmodule Ref do
-    @moduledoc "A by-name reference leg to another named node (an input edge)."
+    @moduledoc """
+    A by-name input edge to another named node (`ref :id`). The general form —
+    nestable inside `compose`. The flat `depends_on: [:a, :b]` schema key is sugar
+    that lowers to one `%Ref{}` per id.
+    """
     defstruct [:to, :__identifier__, :__spark_metadata__]
   end
 
@@ -87,14 +86,6 @@ defmodule ReactiveDag.Node do
     ]
   end
 
-  @dep %Spark.Dsl.Entity{
-    name: :dep,
-    target: Dep,
-    args: [:to],
-    describe: "One dependency edge — the id of an input node (flat form).",
-    schema: [to: [type: :atom, required: true, doc: "the input node's id"]]
-  }
-
   @ref %Spark.Dsl.Entity{
     name: :ref,
     target: Ref,
@@ -109,7 +100,7 @@ defmodule ReactiveDag.Node do
     args: [:op],
     describe: "An anonymous nested op-expression leg; composes inline as an intermediate cell.",
     schema: [
-      op: [type: :atom, required: true, doc: "the op kind for this intermediate cell"],
+      op: [type: :atom, required: true, doc: "free-atom label for this intermediate cell (positional; see `ReactiveDag.Cell` for what `op` means)"],
       compute: [type: :atom, doc: "the recompute module for this intermediate cell"],
       as: [type: :atom, doc: "an explicit id for this intermediate cell"],
       key_rule: [type: {:one_of, [:identity, :all]}, default: :identity],
@@ -300,13 +291,17 @@ defmodule ReactiveDag.Node do
     # Computation is declared with an ENTITY: `reduce`/`join`/`aggregate`
     # (declarative) or `compute Module` (the escape hatch). legs (ref/compose) are
     # the nested dependency form; dep is the flat form.
-    entities: [@dep, @ref, @compose, @reduce, @join, @aggregate, @compute],
+    entities: [@ref, @compose, @reduce, @join, @aggregate, @compute],
     schema: [
       id: [
         type: :atom,
         doc: "the cell id; defaults to the resource module's short name, snake_cased"
       ],
-      op: [type: :atom, required: true, doc: "the op kind (free atom; the host interprets it)"],
+      op: [
+        type: :atom,
+        doc:
+          "OPTIONAL free-atom label. Recompute dispatches on the `reduce`/`join`/`aggregate`/`compute` entity + `meta` shape, NOT on `op` — so `op` is documentation here, load-bearing only for a `RecomputeStrategy` that dispatches on it (e.g. `ReactiveDag.SetOp`). See `ReactiveDag.Cell`."
+      ],
       key_rule: [
         type: {:one_of, [:identity, :all]},
         default: :identity,
@@ -442,13 +437,13 @@ defmodule ReactiveDag.Node do
   # ── lowering: the reactive block → a node the walk callbacks understand ─────
   # The root node and every `compose` leg share one internal shape:
   #   {:op, id, op, compute, key_rule, leaf?, resource, legs, extra}
-  # where legs are the Ref/Dep/Compose entities and `extra` is the open host
+  # where legs are the Ref/Compose entities and `extra` is the open host
   # binding merged into meta. `resource` is nil for a compose (an intermediate
   # cell has no backing resource). `root_id` lets a generator instance re-root.
   defp root_node(resource, root_id) do
     legs =
       Ext.get_entities(resource, [:reactive])
-      |> Enum.filter(&(match?(%Ref{}, &1) or match?(%Compose{}, &1) or match?(%Dep{}, &1)))
+      |> Enum.filter(&(match?(%Ref{}, &1) or match?(%Compose{}, &1)))
 
     flat_refs = Ext.get_opt(resource, [:reactive], :depends_on, []) |> Enum.map(&%Ref{to: &1})
 
@@ -532,7 +527,6 @@ defmodule ReactiveDag.Node do
     %{
       classify: fn
         %Ref{} -> :ref
-        %Dep{} -> :ref
         # a composed LEAF (leaf? true) is terminal — no leg recursion.
         %Compose{leaf?: true} -> :leaf
         %Compose{} -> :op
@@ -550,7 +544,6 @@ defmodule ReactiveDag.Node do
       end,
       ref_id: fn
         %Ref{to: to} -> to_string(to)
-        %Dep{to: to} -> to_string(to)
       end,
       to_cell: &build_cell/3
     }

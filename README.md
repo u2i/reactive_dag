@@ -86,8 +86,9 @@ Declarative combinators cover the common shapes; each writes the result set (int
 the node's resource, or a custom `upsert:`) and `Op.put`s only the changed keys:
 
 - **`reduce`** — a fold: read `over` into the BEAM, group, `into` returns one row
-  per group.
-- **`expand`** — a `reduce` whose `into` returns a **list** (group → many rows).
+  per group. (`into` may instead return a **list** of rows — a group → many-rows
+  "expand"; each returned row must carry its own `:key`. There is no separate
+  `expand` entity; it's this list-returning shape of `reduce`.)
 - **`join`** — a two-input left join: index `over` into `left`/`right` sides, emit
   one row per left key joined to its right (right may be absent).
 - **`aggregate`** — a **pure-Ash-query** fold: the datastore groups + aggregates a
@@ -115,7 +116,7 @@ end
 plan = ReactiveDag.Node.graph([BudgetRollups, FiscalLines, …], for_each: &fetch/1)
 {:ok, passes} =
   ReactiveDag.Drain.run(plan,
-    recompute: ReactiveDag.Node.Recompute,   # runs reduce/join/expand or compute:
+    recompute: ReactiveDag.Node.Recompute,   # runs reduce/join/aggregate or compute:
     key_rule:  ReactiveDag.Node.KeyRule)       # reads :identity | :all from the block
 
 # config
@@ -159,11 +160,10 @@ typed value that doesn't fit the tuple, so it materializes rows into its own
 resource. The line between them is exactly whether the result fits the tuple's
 fixed schema.
 
-Status: **both hosts** onto the substrate — the shared engine
-spans a per-key Elixir recompute (cascade) and a set-based SQL recompute (the
-portal), all coordination writes routed through the seam, proven by both suites
-green. Cascade additionally authors several ops via the `Node` `reduce`/`join`/
-`expand` combinators. Consumed today as a `path:` dep by each app; publish/pin is
-the remaining step. See
+Status: **both hosts run on the substrate** — the shared engine spans a per-key
+Elixir recompute (cascade) and a set-based SQL recompute (the portal), all
+coordination writes routed through the seam, proven by both suites green. Cascade
+authors several ops via the `Node` `reduce`/`join` combinators. Consumed today as
+a `path:` dep by each app; publish/pin is the remaining step. See
 [docs/adr-001-reactive-dag-library.md](docs/adr-001-reactive-dag-library.md)
 for the boundary, the seams, and the design law behind them.

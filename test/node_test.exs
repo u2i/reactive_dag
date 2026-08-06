@@ -44,13 +44,13 @@ defmodule ReactiveDag.NodeTest do
   end
 
   defmodule Meetings do
-    # a TABLELESS publish-root: an explicit id + a single dep entity form.
+    # a TABLELESS publish-root: an explicit id + a single `ref` input edge.
     use Ash.Resource, domain: Domain, data_layer: Ash.DataLayer.Simple, extensions: [ReactiveDag.Node]
     reactive do
       id :meetings
       op :passthrough
       compute FakePassthrough
-      dep :meeting
+      ref :meeting
     end
   end
 
