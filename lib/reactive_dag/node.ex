@@ -54,7 +54,9 @@ defmodule ReactiveDag.Node do
       :compute,
       :as,
       :key_rule,
+      :leaf?,
       legs: [],
+      meta: [],
       __identifier__: nil,
       __spark_metadata__: nil
     ]
@@ -85,7 +87,14 @@ defmodule ReactiveDag.Node do
       op: [type: :atom, required: true, doc: "the op kind for this intermediate cell"],
       compute: [type: :atom, doc: "the recompute module for this intermediate cell"],
       as: [type: :atom, doc: "an explicit id for this intermediate cell"],
-      key_rule: [type: {:one_of, [:identity, :all]}, default: :identity]
+      key_rule: [type: {:one_of, [:identity, :all]}, default: :identity],
+      leaf?: [type: :boolean, default: false, doc: "true for a composed LEAF (a source-fed set)"],
+      meta: [
+        type: :keyword_list,
+        default: [],
+        doc:
+          "OPEN domain binding for this intermediate cell (grain/strength/source/check/…) — merged into its meta, like the root block's `meta:`."
+      ]
     ]
   }
   # self-nest a fixed depth so a compose can hold compose legs (mirrors cascade).
@@ -400,6 +409,8 @@ defmodule ReactiveDag.Node do
       classify: fn
         %Ref{} -> :ref
         %Dep{} -> :ref
+        # a composed LEAF (leaf? true) is terminal — no leg recursion.
+        %Compose{leaf?: true} -> :leaf
         %Compose{} -> :op
         {:op, _, _, _, _, _, _, _, _} -> :op
       end,
@@ -432,13 +443,13 @@ defmodule ReactiveDag.Node do
     }
   end
 
-  defp build_cell(id, %Compose{op: op, compute: compute, key_rule: key_rule}, input_ids) do
+  defp build_cell(id, %Compose{op: op, compute: compute, key_rule: key_rule, leaf?: leaf?, meta: meta}, input_ids) do
     %ReactiveDag.Cell{
       id: id,
       op: op,
       inputs: input_ids,
-      leaf?: false,
-      meta: %{resource: nil, compute: compute, key_rule: key_rule}
+      leaf?: leaf? || false,
+      meta: Map.merge(%{resource: nil, compute: compute, key_rule: key_rule}, Map.new(meta || []))
     }
   end
 
