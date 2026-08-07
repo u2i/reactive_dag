@@ -85,7 +85,7 @@ defmodule ReactiveDag.Commands.Store.Postgres do
           "id" => Ecto.UUID.cast!(id),
           "kind" => kind,
           "scope" => scope,
-          "payload" => payload,
+          "payload" => decode_payload(payload),
           "dedup_key" => dedup_key,
           "actor" => actor,
           "answers_id" => answers_id && Ecto.UUID.cast!(answers_id)
@@ -131,7 +131,7 @@ defmodule ReactiveDag.Commands.Store.Postgres do
         "id" => Ecto.UUID.cast!(id),
         "kind" => kind,
         "scope" => scope,
-        "payload" => payload,
+        "payload" => decode_payload(payload),
         "dedup_key" => dedup_key,
         "actor" => actor,
         "answers_id" => answers_id && Ecto.UUID.cast!(answers_id)
@@ -147,4 +147,11 @@ defmodule ReactiveDag.Commands.Store.Postgres do
   defp table, do: Application.get_env(:reactive_dag, :commands_table, "commands")
   defp encode(nil), do: nil
   defp encode(map), do: Jason.encode!(map)
+
+  # `payload` is stored as encoded JSON in a jsonb column; a repo without a
+  # jsonb-decoding Postgrex type reads it back as a STRING, so decode here (the
+  # symmetric counterpart to `encode/1` on write). A repo that DOES auto-decode
+  # returns a map already — pass it through.
+  defp decode_payload(p) when is_binary(p), do: Jason.decode!(p)
+  defp decode_payload(p), do: p || %{}
 end

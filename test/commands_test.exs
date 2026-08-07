@@ -35,7 +35,10 @@ defmodule ReactiveDag.CommandsTest do
             "seq" => seq,
             "kind" => attrs[:kind],
             "scope" => attrs[:scope],
-            "payload" => attrs[:payload] || %{},
+            # store payload as ENCODED JSON, mirroring the Postgres store's jsonb
+            # write — so claim/outstanding must decode it (a regression guard for
+            # the encode-on-write-but-not-read bug).
+            "payload" => Jason.encode!(attrs[:payload] || %{}),
             "dedup_key" => attrs[:dedup_key],
             "actor" => attrs[:actor],
             "answers_id" => attrs[:answers_id],
@@ -69,7 +72,9 @@ defmodule ReactiveDag.CommandsTest do
 
           c ->
             claimed = c |> Map.put("status", "running") |> Map.put("run_id", run_id)
-            {claimed, %{s | cmds: replace(s.cmds, claimed)}}
+            # state keeps the encoded payload; the RETURNED command is decoded
+            # (mirrors Store.Postgres decoding jsonb on read).
+            {decode(claimed), %{s | cmds: replace(s.cmds, claimed)}}
         end
       end)
     end
@@ -97,10 +102,14 @@ defmodule ReactiveDag.CommandsTest do
 
     @impl true
     def outstanding do
-      all() |> Enum.filter(&(&1["status"] in ~w(queued running blocked))) |> Enum.sort_by(& &1["seq"])
+      all()
+      |> Enum.filter(&(&1["status"] in ~w(queued running blocked)))
+      |> Enum.sort_by(& &1["seq"])
+      |> Enum.map(&decode/1)
     end
 
     defp replace(cmds, updated), do: Enum.map(cmds, &if(&1["id"] == updated["id"], do: updated, else: &1))
+    defp decode(cmd), do: Map.update!(cmd, "payload", &Jason.decode!/1)
   end
 
   # ── executors ───────────────────────────────────────────────────────────────
