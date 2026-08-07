@@ -19,14 +19,16 @@ defmodule ReactiveDag.CommandsTest do
 
     @impl true
     def enqueue(attrs) do
-      Agent.update(__MODULE__, fn s ->
+      Agent.get_and_update(__MODULE__, fn s ->
         # dedup: skip an open command with the same dedup_key
         open? =
           attrs[:dedup_key] &&
             Enum.any?(s.cmds, &(&1["dedup_key"] == attrs[:dedup_key] and &1["status"] in ~w(queued running)))
 
         if open? do
-          s
+          # coalesced — mirror the Postgres store's tagged signal so the drain's
+          # followup tally excludes no-ops.
+          {{:ok, :coalesced}, s}
         else
           seq = s.seq + 1
 
@@ -45,11 +47,9 @@ defmodule ReactiveDag.CommandsTest do
             "status" => "queued"
           }
 
-          %{s | seq: seq, cmds: s.cmds ++ [cmd]}
+          {{:ok, :enqueued}, %{s | seq: seq, cmds: s.cmds ++ [cmd]}}
         end
       end)
-
-      :ok
     end
 
     @impl true
@@ -141,6 +141,20 @@ defmodule ReactiveDag.CommandsTest do
     def execute(_cmd, _ctx), do: {:done, %{}, [%{kind: "approve", payload: %{"thing" => "child"}}]}
   end
 
+  defmodule DedupFanoutExec do
+    @behaviour ReactiveDag.CommandExecutor
+    @impl true
+    # emits TWO followups with the SAME dedup_key: the first inserts, the second
+    # coalesces. The tally must count 1, not 2 (BUG-1 regression guard).
+    def execute(_cmd, _ctx) do
+      {:done, %{},
+       [
+         %{kind: "approve", payload: %{"thing" => "dup"}, dedup_key: "fk"},
+         %{kind: "approve", payload: %{"thing" => "dup"}, dedup_key: "fk"}
+       ]}
+    end
+  end
+
   defmodule BoomExec do
     @behaviour ReactiveDag.CommandExecutor
     @impl true
@@ -162,6 +176,7 @@ defmodule ReactiveDag.CommandsTest do
       "approve" => ApproveExec,
       "needs_human" => NeedsHumanExec,
       "fanout" => FanoutExec,
+      "dedup_fanout" => DedupFanoutExec,
       "boom" => BoomExec,
       "answer" => ApproveExec
     })
@@ -268,15 +283,33 @@ defmodule ReactiveDag.CommandsTest do
     assert_received {:ev, :failed, "boom", %{error: _, duration_ms: _}}
   end
 
-  test "on_event :done reports the followup count in :enqueued" do
+  test "on_event :done reports the followup count AND a per-child :followups list" do
     ReactiveDag.Commands.enqueue!(%{kind: "fanout", scope: "f"})
 
     me = self()
     {:ok, _} = ReactiveDag.Commands.run(on_event: fn ev, cmd, info -> send(me, {:ev, ev, cmd["kind"], info}) end)
 
-    assert_received {:ev, :done, "fanout", %{enqueued: 1}}
+    # the followups list names each child + its outcome (not just a bare count) —
+    # so a host can log the child kind, which the aggregate count alone can't (BUG-2).
+    assert_received {:ev, :done, "fanout", %{enqueued: 1, followups: [%{kind: "approve", outcome: :enqueued}]}}
     # the enqueued child then runs too
-    assert_received {:ev, :done, "approve", %{enqueued: 0}}
+    assert_received {:ev, :done, "approve", %{enqueued: 0, followups: []}}
+  end
+
+  test "coalesced followups do NOT inflate the enqueued tally (BUG-1 regression)" do
+    ReactiveDag.Commands.enqueue!(%{kind: "dedup_fanout", scope: "df"})
+
+    me = self()
+    {:ok, tally} = ReactiveDag.Commands.run(on_event: fn ev, cmd, info -> send(me, {:ev, ev, cmd["kind"], info}) end)
+
+    # two followups emitted, same dedup_key → one inserted, one coalesced.
+    assert_received {:ev, :done, "dedup_fanout",
+                     %{enqueued: 1, followups: [%{outcome: :enqueued}, %{outcome: :coalesced}]}}
+
+    # the tally counts the real insert only (was 2 before the fix), plus the child that ran.
+    assert tally.enqueued == 1
+    # exactly one approve child actually ran (the coalesced one never became a row)
+    assert tally.done == 2
   end
 
   # ── pending-aware reads (optimistic overlay) ────────────────────────────────

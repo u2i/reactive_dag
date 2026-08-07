@@ -17,8 +17,15 @@ defmodule ReactiveDag.Commands.Store do
 
   @type command :: %{optional(String.t()) => term()} | map() | struct()
 
-  @doc "Insert a queued command; coalesce identical open intents by `dedup_key`."
-  @callback enqueue(attrs :: map()) :: :ok
+  @doc """
+  Insert a queued command; coalesce identical open intents by `dedup_key`. Returns
+  `{:ok, :enqueued}` if a row was inserted or `{:ok, :coalesced}` if an open
+  duplicate already existed. Bare `:ok` is still accepted (older stores with no
+  coalesce signal) and treated as `:enqueued` — but a store that can tell the two
+  apart SHOULD return the tagged form, so the drain's followup tally counts only
+  real inserts.
+  """
+  @callback enqueue(attrs :: map()) :: :ok | {:ok, :enqueued | :coalesced}
 
   @doc """
   Claim ONE queued command in `seq` order, marking it `running` under `run_id`,

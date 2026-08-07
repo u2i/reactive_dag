@@ -71,10 +71,22 @@ defmodule ReactiveDag.Commands do
   Enqueue an intent. `attrs` = `%{kind, scope, payload, dedup_key \\ nil, actor \\
   nil, answers_id \\ nil}`. Coalesced by `dedup_key` while open (a partial unique
   index on `(dedup_key) WHERE status IN ('queued','running')` makes the insert a
-  no-op for an already-open identical intent). Returns `:ok`.
+  no-op for an already-open identical intent).
+
+  Returns `:enqueued` if a row was inserted, `:coalesced` if an open duplicate
+  already existed (so a caller can tell a real enqueue from a no-op — the followup
+  tally depends on it). A `Store` whose `enqueue/1` returns bare `:ok` (the older
+  contract) is treated as `:enqueued`.
   """
-  @spec enqueue!(map()) :: :ok
-  def enqueue!(attrs), do: store().enqueue(attrs)
+  @spec enqueue!(map()) :: :enqueued | :coalesced
+  def enqueue!(attrs) do
+    case store().enqueue(attrs) do
+      {:ok, :coalesced} -> :coalesced
+      {:ok, :enqueued} -> :enqueued
+      # older stores return bare :ok with no coalesce signal — assume inserted.
+      :ok -> :enqueued
+    end
+  end
 
   @doc """
   Drain the command frontier now. Claims queued commands in `seq` order, executes
@@ -86,9 +98,13 @@ defmodule ReactiveDag.Commands do
       loop so a host can record an audit/processing log the `:done`-only
       `:on_settled` can't reach. `event` is `:claimed` (just before dispatch;
       `info = %{}`) then one terminal event per command — `:done` / `:blocked` /
-      `:failed` — with `info` carrying `:result` / `:needs` / `:error`,
-      `:duration_ms` (executor wall time), and `:enqueued` (followup count, `:done`
-      only). Fires for EVERY outcome, unlike `:on_settled`. Default: no-op.
+      `:failed` — with `info` carrying `:result` / `:needs` / `:error` and
+      `:duration_ms` (executor wall time). On `:done`, `info` also carries
+      `:enqueued` (count of followups actually INSERTED, excluding coalesced no-ops)
+      and `:followups` — `[%{kind:, outcome: :enqueued | :coalesced}]`, one per
+      emitted followup in order, so a host can log each child (and its coalesce
+      fate) rather than a bare count. Fires for EVERY outcome, unlike `:on_settled`.
+      Default: no-op.
     * `:ctx` — extra fields merged into the executor `ctx` (default `%{}`).
 
   Returns `{:ok, tally}` where tally = `%{done, blocked, failed, enqueued, capped?}`.
@@ -169,14 +185,17 @@ defmodule ReactiveDag.Commands do
     case outcome do
       {:done, result} ->
         set_status!(field(cmd, :id), "done", result: result)
-        on_event.(:done, cmd, %{result: result, enqueued: 0, duration_ms: ms})
+        on_event.(:done, cmd, %{result: result, enqueued: 0, followups: [], duration_ms: ms})
         on_settled.(cmd, result)
         %{tally | done: tally.done + 1}
 
       {:done, result, followups} ->
         set_status!(field(cmd, :id), "done", result: result)
-        n = Enum.count(followups, &enqueue_followup(&1, cmd))
-        on_event.(:done, cmd, %{result: result, enqueued: n, duration_ms: ms})
+        # each emitted followup → %{kind, outcome}; count only the ones actually
+        # inserted (a coalesced followup is a no-op, must not inflate the tally).
+        fu_results = Enum.map(followups, &enqueue_followup(&1, cmd))
+        n = Enum.count(fu_results, &(&1.outcome == :enqueued))
+        on_event.(:done, cmd, %{result: result, enqueued: n, followups: fu_results, duration_ms: ms})
         on_settled.(cmd, result)
         %{tally | done: tally.done + 1, enqueued: tally.enqueued + n}
 
@@ -196,31 +215,34 @@ defmodule ReactiveDag.Commands do
   # A followup may be a `%{kind, scope?, payload?}` map or a `{kind, attrs}` tuple
   # (attrs a map or keyword list) — the latter is what a host whose enqueue takes
   # `(kind, attrs)` naturally emits. Both normalize to the enqueue attrs map,
-  # defaulting scope/actor to the parent's.
+  # defaulting scope/actor to the parent's. Returns `%{kind, outcome}` so the
+  # caller can count inserted-vs-coalesced and report each child.
   defp enqueue_followup({kind, attrs}, parent) do
     a = Map.new(attrs)
 
-    enqueue!(%{
-      kind: kind,
-      scope: Map.get(a, :scope, field(parent, :scope)),
-      payload: Map.get(a, :payload, %{}),
-      dedup_key: Map.get(a, :dedup_key),
-      actor: field(parent, :actor)
-    })
+    outcome =
+      enqueue!(%{
+        kind: kind,
+        scope: Map.get(a, :scope, field(parent, :scope)),
+        payload: Map.get(a, :payload, %{}),
+        dedup_key: Map.get(a, :dedup_key),
+        actor: field(parent, :actor)
+      })
 
-    true
+    %{kind: kind, outcome: outcome}
   end
 
   defp enqueue_followup(fu, parent) when is_map(fu) do
-    enqueue!(%{
-      kind: fu.kind,
-      scope: Map.get(fu, :scope, field(parent, :scope)),
-      payload: Map.get(fu, :payload, %{}),
-      dedup_key: Map.get(fu, :dedup_key),
-      actor: field(parent, :actor)
-    })
+    outcome =
+      enqueue!(%{
+        kind: fu.kind,
+        scope: Map.get(fu, :scope, field(parent, :scope)),
+        payload: Map.get(fu, :payload, %{}),
+        dedup_key: Map.get(fu, :dedup_key),
+        actor: field(parent, :actor)
+      })
 
-    true
+    %{kind: fu.kind, outcome: outcome}
   end
 
   defp claim(run_id), do: store().claim(run_id, freeze_exempt())

@@ -46,16 +46,20 @@ defmodule ReactiveDag.Commands.Store.Postgres do
       |> Enum.map(&Map.get(attrs, &1))
       |> Enum.map(fn v -> if is_map(v), do: Jason.encode!(v), else: v end)
 
-    repo().query!(
-      """
-      INSERT INTO #{table()} (kind, scope, payload, dedup_key, actor, answers_id, status, inserted_at, updated_at)
-      VALUES ($1, $2, $3, $4, $5, $6, 'queued', now(), now())
-      ON CONFLICT (dedup_key) WHERE status IN ('queued','running') DO NOTHING
-      """,
-      vals
-    )
+    # `ON CONFLICT … DO NOTHING` reports num_rows = 0 when the partial-unique index
+    # coalesced an open duplicate, 1 when a row was actually inserted — surface that
+    # so the drain's followup tally excludes no-ops.
+    %{num_rows: n} =
+      repo().query!(
+        """
+        INSERT INTO #{table()} (kind, scope, payload, dedup_key, actor, answers_id, status, inserted_at, updated_at)
+        VALUES ($1, $2, $3, $4, $5, $6, 'queued', now(), now())
+        ON CONFLICT (dedup_key) WHERE status IN ('queued','running') DO NOTHING
+        """,
+        vals
+      )
 
-    :ok
+    if n == 0, do: {:ok, :coalesced}, else: {:ok, :enqueued}
   end
 
   @impl true
