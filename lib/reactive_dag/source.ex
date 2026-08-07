@@ -105,11 +105,24 @@ defmodule ReactiveDag.Source do
   """
   @spec verify!([module()], graph()) :: :ok
   def verify!(sources, graph) do
+    verify_cells!(Enum.map(sources, &{&1, &1.leaf_cells(graph)}), graph)
+  end
+
+  @doc """
+  The same dangling-leaf check as `verify!/2`, but over already-resolved
+  `{source, [cell_id]}` pairs instead of calling each module's `leaf_cells/1`.
+  Use this when a host resolves fed cells itself — e.g. it keeps a single-leaf
+  fallback (`leaf_cells/1` optional, defaulting to one representative leaf) that
+  the module-based `verify!/2` (which requires `leaf_cells/1`) can't express.
+  Returns `:ok`, or raises `ArgumentError` naming every `{source, dangling_leaf}`.
+  """
+  @spec verify_cells!([{module(), [String.t()]}], graph()) :: :ok
+  def verify_cells!(source_cells, graph) do
     cell_ids = graph.cells |> Map.keys() |> MapSet.new()
 
     dangling =
-      for mod <- sources,
-          leaf <- mod.leaf_cells(graph),
+      for {mod, cells} <- source_cells,
+          leaf <- cells,
           not MapSet.member?(cell_ids, leaf),
           do: {mod, leaf}
 
