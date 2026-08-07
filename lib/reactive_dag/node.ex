@@ -356,6 +356,14 @@ defmodule ReactiveDag.Node do
   @reactive %Spark.Dsl.Section{
     name: :reactive,
     describe: "Declares this resource as a reactive-DAG node: its op + dependencies.",
+    # PATCHABLE: a host extension may add its own domain entities into this section
+    # via `Spark.Dsl.Patch.AddEntity{section_path: [:reactive], entity: …}` — the
+    # composition seam that lets a domain vocabulary (e.g. a compliance
+    # `guarantee`/`control`) be authored INSIDE `reactive do … end` alongside the
+    # lib's combinators, rather than as a separate fork DSL. Domain entities the
+    # lowering doesn't recognise ride in the node's `meta`; the host reads them back
+    # via `Spark.Dsl.Extension.get_entities/2` (its own transformers/introspection).
+    patchable?: true,
     # Computation is declared with an ENTITY: `reduce`/`join`/`aggregate`
     # (declarative) or `compute Module` (the escape hatch). legs (ref/compose) are
     # the nested dependency form; dep is the flat form.
