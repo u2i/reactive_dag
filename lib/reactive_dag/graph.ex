@@ -48,10 +48,21 @@ defmodule ReactiveDag.Graph do
 
   defp apply_rule(mod, parent, child, keys), do: mod.rule(parent, child, keys)
 
-  # ---- parents: inverse of each cell's inputs ----
+  # ---- parents: inverse of each cell's inputs, EXCLUDING reference edges ----
+  # A cell's `inputs` are every edge — used for validation + depth ordering +
+  # reading. But a REFERENCE input (listed in `meta.reference_inputs`) is read as
+  # CONTEXT, not recomputed on: a change to it must NOT dirty this cell (e.g. an
+  # expensive/non-deterministic LLM node that consults mutable reference data). So
+  # the propagation graph (`parents`) omits reference edges — the node still reads
+  # the current value when it recomputes for other reasons, it just isn't triggered
+  # BY that value changing.
   defp build_parents(cells) do
     Enum.reduce(cells, %{}, fn cell, acc ->
-      Enum.reduce(cell.inputs, acc, fn input_id, acc2 ->
+      refs = MapSet.new(cell.meta[:reference_inputs] || [])
+
+      cell.inputs
+      |> Enum.reject(&MapSet.member?(refs, &1))
+      |> Enum.reduce(acc, fn input_id, acc2 ->
         Map.update(acc2, input_id, [cell.id], &[cell.id | &1])
       end)
     end)

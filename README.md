@@ -106,6 +106,34 @@ entity in the same block: `compute MyOp` where `MyOp` implements
 case is an entity too, not a schema key beside the declarative ones.) The
 combinators and the escape hatch coexist in the block.
 
+### Input edges: `ref` (recompute) vs `reference` (read-as-context)
+
+An input is one of two kinds:
+
+- **`ref :x`** (also `depends_on [:x]`, or a combinator's `over:`) — a **recompute
+  edge**: when `x` changes, this node is dirtied and recomputes. The normal edge.
+- **`reference :x`** — a **reference edge**: the node READS `x` as context but is
+  **not** recomputed when `x` changes. It's still a real input (validated, ordered
+  by depth so `x` settles first, read at recompute) — it just doesn't propagate.
+
+Use `reference` when recompute is expensive/non-deterministic and consults mutable
+context it shouldn't be re-triggered by — e.g. an LLM step that looks up a
+human-curated table:
+
+```elixir
+reactive do
+  op :map
+  compute MyApp.EnhanceMinutes   # an LLM pass
+  ref :transcripts               # a transcript change RE-RUNS the LLM
+  reference :people              # a people edit does NOT — the LLM just reads
+                                 # current people the next time it runs
+end
+```
+
+So an edit to a `reference` input updates it, but drives no regeneration; the
+consuming node picks up the current value whenever it next recomputes for its own
+(recompute-edge) reasons.
+
 ```elixir
 reactive do
   op :map

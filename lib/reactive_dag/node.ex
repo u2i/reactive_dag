@@ -132,8 +132,29 @@ defmodule ReactiveDag.Node do
     name: :ref,
     target: Ref,
     args: [:to],
-    describe: "A by-name reference leg to another named node.",
+    describe: "A by-name input edge to another node (a RECOMPUTE edge — changes propagate).",
     schema: [to: [type: :atom, required: true, doc: "the referenced node's id"]]
+  }
+
+  defmodule Reference do
+    @moduledoc """
+    A by-name REFERENCE input edge: the node READS the target as context but is NOT
+    recomputed when the target changes. Still a real input (validated, ordered by
+    depth so the target settles first, read at recompute) — it just doesn't
+    propagate. For a node whose recompute is expensive/non-deterministic and
+    consults mutable reference data it shouldn't be re-triggered by (an LLM step
+    that looks up a human-curated people/positions table). Contrast `ref`, which
+    dirties this node on change.
+    """
+    defstruct [:to, :__identifier__, :__spark_metadata__]
+  end
+
+  @reference %Spark.Dsl.Entity{
+    name: :reference,
+    target: Reference,
+    args: [:to],
+    describe: "A by-name REFERENCE edge: read the target as context; its changes do NOT recompute this node.",
+    schema: [to: [type: :atom, required: true, doc: "the referenced node's id (read-only context)"]]
   }
 
   @compose_base %Spark.Dsl.Entity{
@@ -338,7 +359,7 @@ defmodule ReactiveDag.Node do
     # Computation is declared with an ENTITY: `reduce`/`join`/`aggregate`
     # (declarative) or `compute Module` (the escape hatch). legs (ref/compose) are
     # the nested dependency form; dep is the flat form.
-    entities: [@ref, @compose, @reduce, @join, @aggregate, @compute],
+    entities: [@ref, @reference, @compose, @reduce, @join, @aggregate, @compute],
     schema: [
       id: [
         type: :atom,
@@ -495,7 +516,7 @@ defmodule ReactiveDag.Node do
   defp root_node(resource, root_id) do
     legs =
       Ext.get_entities(resource, [:reactive])
-      |> Enum.filter(&(match?(%Ref{}, &1) or match?(%Compose{}, &1)))
+      |> Enum.filter(&(match?(%Ref{}, &1) or match?(%Reference{}, &1) or match?(%Compose{}, &1)))
 
     flat_refs = Ext.get_opt(resource, [:reactive], :depends_on, []) |> Enum.map(&%Ref{to: &1})
 
@@ -594,7 +615,8 @@ defmodule ReactiveDag.Node do
         payload_key: Ext.get_opt(resource, [:reactive], :payload_key, nil),
         payload_action: Ext.get_opt(resource, [:reactive], :payload_action, nil),
         coordination_opts: Ext.get_opt(resource, [:reactive], :coordination_opts, nil),
-        verdict: verdict_flag(resource)
+        verdict: verdict_flag(resource),
+        reference_inputs: reference_inputs(resource)
       }
       |> Enum.reject(fn {_k, v} -> is_nil(v) end)
       |> Map.new()
@@ -603,10 +625,23 @@ defmodule ReactiveDag.Node do
     |> Map.merge(aggregate_meta)
   end
 
+  # the ids of this node's `reference` edges (read-as-context, non-propagating) —
+  # as strings matching the cell input ids, so `Graph.build_parents` can exclude
+  # them from the propagation graph. nil when there are none.
+  defp reference_inputs(resource) do
+    case Ext.get_entities(resource, [:reactive]) |> Enum.filter(&match?(%Reference{}, &1)) do
+      [] -> nil
+      refs -> Enum.map(refs, &to_string(&1.to))
+    end
+  end
+
   defp walk_cbs do
     %{
       classify: fn
         %Ref{} -> :ref
+        # a reference edge is an input edge too — it just won't propagate (the
+        # non-propagation is enforced in Graph.build_parents via reference_inputs).
+        %Reference{} -> :ref
         # a composed LEAF (leaf? true) is terminal — no leg recursion.
         %Compose{leaf?: true} -> :leaf
         %Compose{} -> :op
@@ -624,6 +659,7 @@ defmodule ReactiveDag.Node do
       end,
       ref_id: fn
         %Ref{to: to} -> to_string(to)
+        %Reference{to: to} -> to_string(to)
       end,
       to_cell: &build_cell/3
     }
