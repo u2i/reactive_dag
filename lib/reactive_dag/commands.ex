@@ -41,6 +41,10 @@ defmodule ReactiveDag.Commands do
 
     * `config :reactive_dag, command_executors: %{kind => module}` — the
       `ReactiveDag.CommandExecutor` per kind (like the recompute/set_op registries).
+      For open-ended kinds (families like `rule.configure`/`rule.delete` that can't
+      be enumerated), set `config :reactive_dag, command_executor_resolver: fun`
+      instead — a `(kind -> module | nil)` that maps a kind to its executor (e.g. by
+      family). When set it takes precedence over the exact-kind map.
     * `config :reactive_dag, commands_store: Module` — the `ReactiveDag.Commands.
       Store` (enqueue/claim/settle). Default is the `seq`-ordered Postgres table
       (`ReactiveDag.Commands.Store.Postgres`); its required columns are documented
@@ -111,7 +115,7 @@ defmodule ReactiveDag.Commands do
 
       cmd ->
         on_event.(:claimed, cmd, %{})
-        {micros, outcome} = timed(fn -> dispatch(cmd, Map.merge(base_ctx, %{run_id: run_id, actor: cmd["actor"]})) end)
+        {micros, outcome} = timed(fn -> dispatch(cmd, Map.merge(base_ctx, %{run_id: run_id, actor: field(cmd, :actor)})) end)
         tally = settle(run_id, cmd, outcome, on_settled, on_event, div(micros, 1000), tally)
         loop(run_id, base_ctx, on_settled, on_event, tally, budget - 1)
     end
@@ -122,9 +126,9 @@ defmodule ReactiveDag.Commands do
   defp timed(fun), do: :timer.tc(fun)
 
   defp dispatch(cmd, ctx) do
-    case Map.get(executors(), cmd["kind"]) do
+    case resolve_executor(field(cmd, :kind)) do
       nil ->
-        {:error, "no executor for kind #{inspect(cmd["kind"])}"}
+        {:error, "no executor for kind #{inspect(field(cmd, :kind))}"}
 
       mod ->
         try do
@@ -137,40 +141,83 @@ defmodule ReactiveDag.Commands do
     end
   end
 
+  # A claimed command is whatever the Store returns — the default Postgres store
+  # yields a string-keyed map, but a host store may return an atom-keyed map or a
+  # struct (e.g. an Ash resource). The lib touches only `kind`/`id`/`actor` for its
+  # own bookkeeping; `field/2` reads them from any of those shapes so an executor
+  # can receive its native command unchanged.
+  @doc false
+  def field(cmd, key) when is_atom(key) do
+    cond do
+      is_map(cmd) and Map.has_key?(cmd, key) -> Map.get(cmd, key)
+      is_map(cmd) and Map.has_key?(cmd, Atom.to_string(key)) -> Map.get(cmd, Atom.to_string(key))
+      true -> nil
+    end
+  end
+
+  # Kind → executor. Default: exact-kind lookup in the `:command_executors` map. A
+  # host with open-ended kinds (families like `rule.configure`/`rule.delete`) sets
+  # `:command_executor_resolver` to a `(kind -> module | nil)` fun instead.
+  defp resolve_executor(kind) do
+    case Application.get_env(:reactive_dag, :command_executor_resolver) do
+      fun when is_function(fun, 1) -> fun.(kind)
+      nil -> Map.get(executors(), kind)
+    end
+  end
+
   defp settle(_run_id, cmd, outcome, on_settled, on_event, ms, tally) do
     case outcome do
       {:done, result} ->
-        set_status!(cmd["id"], "done", result: result)
+        set_status!(field(cmd, :id), "done", result: result)
         on_event.(:done, cmd, %{result: result, enqueued: 0, duration_ms: ms})
         on_settled.(cmd, result)
         %{tally | done: tally.done + 1}
 
       {:done, result, followups} ->
-        set_status!(cmd["id"], "done", result: result)
+        set_status!(field(cmd, :id), "done", result: result)
         n = Enum.count(followups, &enqueue_followup(&1, cmd))
         on_event.(:done, cmd, %{result: result, enqueued: n, duration_ms: ms})
         on_settled.(cmd, result)
         %{tally | done: tally.done + 1, enqueued: tally.enqueued + n}
 
       {:blocked, needs} when is_map(needs) ->
-        set_status!(cmd["id"], "blocked", needs: needs)
+        set_status!(field(cmd, :id), "blocked", needs: needs)
         on_event.(:blocked, cmd, %{needs: needs, duration_ms: ms})
         %{tally | blocked: tally.blocked + 1}
 
       {:error, e} ->
-        set_status!(cmd["id"], "failed", error: String.slice(inspect(e), 0, 500))
+        set_status!(field(cmd, :id), "failed", error: String.slice(inspect(e), 0, 500))
         on_event.(:failed, cmd, %{error: e, duration_ms: ms})
-        Logger.warning("reactive_dag commands: #{cmd["kind"]} #{cmd["id"]} failed: #{inspect(e)}")
+        Logger.warning("reactive_dag commands: #{field(cmd, :kind)} #{field(cmd, :id)} failed: #{inspect(e)}")
         %{tally | failed: tally.failed + 1}
     end
   end
 
-  defp enqueue_followup(fu, parent) do
+  # A followup may be a `%{kind, scope?, payload?}` map or a `{kind, attrs}` tuple
+  # (attrs a map or keyword list) — the latter is what a host whose enqueue takes
+  # `(kind, attrs)` naturally emits. Both normalize to the enqueue attrs map,
+  # defaulting scope/actor to the parent's.
+  defp enqueue_followup({kind, attrs}, parent) do
+    a = Map.new(attrs)
+
+    enqueue!(%{
+      kind: kind,
+      scope: Map.get(a, :scope, field(parent, :scope)),
+      payload: Map.get(a, :payload, %{}),
+      dedup_key: Map.get(a, :dedup_key),
+      actor: field(parent, :actor)
+    })
+
+    true
+  end
+
+  defp enqueue_followup(fu, parent) when is_map(fu) do
     enqueue!(%{
       kind: fu.kind,
-      scope: Map.get(fu, :scope, parent["scope"]),
+      scope: Map.get(fu, :scope, field(parent, :scope)),
       payload: Map.get(fu, :payload, %{}),
-      actor: parent["actor"]
+      dedup_key: Map.get(fu, :dedup_key),
+      actor: field(parent, :actor)
     })
 
     true
@@ -192,10 +239,10 @@ defmodule ReactiveDag.Commands do
   @spec pending_effects() :: [%{cell_id: String.t(), key: String.t(), status: String.t(), command_id: String.t()}]
   def pending_effects do
     for cmd <- store().outstanding(),
-        mod = Map.get(executors(), cmd["kind"]),
+        mod = resolve_executor(field(cmd, :kind)),
         is_atom(mod) and function_exported?(mod, :project, 1),
         eff <- mod.project(cmd) do
-      %{cell_id: eff.cell_id, key: eff.key, status: eff.status, command_id: cmd["id"]}
+      %{cell_id: eff.cell_id, key: eff.key, status: eff.status, command_id: field(cmd, :id)}
     end
   end
 

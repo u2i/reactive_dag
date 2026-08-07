@@ -6,11 +6,16 @@ defmodule ReactiveDag.Commands.Store do
   LOCKED`, scope-freezing Postgres table; a host can swap it (an in-memory store
   for tests, a different backend) via `config :reactive_dag, commands_store:`.
 
-  Commands are plain maps with string keys: `"id" / "kind" / "scope" / "payload" /
-  "dedup_key" / "actor" / "answers_id"`.
+  The default store yields plain **string-keyed maps**: `"id" / "kind" / "scope" /
+  "payload" / "dedup_key" / "actor" / "answers_id"`. A host store MAY instead
+  return atom-keyed maps or a **struct** (e.g. an Ash resource row) so its executors
+  receive their native command shape — `ReactiveDag.Commands` reads only
+  `kind`/`id`/`scope`/`actor` for its own bookkeeping and does so via a
+  shape-agnostic accessor (`ReactiveDag.Commands.field/2`); everything else in the
+  command is opaque to the lib and passed to the executor untouched.
   """
 
-  @type command :: %{optional(String.t()) => term()}
+  @type command :: %{optional(String.t()) => term()} | map() | struct()
 
   @doc "Insert a queued command; coalesce identical open intents by `dedup_key`."
   @callback enqueue(attrs :: map()) :: :ok

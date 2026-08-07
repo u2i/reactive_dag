@@ -154,6 +154,7 @@ defmodule ReactiveDag.CommandsTest do
     prev = Application.get_env(:reactive_dag, :commands_store)
     prev_x = Application.get_env(:reactive_dag, :command_executors)
     prev_f = Application.get_env(:reactive_dag, :command_freeze_exempt)
+    prev_r = Application.get_env(:reactive_dag, :command_executor_resolver)
 
     Application.put_env(:reactive_dag, :commands_store, MemStore)
 
@@ -172,6 +173,7 @@ defmodule ReactiveDag.CommandsTest do
       Application.put_env(:reactive_dag, :commands_store, prev)
       Application.put_env(:reactive_dag, :command_executors, prev_x)
       Application.put_env(:reactive_dag, :command_freeze_exempt, prev_f)
+      Application.put_env(:reactive_dag, :command_executor_resolver, prev_r)
     end)
 
     :ok
@@ -317,5 +319,175 @@ defmodule ReactiveDag.CommandsTest do
     # both are present-projecting; both listed, anticipated status is present
     assert overlaid["store-1"].status == "present"
     assert length(overlaid["store-1"].pending) == 2
+  end
+
+  # ── host-shape adaptation (map-or-struct commands, family dispatch, tuple followups)
+
+  # an executor that reads a STRUCT command via atom keys — the shape a host with
+  # an Ash-resource store returns. `field/2` must let the lib bookkeep over it.
+  defmodule StructCmd do
+    defstruct [:id, :kind, :scope, :payload, :actor, claimed: false]
+  end
+
+  defmodule StructStore do
+    @behaviour ReactiveDag.Commands.Store
+    use Agent
+
+    def start, do: Agent.start(fn -> [] end, name: __MODULE__)
+    def stop, do: if(Process.whereis(__MODULE__), do: Agent.stop(__MODULE__), else: :ok)
+
+    @impl true
+    def enqueue(attrs) do
+      Agent.update(__MODULE__, fn cmds ->
+        cmds ++
+          [
+            %StructCmd{
+              id: "s#{length(cmds) + 1}",
+              kind: attrs[:kind],
+              scope: attrs[:scope],
+              payload: attrs[:payload] || %{},
+              actor: attrs[:actor]
+            }
+          ]
+      end)
+
+      :ok
+    end
+
+    @impl true
+    def claim(_run_id, _exempt) do
+      Agent.get_and_update(__MODULE__, fn cmds ->
+        idx = Enum.find_index(cmds, &(not Map.get(&1, :claimed, false)))
+        if idx, do: {Enum.at(cmds, idx), List.update_at(cmds, idx, &Map.put(&1, :claimed, true))}, else: {nil, cmds}
+      end)
+    end
+
+    @impl true
+    def settle(_id, _status, _fields), do: :ok
+    @impl true
+    def outstanding, do: Agent.get(__MODULE__, & &1)
+  end
+
+  test "field/2 reads kind/id/scope/actor from a string-map, atom-map, or struct" do
+    smap = %{"kind" => "k", "id" => "i", "scope" => "s", "actor" => "a"}
+    amap = %{kind: "k", id: "i", scope: "s", actor: "a"}
+    strc = %StructCmd{kind: "k", id: "i", scope: "s", actor: "a"}
+
+    for cmd <- [smap, amap, strc] do
+      assert ReactiveDag.Commands.field(cmd, :kind) == "k"
+      assert ReactiveDag.Commands.field(cmd, :id) == "i"
+      assert ReactiveDag.Commands.field(cmd, :scope) == "s"
+      assert ReactiveDag.Commands.field(cmd, :actor) == "a"
+    end
+
+    assert ReactiveDag.Commands.field(%{}, :kind) == nil
+  end
+
+  test "a struct-returning store drains end to end (executor gets the struct)" do
+    {:ok, _} = StructStore.start()
+    on_exit(&StructStore.stop/0)
+    Application.put_env(:reactive_dag, :commands_store, StructStore)
+
+    me = self()
+
+    Application.put_env(:reactive_dag, :command_executors, %{
+      "struct_approve" => struct_exec(me)
+    })
+
+    ReactiveDag.Commands.enqueue!(%{kind: "struct_approve", scope: "a", payload: %{"thing" => "st"}})
+
+    {:ok, tally} = ReactiveDag.Commands.run([])
+
+    assert tally.done == 1
+    # the executor received the %StructCmd{} unchanged — proving the lib never
+    # coerced it to a string-keyed map.
+    assert_received {:struct_cmd, %StructCmd{payload: %{"thing" => "st"}}}
+  end
+
+  test "command_executor_resolver dispatches by family (kind prefix), overriding the map" do
+    me = self()
+    exec = struct_exec(me)
+
+    # a resolver: everything before the first dot is the family; only "rule" maps.
+    Application.put_env(:reactive_dag, :command_executor_resolver, fn kind ->
+      case kind |> String.split(".", parts: 2) |> hd() do
+        "rule" -> exec
+        _ -> nil
+      end
+    end)
+
+    # the exact-kind map does NOT contain "rule.configure" — only the resolver resolves it
+    ReactiveDag.Commands.enqueue!(%{kind: "rule.configure", scope: "r", payload: %{"thing" => "cfg"}})
+    ReactiveDag.Commands.enqueue!(%{kind: "unknown.thing", scope: "u", payload: %{}})
+
+    {:ok, tally} = ReactiveDag.Commands.run([])
+
+    assert tally.done == 1
+    assert tally.failed == 1
+    assert_received {:struct_cmd, _}
+  end
+
+  test "tuple followups {kind, attrs} enqueue (a host whose enqueue takes kind + attrs)" do
+    me = self()
+
+    Application.put_env(:reactive_dag, :command_executors, %{
+      "tuple_fanout" => tuple_fanout_exec(),
+      "approve" => struct_or_map_exec(me)
+    })
+
+    ReactiveDag.Commands.enqueue!(%{kind: "tuple_fanout", scope: "t"})
+    {:ok, tally} = ReactiveDag.Commands.run([])
+
+    assert tally.done == 2
+    assert tally.enqueued == 1
+    assert_received {:approved2, "kid"}
+  end
+
+  # runtime-built executors (module attrs can't close over `self()`)
+  defp struct_exec(pid) do
+    Module.create(
+      :"Elixir.StructExec#{System.unique_integer([:positive])}",
+      quote do
+        @behaviour ReactiveDag.CommandExecutor
+        @impl true
+        def execute(cmd, _ctx) do
+          send(unquote(pid), {:struct_cmd, cmd})
+          {:done, %{}}
+        end
+      end,
+      Macro.Env.location(__ENV__)
+    )
+    |> elem(1)
+  end
+
+  defp tuple_fanout_exec do
+    Module.create(
+      :"Elixir.TupleFanout#{System.unique_integer([:positive])}",
+      quote do
+        @behaviour ReactiveDag.CommandExecutor
+        @impl true
+        # a {kind, attrs} tuple followup — the shape a host with enqueue(kind, attrs) emits
+        def execute(_cmd, _ctx), do: {:done, %{}, [{"approve", %{payload: %{"thing" => "kid"}}}]}
+      end,
+      Macro.Env.location(__ENV__)
+    )
+    |> elem(1)
+  end
+
+  defp struct_or_map_exec(pid) do
+    Module.create(
+      :"Elixir.SOMExec#{System.unique_integer([:positive])}",
+      quote do
+        @behaviour ReactiveDag.CommandExecutor
+        @impl true
+        def execute(cmd, _ctx) do
+          p = ReactiveDag.Commands.field(cmd, :payload) || cmd["payload"]
+          send(unquote(pid), {:approved2, p["thing"]})
+          {:done, %{}}
+        end
+      end,
+      Macro.Env.location(__ENV__)
+    )
+    |> elem(1)
   end
 end
