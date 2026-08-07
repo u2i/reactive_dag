@@ -53,6 +53,70 @@ defmodule ReactiveDag.ComplianceAuthoringExampleTest do
     defp meta_of(_), do: []
   end
 
+  # ── derive each OP's grain bottom-up (the portal's op_grain analog) ───────────
+  # Only LEAVES author grain (the base case — the key shape enters there). Every op
+  # DERIVES it: a `product` op = its axis legs' grains joined "×"; any other op
+  # inherits its first leg's grain. An authored `meta[:grain]` on an op wins (an
+  # override). The derived grain is written back into each op's meta → flows into
+  # `cell.meta[:grain]`. This is exactly `U2iPortal.Model.Transformers.Compute.op_grain`,
+  # reading/writing meta instead of struct fields.
+  defmodule DeriveGrain do
+    use Spark.Dsl.Transformer
+    alias Spark.Dsl.Transformer
+    alias ReactiveDag.Node.Compose
+
+    @impl true
+    def transform(dsl) do
+      dsl =
+        Enum.reduce(Transformer.get_entities(dsl, [:reactive]), dsl, fn ent, acc ->
+          case ent do
+            %Compose{} = c ->
+              Transformer.replace_entity(acc, [:reactive], derive(c), &same?(&1, ent))
+
+            _ ->
+              acc
+          end
+        end)
+
+      {:ok, dsl}
+    end
+
+    # bottom-up: derive the legs first, then this node from its (now-derived) legs.
+    defp derive(%Compose{legs: legs} = c) do
+      legs = Enum.map(legs, &derive_leg/1)
+      %{c | legs: legs, meta: put_grain(c.meta, grain_of(%{c | legs: legs}))}
+    end
+
+    defp derive_leg(%Compose{} = c), do: derive(c)
+    defp derive_leg(leg), do: leg
+
+    # a node's grain: authored meta[:grain] wins; a product op ×-joins its non-fn
+    # axes; else inherit the first leg's grain; a leaf's is whatever it authored.
+    defp grain_of(%Compose{leaf?: true, meta: m}), do: Keyword.get(m, :grain)
+
+    defp grain_of(%Compose{op: :product, legs: legs}) do
+      legs |> Enum.map(&leg_grain/1) |> Enum.reject(&is_nil/1) |> Enum.join("×") |> nilify()
+    end
+
+    defp grain_of(%Compose{meta: m, legs: [first | _]}),
+      do: Keyword.get(m, :grain) || leg_grain(first)
+
+    defp grain_of(%Compose{meta: m}), do: Keyword.get(m, :grain)
+
+    defp leg_grain(%Compose{meta: m, leaf?: true}), do: Keyword.get(m, :grain)
+    defp leg_grain(%Compose{} = c), do: grain_of(c)
+    defp leg_grain(_), do: nil
+
+    defp put_grain(meta, nil), do: meta
+    defp put_grain(meta, g), do: Keyword.put(meta, :grain, g)
+
+    defp nilify(""), do: nil
+    defp nilify(s), do: s
+
+    defp same?(%s{__identifier__: id}, %s{__identifier__: id}) when not is_nil(id), do: true
+    defp same?(a, b), do: a == b
+  end
+
   # ── the compliance vocabulary composed onto ReactiveDag.Node ──────────────────
   defmodule Ext do
     @claim %Spark.Dsl.Entity{name: :claim, target: Claim, args: [:text], schema: [text: [type: :string, required: true]]}
@@ -69,7 +133,7 @@ defmodule ReactiveDag.ComplianceAuthoringExampleTest do
         %Spark.Dsl.Patch.AddEntity{section_path: [:reactive], entity: @population},
         %Spark.Dsl.Patch.AddEntity{section_path: [:reactive], entity: @conformance}
       ],
-      transformers: [DeriveStrength]
+      transformers: [DeriveGrain, DeriveStrength]
 
     def claim(m), do: Spark.Dsl.Extension.get_entities(m, [:reactive]) |> Enum.find(&match?(%Claim{}, &1))
     def addresses(m), do: (Spark.Dsl.Extension.get_entities(m, [:reactive]) |> Enum.find(&match?(%Addresses{}, &1)) || %Addresses{}).controls
@@ -109,11 +173,10 @@ defmodule ReactiveDag.ComplianceAuthoringExampleTest do
       op :fold
       meta grain: :change
 
-      # NO `as:` — the lib auto-derives positional ids ("#{parent}/#{i}") exactly
-      # like the portal's tree-position id grammar. The structure IS the id.
+      # NO `as:` — ids auto-derive from position. And NO grain on the reconcile —
+      # only the LEAVES author grain; the reconcile op DERIVES its grain (inherits
+      # its first leg's :"app×repo") via the DeriveGrain transformer.
       compose :reconcile do
-        meta grain: :"app×repo"
-
         compose :declared do
           leaf? true
           meta grain: :"app×repo", strength: :declared
@@ -164,5 +227,20 @@ defmodule ReactiveDag.ComplianceAuthoringExampleTest do
     # depth-ordered: leaves shallower than the reconcile shallower than the fold
     assert plan.depths["merge_gated/0/0"] < plan.depths["merge_gated/0"]
     assert plan.depths["merge_gated/0"] < plan.depths["merge_gated"]
+  end
+
+  test "grain is DERIVED for ops — only leaves author it" do
+    cells = ReactiveDag.Node.cells(MergeGated) |> Map.new(&{&1.id, &1})
+
+    # the leaves AUTHOR their grain (the base case — the key shape enters here)
+    assert cells["merge_gated/0/0"].meta[:grain] == :"app×repo"
+    assert cells["merge_gated/0/1"].meta[:grain] == :"app×repo"
+
+    # the reconcile authored NO grain — it was DERIVED (inherit first leg's grain).
+    assert cells["merge_gated/0"].meta[:grain] == :"app×repo"
+
+    # the fold's grain (:change) is authored — a genuinely distinct grain the fold
+    # introduces, not inherited (faithful to the real merge_gated).
+    assert cells["merge_gated"].meta[:grain] == :change
   end
 end
