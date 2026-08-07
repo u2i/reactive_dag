@@ -430,6 +430,29 @@ defmodule ReactiveDag.Node do
         doc:
           "SECOND-ORDER: this node's population is computed from the graph itself (e.g. :findings | :register | :controls). Carried in meta for a host post-build hook; the library does not resolve it."
       ],
+      companion: [
+        type: :keyword_list,
+        doc: """
+        TWO-CELL node: emit a COMPANION cell at this node's id (`<id>`) as a derived
+        VIEW over the node's op-tree, and re-root the tree at `<id>/<suffix>` (default
+        suffix `"set"`). The companion takes the tree root as its sole input and
+        carries a host-chosen `op:` — so `SetOp` recomputes it (e.g. a status FILTER
+        that keeps only the violation rows). Options:
+
+          * `op:` (atom, required) — the companion cell's op (its RecomputeStrategy
+            dispatch key).
+          * `id_suffix:` (string, default `"set"`) — the tree-root suffix under `<id>`.
+          * `meta:` (keyword) — extra meta on the companion cell (e.g. `watched?: true`).
+
+        The general pattern: a node PLUS a derived projection of it, both addressable —
+        the shape a THREE-VALUED verdict needs (the tree holds all evaluated members;
+        the companion holds only the problem rows; a reader consults both to tell
+        "green" from "never evaluated"). The library provides the two-cell STRUCTURE +
+        id rooting; the host provides the companion's recompute (via `op:`) and any
+        read-side disambiguation. Not compatible with `for_each` (a generator has no
+        single companion) or `leaf?`.
+        """
+      ],
       depends_on: [
         type: {:list, :atom},
         default: [],
@@ -482,8 +505,21 @@ defmodule ReactiveDag.Node do
   def cells(resource, fetch \\ nil) do
     case Ext.get_opt(resource, [:reactive], :for_each, nil) do
       nil ->
-        {_id, cells} = lower(resource, cell_id(resource) |> to_string(), %{})
-        cells
+        base = cell_id(resource) |> to_string()
+
+        case Ext.get_opt(resource, [:reactive], :companion, nil) do
+          nil ->
+            {_id, cells} = lower(resource, base, %{})
+            cells
+
+          companion ->
+            # TWO-CELL node: the op-tree roots at `<id>/<suffix>`, and a companion
+            # cell at `<id>` is a derived view over it (its sole input is the tree
+            # root, carrying the host `op:`).
+            suffix = Keyword.get(companion, :id_suffix, "set")
+            {tree_root, tree_cells} = lower(resource, "#{base}/#{suffix}", %{})
+            [companion_cell(base, tree_root, companion) | tree_cells]
+        end
 
       pop when is_function(fetch, 1) ->
         # GENERATOR: template builds no cell; expand one instance per member.
@@ -506,6 +542,18 @@ defmodule ReactiveDag.Node do
   defp lower(resource, root_id, stamp) do
     {id, cells} = ReactiveDag.Lowering.walk(root_id, root_node(resource, root_id), walk_cbs())
     {id, Enum.map(cells, &%{&1 | meta: Map.merge(&1.meta, stamp)})}
+  end
+
+  # the COMPANION cell of a two-cell node: at `id`, a derived view over the op-tree
+  # `tree_root` (its sole input), carrying the host `op:` (its recompute key) + meta.
+  defp companion_cell(id, tree_root, companion) do
+    %ReactiveDag.Cell{
+      id: id,
+      op: Keyword.fetch!(companion, :op),
+      inputs: [tree_root],
+      leaf?: false,
+      meta: companion |> Keyword.get(:meta, []) |> Map.new()
+    }
   end
 
   @doc "The root cell a NON-generator node resource lowers to."
