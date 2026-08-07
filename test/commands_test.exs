@@ -245,6 +245,38 @@ defmodule ReactiveDag.CommandsTest do
     assert length(MemStore.all()) == 1
   end
 
+  test "on_event fires :claimed then a terminal event per command, across ALL outcomes" do
+    ReactiveDag.Commands.enqueue!(%{kind: "approve", scope: "a", payload: %{"thing" => "x"}})
+    ReactiveDag.Commands.enqueue!(%{kind: "needs_human", scope: "b"})
+    ReactiveDag.Commands.enqueue!(%{kind: "boom", scope: "e"})
+
+    me = self()
+    {:ok, _} = ReactiveDag.Commands.run(on_event: fn ev, cmd, info -> send(me, {:ev, ev, cmd["kind"], info}) end)
+
+    # each command is claimed before dispatch
+    assert_received {:ev, :claimed, "approve", %{}}
+    assert_received {:ev, :claimed, "needs_human", %{}}
+    assert_received {:ev, :claimed, "boom", %{}}
+
+    # a terminal event per outcome — done/blocked/failed all reach on_event
+    # (on_settled would see only the :done). Each carries a duration.
+    assert_received {:ev, :done, "approve", %{result: %{"approved" => "x"}, enqueued: 0, duration_ms: d1}}
+    assert is_integer(d1) and d1 >= 0
+    assert_received {:ev, :blocked, "needs_human", %{needs: %{"question" => "approve?"}, duration_ms: _}}
+    assert_received {:ev, :failed, "boom", %{error: _, duration_ms: _}}
+  end
+
+  test "on_event :done reports the followup count in :enqueued" do
+    ReactiveDag.Commands.enqueue!(%{kind: "fanout", scope: "f"})
+
+    me = self()
+    {:ok, _} = ReactiveDag.Commands.run(on_event: fn ev, cmd, info -> send(me, {:ev, ev, cmd["kind"], info}) end)
+
+    assert_received {:ev, :done, "fanout", %{enqueued: 1}}
+    # the enqueued child then runs too
+    assert_received {:ev, :done, "approve", %{enqueued: 0}}
+  end
+
   # ── pending-aware reads (optimistic overlay) ────────────────────────────────
 
   test "pending_effects projects outstanding commands via the executor's project/1" do

@@ -78,6 +78,13 @@ defmodule ReactiveDag.Commands do
 
     * `:cap` — max commands this run (default #{@default_cap}); the rest stay queued.
     * `:on_settled` — `(command, result -> any)` run after each `:done` (kick the drain here).
+    * `:on_event` — `(event, command, info -> any)`, called at each step INSIDE the
+      loop so a host can record an audit/processing log the `:done`-only
+      `:on_settled` can't reach. `event` is `:claimed` (just before dispatch;
+      `info = %{}`) then one terminal event per command — `:done` / `:blocked` /
+      `:failed` — with `info` carrying `:result` / `:needs` / `:error`,
+      `:duration_ms` (executor wall time), and `:enqueued` (followup count, `:done`
+      only). Fires for EVERY outcome, unlike `:on_settled`. Default: no-op.
     * `:ctx` — extra fields merged into the executor `ctx` (default `%{}`).
 
   Returns `{:ok, tally}` where tally = `%{done, blocked, failed, enqueued, capped?}`.
@@ -86,27 +93,33 @@ defmodule ReactiveDag.Commands do
   def run(opts \\ []) do
     cap = Keyword.get(opts, :cap, @default_cap)
     on_settled = Keyword.get(opts, :on_settled, fn _cmd, _result -> :ok end)
+    on_event = Keyword.get(opts, :on_event, fn _event, _cmd, _info -> :ok end)
     base_ctx = Keyword.get(opts, :ctx, %{})
     run_id = Ecto.UUID.generate()
 
     tally = %{done: 0, blocked: 0, failed: 0, enqueued: 0, capped?: false}
-    loop(run_id, base_ctx, on_settled, tally, cap)
+    loop(run_id, base_ctx, on_settled, on_event, tally, cap)
   end
 
   # ── the claim → dispatch → settle loop ──────────────────────────────────────
-  defp loop(_run_id, _ctx, _on_settled, tally, 0), do: {:ok, %{tally | capped?: true}}
+  defp loop(_run_id, _ctx, _on_settled, _on_event, tally, 0), do: {:ok, %{tally | capped?: true}}
 
-  defp loop(run_id, base_ctx, on_settled, tally, budget) do
+  defp loop(run_id, base_ctx, on_settled, on_event, tally, budget) do
     case claim(run_id) do
       nil ->
         {:ok, tally}
 
       cmd ->
-        outcome = dispatch(cmd, Map.merge(base_ctx, %{run_id: run_id, actor: cmd["actor"]}))
-        tally = settle(run_id, cmd, outcome, on_settled, tally)
-        loop(run_id, base_ctx, on_settled, tally, budget - 1)
+        on_event.(:claimed, cmd, %{})
+        {micros, outcome} = timed(fn -> dispatch(cmd, Map.merge(base_ctx, %{run_id: run_id, actor: cmd["actor"]})) end)
+        tally = settle(run_id, cmd, outcome, on_settled, on_event, div(micros, 1000), tally)
+        loop(run_id, base_ctx, on_settled, on_event, tally, budget - 1)
     end
   end
+
+  # executor wall time in microseconds — :timer.tc is resume-safe (monotonic,
+  # not wall-clock), unlike Date.now/System.system_time.
+  defp timed(fun), do: :timer.tc(fun)
 
   defp dispatch(cmd, ctx) do
     case Map.get(executors(), cmd["kind"]) do
@@ -124,25 +137,29 @@ defmodule ReactiveDag.Commands do
     end
   end
 
-  defp settle(_run_id, cmd, outcome, on_settled, tally) do
+  defp settle(_run_id, cmd, outcome, on_settled, on_event, ms, tally) do
     case outcome do
       {:done, result} ->
         set_status!(cmd["id"], "done", result: result)
+        on_event.(:done, cmd, %{result: result, enqueued: 0, duration_ms: ms})
         on_settled.(cmd, result)
         %{tally | done: tally.done + 1}
 
       {:done, result, followups} ->
         set_status!(cmd["id"], "done", result: result)
         n = Enum.count(followups, &enqueue_followup(&1, cmd))
+        on_event.(:done, cmd, %{result: result, enqueued: n, duration_ms: ms})
         on_settled.(cmd, result)
         %{tally | done: tally.done + 1, enqueued: tally.enqueued + n}
 
       {:blocked, needs} when is_map(needs) ->
         set_status!(cmd["id"], "blocked", needs: needs)
+        on_event.(:blocked, cmd, %{needs: needs, duration_ms: ms})
         %{tally | blocked: tally.blocked + 1}
 
       {:error, e} ->
         set_status!(cmd["id"], "failed", error: String.slice(inspect(e), 0, 500))
+        on_event.(:failed, cmd, %{error: e, duration_ms: ms})
         Logger.warning("reactive_dag commands: #{cmd["kind"]} #{cmd["id"]} failed: #{inspect(e)}")
         %{tally | failed: tally.failed + 1}
     end
