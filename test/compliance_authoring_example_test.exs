@@ -109,18 +109,17 @@ defmodule ReactiveDag.ComplianceAuthoringExampleTest do
       op :fold
       meta grain: :change
 
+      # NO `as:` — the lib auto-derives positional ids ("#{parent}/#{i}") exactly
+      # like the portal's tree-position id grammar. The structure IS the id.
       compose :reconcile do
-        as :"merge_gated/set/0"
         meta grain: :"app×repo"
 
         compose :declared do
-          as :"merge_gated/set/0/0"
           leaf? true
           meta grain: :"app×repo", strength: :declared
         end
 
         compose :observed do
-          as :"merge_gated/set/0/1"
           leaf? true
           meta grain: :"app×repo", strength: :measured, source: :repo_protection
         end
@@ -140,27 +139,30 @@ defmodule ReactiveDag.ComplianceAuthoringExampleTest do
     assert Ext.strength(MergeGated) == :declared
   end
 
-  test "merge_gated lowers to its real cell tree (fold → reconcile → 2 leaves)" do
+  test "merge_gated lowers to its real cell tree (fold → reconcile → 2 leaves), ids auto-derived" do
     cells = ReactiveDag.Node.cells(MergeGated) |> Map.new(&{&1.id, &1})
 
+    # auto-derived positional ids: root=merge_gated, its 0th leg=merge_gated/0
+    # (the reconcile), its legs merge_gated/0/0 + merge_gated/0/1 — the structure
+    # IS the id, no `as:` authored.
     assert cells["merge_gated"].op == :fold
     assert cells["merge_gated"].meta[:verdict] == true
-    assert cells["merge_gated/set/0"].op == :reconcile
-    assert cells["merge_gated/set/0/0"].leaf?
-    assert cells["merge_gated/set/0/1"].leaf?
+    assert cells["merge_gated/0"].op == :reconcile
+    assert cells["merge_gated/0/0"].leaf?
+    assert cells["merge_gated/0/1"].leaf?
 
     # the fold's input is the reconcile; the reconcile's inputs are its two leaves
-    assert cells["merge_gated"].inputs == ["merge_gated/set/0"]
-    assert Enum.sort(cells["merge_gated/set/0"].inputs) ==
-             ["merge_gated/set/0/0", "merge_gated/set/0/1"]
+    assert cells["merge_gated"].inputs == ["merge_gated/0"]
+    assert Enum.sort(cells["merge_gated/0"].inputs) ==
+             ["merge_gated/0/0", "merge_gated/0/1"]
   end
 
   test "the whole model assembles through the shared substrate" do
     plan = ReactiveDag.Node.graph([Values.RepoProtection, MergeGated])
     assert Map.has_key?(plan.cells, "merge_gated")
-    assert Map.has_key?(plan.cells, "merge_gated/set/0/1")
+    assert Map.has_key?(plan.cells, "merge_gated/0/1")
     # depth-ordered: leaves shallower than the reconcile shallower than the fold
-    assert plan.depths["merge_gated/set/0/0"] < plan.depths["merge_gated/set/0"]
-    assert plan.depths["merge_gated/set/0"] < plan.depths["merge_gated"]
+    assert plan.depths["merge_gated/0/0"] < plan.depths["merge_gated/0"]
+    assert plan.depths["merge_gated/0"] < plan.depths["merge_gated"]
   end
 end
