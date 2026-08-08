@@ -143,6 +143,38 @@ defmodule ReactiveDag.Commands.Store.Postgres do
     end)
   end
 
+  @impl true
+  def history(limit) do
+    %{rows: rows} =
+      repo().query!(
+        """
+        SELECT seq, id, kind, scope, payload, actor, status,
+               coalesce(executed_at, updated_at)
+        FROM #{table()} ORDER BY seq DESC LIMIT $1
+        """,
+        [limit]
+      )
+
+    Enum.map(rows, fn [seq, id, kind, scope, payload, actor, status, at] ->
+      %{
+        "seq" => seq,
+        "id" => Ecto.UUID.cast!(id),
+        "kind" => kind,
+        "scope" => scope,
+        "payload" => decode_payload(payload),
+        "actor" => actor,
+        "status" => status,
+        "at" => at
+      }
+    end)
+  end
+
+  @impl true
+  def count do
+    %{rows: [[n]]} = repo().query!("SELECT count(*) FROM #{table()}", [])
+    n
+  end
+
   defp repo do
     Application.get_env(:reactive_dag, :repo) ||
       raise "reactive_dag: set `config :reactive_dag, repo: MyApp.Repo`"

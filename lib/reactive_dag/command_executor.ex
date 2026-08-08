@@ -27,6 +27,12 @@ defmodule ReactiveDag.CommandExecutor do
   `ctx` carries `%{run_id, actor}` (+ anything the host adds). The executor runs
   INSIDE the processor's per-command transaction, so its leaf writes + the command
   settle commit atomically — the serialization guarantee.
+
+  ## Mutation-only executors
+
+  A host whose commands are all ordered DATA MODIFICATIONS (no human-in-the-loop
+  pause) can author against `ReactiveDag.CommandExecutor.Mutation` — the same seam
+  narrowed to `{:done, _} | {:error, _}` (no `:blocked`). Dispatch is identical.
   """
 
   @type command :: map()

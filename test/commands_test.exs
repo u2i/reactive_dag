@@ -108,6 +108,17 @@ defmodule ReactiveDag.CommandsTest do
       |> Enum.map(&decode/1)
     end
 
+    @impl true
+    def history(limit) do
+      all()
+      |> Enum.sort_by(& &1["seq"], :desc)
+      |> Enum.take(limit)
+      |> Enum.map(&decode/1)
+    end
+
+    @impl true
+    def count, do: length(all())
+
     defp replace(cmds, updated), do: Enum.map(cmds, &if(&1["id"] == updated["id"], do: updated, else: &1))
     defp decode(cmd), do: Map.update!(cmd, "payload", &Jason.decode!/1)
   end
@@ -161,6 +172,15 @@ defmodule ReactiveDag.CommandsTest do
     def execute(_cmd, _ctx), do: raise("boom")
   end
 
+  # a MUTATION executor — the narrowed {:done | :error}-only variant. Dispatches the
+  # same way; `:ok` payload → done, anything else → error.
+  defmodule MutateExec do
+    use ReactiveDag.CommandExecutor.Mutation
+    @impl true
+    def execute(%{"payload" => %{"ok" => true}} = cmd, _ctx), do: {:done, %{"wrote" => cmd["payload"]["thing"]}}
+    def execute(_cmd, _ctx), do: {:error, "cannot apply"}
+  end
+
   setup do
     Process.register(self(), ReactiveDag.CommandsTest)
     {:ok, _} = MemStore.start()
@@ -178,7 +198,8 @@ defmodule ReactiveDag.CommandsTest do
       "fanout" => FanoutExec,
       "dedup_fanout" => DedupFanoutExec,
       "boom" => BoomExec,
-      "answer" => ApproveExec
+      "answer" => ApproveExec,
+      "mutate" => MutateExec
     })
 
     Application.put_env(:reactive_dag, :command_freeze_exempt, ["answer"])
@@ -474,6 +495,72 @@ defmodule ReactiveDag.CommandsTest do
     assert tally.done == 2
     assert tally.enqueued == 1
     assert_received {:approved2, "kid"}
+  end
+
+  # ── history (the change-log read) ────────────────────────────────────────────
+
+  test "history/1 returns the whole log newest-first, incl. settled done/failed" do
+    ReactiveDag.Commands.enqueue!(%{kind: "mutate", scope: "s", payload: %{"ok" => true, "thing" => "a"}})
+    ReactiveDag.Commands.enqueue!(%{kind: "mutate", scope: "s", payload: %{"ok" => false, "thing" => "b"}})
+    {:ok, _} = ReactiveDag.Commands.run([])
+
+    log = ReactiveDag.Commands.history(10)
+
+    # newest-first.
+    assert Enum.map(log, & &1["seq"]) == Enum.sort(Enum.map(log, & &1["seq"]), :desc)
+    # both settled rows are present — done AND failed (unlike outstanding/0).
+    statuses = Map.new(log, &{&1["payload"]["thing"], &1["status"]})
+    assert statuses["a"] == "done"
+    assert statuses["b"] == "failed"
+    # payload is decoded (not a JSON string).
+    assert is_map(hd(log)["payload"])
+  end
+
+  test "count/0 reports the change-log size" do
+    assert ReactiveDag.Commands.count() == 0
+    ReactiveDag.Commands.enqueue!(%{kind: "mutate", scope: "s", payload: %{"ok" => true}})
+    assert ReactiveDag.Commands.count() == 1
+  end
+
+  test "history/1 + count/0 degrade to []/0 when the store doesn't implement them" do
+    # a minimal store implementing only the required callbacks.
+    defmodule BareStore do
+      @behaviour ReactiveDag.Commands.Store
+      @impl true
+      def enqueue(_a), do: {:ok, :enqueued}
+      @impl true
+      def claim(_r, _f), do: nil
+      @impl true
+      def settle(_i, _s, _f), do: :ok
+      @impl true
+      def outstanding, do: []
+    end
+
+    Application.put_env(:reactive_dag, :commands_store, BareStore)
+    assert ReactiveDag.Commands.history(10) == []
+    assert ReactiveDag.Commands.count() == 0
+  end
+
+  # ── the mutation-executor variant ────────────────────────────────────────────
+
+  test "a Mutation executor drains like any executor (done + error, no :blocked)" do
+    ReactiveDag.Commands.enqueue!(%{kind: "mutate", scope: "s", payload: %{"ok" => true, "thing" => "x"}})
+    ReactiveDag.Commands.enqueue!(%{kind: "mutate", scope: "t", payload: %{"ok" => false}})
+    {:ok, tally} = ReactiveDag.Commands.run([])
+
+    assert tally.done == 1
+    assert tally.failed == 1
+    assert tally.blocked == 0
+
+    # the {:done, result} was recorded; the failed one parked failed.
+    log = Map.new(ReactiveDag.Commands.history(10), &{&1["scope"], &1["status"]})
+    assert log["s"] == "done"
+    assert log["t"] == "failed"
+  end
+
+  test "the Mutation variant declares only the narrowed behaviour (no dup callback)" do
+    assert ReactiveDag.CommandExecutor.Mutation in (MutateExec.__info__(:attributes)[:behaviour] || [])
+    refute ReactiveDag.CommandExecutor in (MutateExec.__info__(:attributes)[:behaviour] || [])
   end
 
   # runtime-built executors (module attrs can't close over `self()`)

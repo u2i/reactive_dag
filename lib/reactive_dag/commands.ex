@@ -294,6 +294,31 @@ defmodule ReactiveDag.Commands do
     end)
   end
 
+  @doc """
+  The most recent `limit` commands, newest-first, REGARDLESS of status — the
+  frontier read as an ordered CHANGE LOG (audit trail). Unlike `pending_effects/0`
+  (only in-flight rows), this includes settled `done` / `failed` / `discarded`
+  commands. Each row is the store's native command shape plus the audit fields
+  (`seq` / `status` / `at`); the payload stays opaque to the lib, so a host derives
+  its own human summaries from `kind` + `payload`.
+
+  Returns `[]` if the configured store doesn't implement `c:ReactiveDag.Commands.
+  Store.history/1` (an optional callback).
+  """
+  @spec history(non_neg_integer()) :: [map()]
+  def history(limit \\ 50) do
+    if function_exported?(store(), :history, 1), do: store().history(limit), else: []
+  end
+
+  @doc """
+  Total number of commands ever recorded — the change-log size. `0` if the store
+  doesn't implement `c:ReactiveDag.Commands.Store.count/0`.
+  """
+  @spec count() :: non_neg_integer()
+  def count do
+    if function_exported?(store(), :count, 0), do: store().count(), else: 0
+  end
+
   # ── config ──────────────────────────────────────────────────────────────────
   defp store, do: ReactiveDag.Commands.Store.impl()
   defp executors, do: Application.get_env(:reactive_dag, :command_executors, %{})

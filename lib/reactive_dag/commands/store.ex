@@ -44,6 +44,21 @@ defmodule ReactiveDag.Commands.Store do
   """
   @callback outstanding() :: [command()]
 
+  @doc """
+  OPTIONAL: the most recent `limit` commands, newest-first (`seq DESC`), REGARDLESS
+  of status — the frontier read as an ordered CHANGE LOG / audit trail. Distinct
+  from `outstanding/0` (only in-flight rows): `history` includes settled `done` /
+  `failed` / `discarded` rows too. A store that can enumerate its whole log
+  implements this; one that can't (a minimal in-memory store) may omit it, and
+  `ReactiveDag.Commands.history/1` returns `[]`.
+  """
+  @callback history(limit :: non_neg_integer()) :: [command()]
+
+  @doc "OPTIONAL: total number of commands ever recorded (the change-log size)."
+  @callback count() :: non_neg_integer()
+
+  @optional_callbacks history: 1, count: 0
+
   @doc "The configured store module (default: the Postgres store)."
   @spec impl() :: module()
   def impl, do: Application.get_env(:reactive_dag, :commands_store, ReactiveDag.Commands.Store.Postgres)
