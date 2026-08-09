@@ -212,37 +212,56 @@ reads only your own database.
 Reads: `stances/1` (latest per scope × signer — what evaluation consumes) and
 `history/2` (the full append-only trail — what an auditor consumes).
 
-## Storage
+## Storage: a host-defined Ash resource
 
-One append-only table, in the same ownership pattern as the tuple spine: the
-library defines the columns and is their only reader/writer; the host runs the
-migration and configures the name.
-
-```elixir
-config :reactive_dag, attestation_table: "my_attestation"
-```
+Records live in an **Ash resource the host defines** — the same pattern as
+`ash_authentication`'s token resource. The `ReactiveDag.Attestation.Record`
+extension stamps the required shape (the record attributes, a `:sign` create,
+a primary read); the host chooses repo, table, and domain, and the library
+reaches the resource via config:
 
 ```elixir
-create table(:my_attestation, primary_key: false) do
-  add :id,            :uuid, primary_key: true
-  add :cell_id,       :string, null: false
-  add :scope_kind,    :string, null: false
-  add :scope,         :string, null: false
-  add :who,           :string, null: false
-  add :polarity,      :string, null: false
-  add :reason,        :text
-  add :basis,         :string, null: false
-  add :basis_version, :smallint, null: false
-  add :signed_at,     :utc_datetime_usec, null: false
-  add :meta,          :jsonb
+defmodule MyApp.Attestation.Record do
+  use Ash.Resource,
+    domain: MyApp.Attestations,
+    data_layer: AshPostgres.DataLayer,
+    extensions: [ReactiveDag.Attestation.Record]
+
+  postgres do
+    table "attestation_records"
+    repo MyApp.Repo
+  end
+
+  attestation_record do
+    who_from_actor fn actor -> to_string(actor.email) end
+  end
 end
-
-create index(:my_attestation, [:cell_id, :scope_kind, :scope, :who, :signed_at])
 ```
 
-What is deliberately absent *is* the design: no `status`, no `active` flag, no
-unique index, no `updated_at`. Rows are never mutated; stance is a read;
-force is a predicate. The history is the audit trail.
+```elixir
+config :reactive_dag, attestation_resource: MyApp.Attestation.Record
+```
+
+Migrations are generated (`mix ash.codegen add_attestation_records`), not
+hand-written. And because it is an ordinary resource of yours, everything Ash
+composes onto it:
+
+- **`who_from_actor`** — with an actor on the `:sign` action, the signer is
+  **forced from the actor**. Impersonation is prevented at the write, not
+  merely discounted at read time by the eligibility check. (`affirm`/`reject`
+  pass `actor:` through.)
+- **Policies** — signing authorization in the same framework as the rest of
+  your app.
+- **Notifications** — pub_sub a signing straight into your refresh.
+
+Two invariants are enforced by the extension rather than left to convention:
+
+- **append-only** — a verifier fails compilation if the resource declares any
+  update or destroy action. Rows are never mutated; stance is a read; force is
+  a predicate; the history is the audit trail.
+- **reasoned rejection** — the `:sign` action errors a `"reject"` with a blank
+  `reason`, so even writes that bypass `ReactiveDag.Attestation` obey the
+  rule.
 
 `basis_version` pins each record to the digest scheme it was signed under, and
 an unknown (future) version evaluates as a basis mismatch — *re-ask*, never a

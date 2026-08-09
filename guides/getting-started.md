@@ -74,7 +74,8 @@ def change do
 end
 ```
 
-(If you use attestations, there is a third table — see the
+(If you use attestations, the record store is different: it is an **Ash
+resource you define**, with generated migrations — see the
 [Attestations](attestations.md) guide.)
 
 ## A first graph

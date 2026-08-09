@@ -9,35 +9,25 @@ defmodule ReactiveDag.Attestation do
   at a moment. Records are never updated or deleted; a signer's current STANCE
   on a scope is simply their most recent record, and whether that stance
   currently COUNTS is a read-time predicate
-  (`ReactiveDag.Attestation.Evaluation`) — never a stored status. There is no
-  `active` flag, no unique index, no `updated_at`, by design: the history is
-  the audit trail.
+  (`ReactiveDag.Attestation.Evaluation`) — never a stored status.
 
-  ## Ownership (the spine pattern)
+  ## Storage: a host-defined Ash resource
 
-  As with `tuple_table`: the lib defines the columns and is the only
-  reader/writer; the host runs the migration and configures the name —
+  Records live in an **Ash resource the host defines** and this module reaches
+  via config — the Ash-idiomatic library-storage pattern. The
+  `ReactiveDag.Attestation.Record` extension stamps the required shape
+  (attributes, the `:sign` create, a primary read) and ENFORCES append-only
+  (an update/destroy action fails compilation); the host chooses repo, table,
+  domain — and composes policies, notifications, and generated migrations onto
+  it like any other resource.
 
-      config :reactive_dag, attestation_table: "my_attestation"
+      config :reactive_dag, attestation_resource: MyApp.Attestation.Record
 
-  The expected shape:
-
-      create table(:reactive_dag_attestation, primary_key: false) do
-        add :id,            :uuid, primary_key: true
-        add :cell_id,       :string, null: false
-        add :scope_kind,    :string, null: false
-        add :scope,         :string, null: false
-        add :who,           :string, null: false
-        add :polarity,      :string, null: false
-        add :reason,        :text
-        add :basis,         :string, null: false
-        add :basis_version, :smallint, null: false
-        add :signed_at,     :utc_datetime_usec, null: false
-        add :meta,          :jsonb
-      end
-
-      create index(:reactive_dag_attestation,
-        [:cell_id, :scope_kind, :scope, :who, :signed_at])
+  Writes pass `actor:` through to Ash, so a resource configured with
+  `who_from_actor` derives the signer from the actor — impersonation prevented
+  at the write, not merely discounted at read time. Internal reads
+  (`stances/1`, `history/2`) run with `authorize?: false`: they are the
+  system's own evaluation input, not a user-facing query.
 
   ## The leaf cell
 
@@ -48,9 +38,10 @@ defmodule ReactiveDag.Attestation do
   serialized scope as the changed leaf key for the host's refresh call.
   """
 
+  require Ash.Query
+
   alias ReactiveDag.Attestation.{Basis, Scope}
 
-  @default_table "reactive_dag_attestation"
   @default_cell "attestations"
 
   @type polarity :: :affirm | :reject
@@ -75,7 +66,8 @@ defmodule ReactiveDag.Attestation do
   Record that `who` AFFIRMS `scope` of `cell_id` as it currently stands. The
   basis is digested from the rows the scope selects right now (pass `rows:` to
   supply them, e.g. in a transaction that just read them). `reason:` is
-  optional on an affirmation.
+  optional on an affirmation. `actor:` is passed through to Ash — with a
+  `who_from_actor` on the record resource, the signer is derived from it.
 
   Returns `{:ok, record, changed_leaf_keys}` — the changed keys are for marking
   the store's leaf cell dirty (`leaf_cell/0`).
@@ -83,14 +75,15 @@ defmodule ReactiveDag.Attestation do
   @spec affirm(String.t(), Scope.t(), String.t(), keyword()) ::
           {:ok, record(), [String.t()]}
   def affirm(cell_id, scope, who, opts \\ []) do
-    insert(cell_id, scope, who, :affirm, Keyword.get(opts, :reason), opts)
+    sign(cell_id, scope, who, :affirm, Keyword.get(opts, :reason), opts)
   end
 
   @doc """
   Record that `who` REJECTS `scope` of `cell_id` as it currently stands.
   `reason` is REQUIRED: an affirmation asserts the data as presented, but a
   rejection asserts it is *wrong* — a bare "no" leaves whoever must act with
-  nothing to fix and an auditor with an unexplained refusal.
+  nothing to fix and an auditor with an unexplained refusal. (The resource's
+  `:sign` action enforces the same rule for writes that bypass this module.)
   """
   @spec reject(String.t(), Scope.t(), String.t(), String.t(), keyword()) ::
           {:ok, record(), [String.t()]}
@@ -100,7 +93,7 @@ defmodule ReactiveDag.Attestation do
             "attestation: a rejection requires a reason — what is wrong with the data?"
     end
 
-    insert(cell_id, scope, who, :reject, reason, opts)
+    sign(cell_id, scope, who, :reject, reason, opts)
   end
 
   @doc """
@@ -110,118 +103,103 @@ defmodule ReactiveDag.Attestation do
   """
   @spec stances(String.t()) :: [record()]
   def stances(cell_id) do
-    %{rows: rows} =
-      query!(
-        """
-        SELECT DISTINCT ON (scope_kind, scope, who)
-               id, cell_id, scope_kind, scope, who, polarity, reason,
-               basis, basis_version, signed_at
-        FROM #{table()}
-        WHERE cell_id = $1
-        ORDER BY scope_kind, scope, who, signed_at DESC
-        """,
-        [cell_id]
-      )
-
-    Enum.map(rows, &to_record/1)
+    resource()
+    |> Ash.Query.filter(cell_id == ^cell_id)
+    |> Ash.read!(authorize?: false)
+    |> Enum.group_by(&{&1.scope_kind, &1.scope, &1.who})
+    |> Enum.map(fn {_key, records} ->
+      records |> Enum.max_by(& &1.signed_at, DateTime) |> to_record()
+    end)
+    |> Enum.sort_by(&{Scope.serialize(&1.scope), &1.who})
   end
 
   @doc "Full append-only history for `cell_id` (optionally one scope), newest first."
   @spec history(String.t(), keyword()) :: [record()]
   def history(cell_id, opts \\ []) do
-    {scope_sql, params} =
+    query =
       case Keyword.get(opts, :scope) do
-        nil -> {"", [cell_id]}
-        scope -> {" AND scope = $2", [cell_id, Scope.serialize(scope)]}
+        nil ->
+          Ash.Query.filter(resource(), cell_id == ^cell_id)
+
+        scope ->
+          scope_text = Scope.serialize(scope)
+          Ash.Query.filter(resource(), cell_id == ^cell_id and scope == ^scope_text)
       end
 
-    %{rows: rows} =
-      query!(
-        """
-        SELECT id, cell_id, scope_kind, scope, who, polarity, reason,
-               basis, basis_version, signed_at
-        FROM #{table()}
-        WHERE cell_id = $1#{scope_sql}
-        ORDER BY signed_at DESC
-        """,
-        params
-      )
-
-    Enum.map(rows, &to_record/1)
+    query
+    |> Ash.Query.sort(signed_at: :desc)
+    |> Ash.read!(authorize?: false)
+    |> Enum.map(&to_record/1)
   end
 
   # ── internals ───────────────────────────────────────────────────────────────
 
-  defp insert(cell_id, scope, who, polarity, reason, opts) do
+  defp sign(cell_id, scope, who, polarity, reason, opts) do
     rows = Keyword.get_lazy(opts, :rows, fn -> Scope.select_db(scope, cell_id) end)
     version = Basis.current_version()
-    basis = Basis.digest(rows, version)
-    signed_at = Keyword.get(opts, :signed_at, DateTime.utc_now())
-    id = Ecto.UUID.generate()
-    {scope_kind, scope_text} = {kind(scope), Scope.serialize(scope)}
+    scope_text = Scope.serialize(scope)
 
-    query!(
-      """
-      INSERT INTO #{table()}
-        (id, cell_id, scope_kind, scope, who, polarity, reason,
-         basis, basis_version, signed_at)
-      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
-      """,
-      [
-        Ecto.UUID.dump!(id),
-        cell_id,
-        scope_kind,
-        scope_text,
-        who,
-        Atom.to_string(polarity),
-        reason,
-        basis,
-        version,
-        signed_at
-      ]
-    )
-
-    record = %{
-      id: id,
+    attrs = %{
       cell_id: cell_id,
-      scope: scope,
+      scope_kind: kind(scope),
+      scope: scope_text,
       who: who,
-      polarity: polarity,
+      polarity: Atom.to_string(polarity),
       reason: reason,
-      basis: basis,
+      basis: Basis.digest(rows, version),
       basis_version: version,
-      signed_at: signed_at
+      signed_at: Keyword.get(opts, :signed_at, DateTime.utc_now())
     }
 
-    {:ok, record, [scope_text]}
+    created =
+      resource()
+      |> Ash.Changeset.for_create(
+        :sign,
+        attrs,
+        Keyword.take(opts, [:actor, :tenant, :authorize?])
+      )
+      |> Ash.create!()
+
+    {:ok, to_record(created), [scope_text]}
   end
 
   defp kind({:key, _}), do: "key"
   defp kind({:filter, _}), do: "filter"
 
-  defp to_record([id, cell_id, _kind, scope, who, polarity, reason, basis, version, signed_at]) do
+  defp to_record(struct) do
     %{
-      id: load_uuid(id),
-      cell_id: cell_id,
-      scope: Scope.parse(scope),
-      who: who,
-      polarity: String.to_existing_atom(polarity),
-      reason: reason,
-      basis: basis,
-      basis_version: version,
-      signed_at: signed_at
+      id: to_string(struct.id),
+      cell_id: struct.cell_id,
+      scope: Scope.parse(struct.scope),
+      who: struct.who,
+      polarity: String.to_existing_atom(struct.polarity),
+      reason: struct.reason,
+      basis: struct.basis,
+      basis_version: struct.basis_version,
+      signed_at: struct.signed_at
     }
   end
 
-  defp load_uuid(<<_::128>> = raw), do: Ecto.UUID.load!(raw)
-  defp load_uuid(id), do: id
+  defp resource do
+    Application.get_env(:reactive_dag, :attestation_resource) ||
+      raise """
+      reactive_dag: no attestation resource configured. Define one —
 
-  defp query!(sql, params), do: repo().query!(sql, params)
+          defmodule MyApp.Attestation.Record do
+            use Ash.Resource,
+              domain: MyApp.Attestations,
+              data_layer: AshPostgres.DataLayer,
+              extensions: [ReactiveDag.Attestation.Record]
 
-  defp repo do
-    Application.get_env(:reactive_dag, :repo) ||
-      raise "reactive_dag: set `config :reactive_dag, repo: MyApp.Repo`"
+            postgres do
+              table "attestation_records"
+              repo MyApp.Repo
+            end
+          end
+
+      — and point the library at it:
+
+          config :reactive_dag, attestation_resource: MyApp.Attestation.Record
+      """
   end
-
-  defp table, do: Application.get_env(:reactive_dag, :attestation_table, @default_table)
 end
