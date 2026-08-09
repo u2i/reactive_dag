@@ -23,16 +23,35 @@ defmodule ReactiveDag.MixProject do
 
   defp docs do
     [
-      main: "readme",
+      main: "getting-started",
+      source_url: "https://github.com/u2i/reactive_dag",
+      source_ref: "v0.9.0",
       extras: [
+        "guides/getting-started.md",
+        "guides/authoring-nodes.md",
+        "guides/sources.md",
+        "guides/attestations.md",
+        "guides/seams.md",
         "README.md",
         "docs/adr-001-reactive-dag-library.md"
+      ],
+      groups_for_extras: [
+        Guides: ~r/guides\/.*/,
+        Design: ~r/docs\/.*/
       ],
       groups_for_modules: [
         Authoring: [
           ReactiveDag.Node,
           ReactiveDag.Node.Payload,
           ReactiveDag.Node.Recompute.Aggregate
+        ],
+        Attestation: [
+          ReactiveDag.Attestation,
+          ReactiveDag.Attestation.Scope,
+          ReactiveDag.Attestation.Basis,
+          ReactiveDag.Attestation.Requirement,
+          ReactiveDag.Attestation.Evaluation,
+          ReactiveDag.Attestation.Op
         ],
         Seams: [
           ReactiveDag.Source,

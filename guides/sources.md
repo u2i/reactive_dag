@@ -1,0 +1,149 @@
+# Sources and scanning
+
+A **source** reads external state — a fleet API, a git host, an LLM, a human's
+table — and writes a leaf cell. This guide covers the contract, the two-phase
+design invariant behind it, and the one discipline that keeps a graph honest
+when the outside world is unreachable.
+
+## The two phases: poll, then drain
+
+```
+1. POLL   — each source fetches → writes its leaf tuples → returns changed keys.
+            Effectful, non-deterministic, fallible. OUTSIDE the drain.
+2. DRAIN  — the engine recomputes everything downstream of the dirty frontier.
+            Pure set/graph computation over tuples already present.
+            Deterministic, re-runnable, never fails on a network outage.
+```
+
+This split is a design invariant, not an accident. Because no source runs
+inside the drain, a failure is contained to its own leaf: one vendor being down
+cannot wedge the recompute of everything else, and the drain can always be
+re-run without re-touching the world.
+
+## The contract
+
+```elixir
+defmodule MyApp.Sources.FleetScan do
+  @behaviour ReactiveDag.Source
+
+  @impl true
+  def id, do: :fleet_scan
+
+  @impl true
+  def leaf_cells(_graph), do: ["machines"]
+
+  @impl true
+  def origin, do: %{label: "Fleet · endpoint inventory", store: "Fleet MDM"}
+
+  @impl true
+  def poll(_opts) do
+    with {:ok, hosts} <- Fleet.hosts() do
+      keys = Enum.map(hosts, & &1.serial)
+
+      {:ok, changed} =
+        ReactiveDag.Tuple.reconcile("machines", keys,
+          upsert: fn key -> write_row(key) end
+        )
+
+      {:ok, %{changed: changed, unreachable: []}}
+    else
+      {:error, reason} -> {:ok, %{changed: [], unreachable: [{"fleet", reason}]}}
+    end
+  end
+end
+```
+
+`poll/1` returns the keys that **actually changed** — the caller marks exactly
+those dirty, which is what keeps the cascade proportional to real change rather
+than to scan size.
+
+## Binding a source to its leaf
+
+The scanner↔leaf binding has one home, chosen by cardinality:
+
+- **1:1 (the common case)** — inline on the leaf: `source :fleet_scan` /
+  `driver MyApp.Sources.FleetScan` in the leaf's `reactive` block. The leaf and
+  its scanner travel together; `ReactiveDag.Source.drivers/2` reads the
+  bindings off the graph.
+- **fan-out (rare)** — a scanner that writes cells no single leaf owns names
+  them via its own `leaf_cells/1` and is passed to the host as an *extra*
+  driver.
+
+Either way, `ReactiveDag.Source.verify!/2` confirms at startup that every
+declared leaf is a real cell in the built plan — a renamed cell fails loudly
+instead of a scanner silently writing rows nothing reads.
+
+## Reconcile: the leaf-write skeleton
+
+`ReactiveDag.Tuple.reconcile/3` is the one algorithm every leaf driver
+otherwise hand-rolls:
+
+```
+current  = the cell's current keys
+want     = what the scan found
+upsert   each want key    → host writes the row; returns true iff CHANGED
+vanished = current − want → retired (delete, or a host tombstone policy)
+⇒ changed_upserts ++ vanished   (the keys to propagate)
+```
+
+The host supplies the two variation points — `upsert:` (what a row contains and
+what counts as changed is domain logic) and `retire:` (`:delete` by default; a
+retain-if-vanished host passes a tombstone function). Vanished keys always
+propagate: something disappearing is a change.
+
+## The honest-gap discipline
+
+The single most important rule for a source:
+
+> **An upstream you could not reach writes NOTHING.**
+
+If the fleet API is down and the scan writes an empty set, `reconcile` will
+dutifully retire every machine — and every downstream guarantee will see an
+estate with no members, which typically rolls up as *vacuously green*. A scan
+that couldn't look must never render as a scan that found nothing.
+
+So on failure: write no tuples, retire nothing, and report the outage in the
+poll result (`unreachable:`) so the host can surface it. The stale rows that
+remain are the *truthful* state: last known, aging, and visibly so through the
+spine's `observed_at`.
+
+Corollary: when a source feeds several leaves and only some upstreams fail,
+write the leaves you could observe and skip the ones you couldn't — never let
+one vendor's outage discard another's (or a human's) data. If two kinds of
+evidence keep ending up in one poll, that is usually the signal they are two
+sources (see the [Attestations](attestations.md) guide for the canonical case).
+
+## Humans are a source too
+
+A human edit — a managed list, an approval, a claim — enters the graph the same
+way a scan does: write the leaf, mark dirty, drain. The only differences are
+timing (human-initiated rather than scheduled), latency (sub-second: it reads
+your own database), and failure mode (none — no vendor round-trip). None of
+those differences need machinery; they are properties of the source, not of
+the propagation.
+
+For human assertions that carry *accountability* — who confirmed what, when,
+and whether it still holds — use the attestation machinery rather than a bare
+leaf write: it adds the signer, the content basis, and read-time force
+evaluation on top of exactly this propagation path.
+
+## The refresh loop
+
+A typical host wraps poll + propagate + drain in one function:
+
+```elixir
+def refresh(source, plan) do
+  {:ok, result} = source.poll([])
+
+  for leaf <- source.leaf_cells(plan) do
+    ReactiveDag.Graph.dirty_parents(plan, leaf, result.changed, MyApp.KeyRule)
+  end
+
+  ReactiveDag.Drain.run(plan, recompute: MyApp.Recompute, key_rule: MyApp.KeyRule)
+  {:ok, result}
+end
+```
+
+Order sources so that ones which only observe the world run before any source
+that derives from other cells' results — a deriving source that runs first
+computes against a stale model.

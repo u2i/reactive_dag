@@ -6,6 +6,12 @@ tuple, leaf-reconcile, and nested-expression lowering that go with it. Extracted
 from two apps that independently grew the same engine (the Red Hook `cascade`
 pipeline and the u2i compliance portal's `model_eval`), and now shared by both.
 
+**Documentation:** the guides are the front door — [Getting
+started](guides/getting-started.md), [Authoring nodes](guides/authoring-nodes.md),
+[Sources and scanning](guides/sources.md), [Attestations](guides/attestations.md)
+(human sign-off as a first-class input), and [The seams](guides/seams.md). This
+README is the reference-style overview.
+
 The substrate decides *when* and *in what order* cells recompute; it never
 decides *how* or *what a value means*. Each host brings its domain at the seams:
 
@@ -210,7 +216,7 @@ for a human — is the case that would justify bringing it back.
 Status: **both hosts run on the substrate** — the shared engine spans a per-key
 Elixir recompute (cascade) and a set-based SQL recompute (the portal), all
 coordination writes routed through the seam, proven by both suites green. Cascade
-authors several ops via the `Node` `reduce`/`join` combinators. Consumed today as
-a `path:` dep by each app; publish/pin is the remaining step. See
+authors several ops via the `Node` `reduce`/`join` combinators; the standalone
+compliance app consumes tagged releases (`tag: "v0.9.0"`). See
 [docs/adr-001-reactive-dag-library.md](docs/adr-001-reactive-dag-library.md)
 for the boundary, the seams, and the design law behind them.

@@ -1,0 +1,193 @@
+# Getting started
+
+`reactive_dag` turns a set of Ash resources into an incrementally-recomputed
+dependency graph: leaves are fed by scanners or humans, derived cells recompute
+when — and only when — something beneath them changed, and every cell's result
+is readable through one shared coordination table.
+
+The library owns the *schedule* (what is dirty, what recomputes, in what
+order); your app owns the *meaning* (what an op computes, what a status string
+says, what the keys are). This guide takes you from an empty host app to a
+running two-cell graph.
+
+## Installation
+
+```elixir
+# mix.exs
+defp deps do
+  [
+    {:reactive_dag, git: "git@github.com:u2i/reactive_dag.git", tag: "v0.9.0"}
+  ]
+end
+```
+
+The library assumes an Ash 3.x / AshPostgres host — it is an Ash extension, not
+a standalone framework.
+
+## Configuration
+
+```elixir
+config :reactive_dag,
+  repo: MyApp.Repo,                    # REQUIRED — raises if unset
+  tuple_table: "my_tuple",             # the coordination spine
+  dirty_table: "my_dirty",             # the frontier
+  coordination_writer: MyApp.Writer    # OPTIONAL — a spine-only default ships
+```
+
+`tuple_table` / `dirty_table` **default silently** (`reactive_dag_tuple` /
+`reactive_dag_dirty`); a name that doesn't match your migration yields empty
+results with no error, so set them explicitly.
+
+## Migrations (the host owns the tables)
+
+The library defines the columns it needs and is their only reader/writer, but
+the physical tables live in *your* migrations — that's what lets a host add its
+own extension columns beside the spine.
+
+```elixir
+def change do
+  # the coordination tuple: one row per (cell, key), carrying the verdict +
+  # freshness. A cell IS its set of these rows.
+  create table(:my_tuple, primary_key: false) do
+    add :cell_id, :string, null: false
+    add :key, :string, null: false
+    add :status, :string, null: false, default: "present"
+    add :observed_at, :utc_datetime_usec
+    add :stale_after, :utc_datetime_usec
+    add :updated_at, :utc_datetime_usec
+    # ... your extension columns here (strength, source_ref, …) — the library
+    # neither reads nor writes them; see the "Seams" guide.
+  end
+
+  create unique_index(:my_tuple, [:cell_id, :key])
+  create index(:my_tuple, [:cell_id, :status])
+
+  # the dirty frontier: pending recompute work, claimed-as-deleted by the drain.
+  create table(:my_dirty, primary_key: false) do
+    add :cell_id, :string, null: false
+    add :key, :string, null: false
+    add :reason, :string
+    add :enqueued_at, :utc_datetime_usec
+  end
+
+  create index(:my_dirty, [:cell_id])
+end
+```
+
+(If you use attestations, there is a third table — see the
+[Attestations](attestations.md) guide.)
+
+## A first graph
+
+Two nodes: a leaf fed from outside, and a derived rollup over it.
+
+```elixir
+defmodule MyApp.FiscalLines do
+  use Ash.Resource, data_layer: Ash.DataLayer.Simple, extensions: [ReactiveDag.Node]
+
+  reactive do
+    op :source
+    leaf? true            # fed by a source, never recomputed by the drain
+  end
+end
+
+defmodule MyApp.BudgetRollups do
+  use Ash.Resource,
+    data_layer: AshPostgres.DataLayer,     # this node's OWN payload table
+    extensions: [ReactiveDag.Node]
+
+  attributes do
+    attribute :key, :string, primary_key?: true
+    attribute :fund, :string
+    attribute :total, :float
+  end
+
+  actions do
+    create :upsert do
+      upsert? true
+      upsert_identity :key
+      accept [:key, :fund, :total]
+    end
+  end
+
+  reactive do
+    op :fold
+    key_rule :all
+    reduce over: :fiscal_lines,
+           read: fn :fiscal_lines -> MyApp.Fiscal.lines!() end,
+           group_by: fn line -> line.fund end,
+           key: fn fund -> fund end,
+           into: fn fund, lines -> %{key: fund, fund: fund, total: sum(lines)} end
+  end
+end
+```
+
+The resource **is** the node *and* its payload table: `reduce`'s `into` returns
+a row, and the library writes it into this resource with change detection — no
+write plumbing to author. See [Authoring nodes](authoring-nodes.md) for every
+node shape.
+
+## Assemble and run
+
+```elixir
+plan = ReactiveDag.Node.graph([MyApp.FiscalLines, MyApp.BudgetRollups])
+
+{:ok, _passes} =
+  ReactiveDag.Drain.run(plan,
+    recompute: ReactiveDag.Node.Recompute,   # dispatches reduce/join/aggregate/compute
+    key_rule: ReactiveDag.Node.KeyRule       # reads :identity | :all off the block
+  )
+```
+
+`graph/2` validates the whole thing at assembly: every edge resolves, ids are
+unique, the graph is acyclic — an authoring mistake fails loudly here, not
+silently at runtime.
+
+The drain is **incremental**: it processes only cells with dirty keys, in
+dependency (depth) order, and propagates only the keys each recompute reports
+as actually changed. An empty frontier is a no-op.
+
+## Feeding the leaf
+
+Data enters through a **source** — anything that writes a leaf's tuples and
+marks its parents dirty. The typical shape:
+
+```elixir
+# 1. write the leaf's tuples (reconcile computes what changed/vanished)
+{:ok, changed} =
+  ReactiveDag.Tuple.reconcile("fiscal_lines", keys,
+    upsert: fn key -> ReactiveDag.Tuple.put("fiscal_lines", key) == :ok end
+  )
+
+# 2. mark the changed keys dirty upward
+ReactiveDag.Graph.dirty_parents(plan, "fiscal_lines", changed, ReactiveDag.Node.KeyRule)
+
+# 3. drain
+ReactiveDag.Drain.run(plan, recompute: ..., key_rule: ...)
+```
+
+For a scanner with a real contract (id, leaf binding, failure containment),
+implement `ReactiveDag.Source` — see [Sources and scanning](sources.md), which
+also covers the one discipline that matters most: *an unreachable upstream
+writes nothing*, because an estate you could not survey must not render as an
+empty estate.
+
+## Reading results
+
+```elixir
+ReactiveDag.Tuple.status_histogram("budget_rollups")  # %{"present" => 12}
+ReactiveDag.Tuple.rows("budget_rollups")              # [%{key:, status:, observed_at:}]
+ReactiveDag.Verdict.for_cell("budget_rollups")        # a rolled verdict + failing sample
+```
+
+Payload (the typed values) stays in each node's own resource; the tuple carries
+only the verdict and freshness, joined back by `key`.
+
+## Where next
+
+- [Authoring nodes](authoring-nodes.md) — every node shape and combinator.
+- [Sources and scanning](sources.md) — the poll/drain split and the
+  honest-gap discipline.
+- [Attestations](attestations.md) — human sign-off as a first-class input.
+- [The seams](seams.md) — custom recompute strategies, key rules, extension
+  columns, and hand-assembled graphs.

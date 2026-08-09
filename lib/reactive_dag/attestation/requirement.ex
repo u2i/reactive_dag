@@ -12,7 +12,7 @@ defmodule ReactiveDag.Attestation.Requirement do
       from the declaring node; records store this as their `cell_id`).
     * `scope` — `:key` (per-grain: one assertion per row of `on`). Filter-scoped
       requirements evaluate through the same store/evaluation machinery
-      (`ReactiveDag.Attestation.Evaluation.evaluate_scope/5`) but are not yet
+      (`ReactiveDag.Attestation.Evaluation.evaluate_scope/6`) but are not yet
       wired through the DSL — the completeness slice.
     * `signers` — the ELIGIBILITY CELL's id (an atom, like any `ref`). Who may
       sign is data: this cell's keys, filtered per-scope through `join`. It is a
