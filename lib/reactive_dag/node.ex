@@ -821,6 +821,11 @@ defmodule ReactiveDag.Node do
 
     for %{meta: %{verdict: true}} = cell <- cells,
         cell.inputs != [],
+        # a verdict node that IS the attested view is exempt: first-class
+        # coverage retains a row for EVERY raw row (covered/pending/refused),
+        # so the view cannot swallow its own denominator — the lint targets
+        # CONSUMERS whose only reads pass through a withholding gate.
+        not blocking_attested?(cell),
         not reaches_ungated_leaf?(cell.id, by_id, MapSet.new()) do
       case gates_below(cell.id, by_id, MapSet.new()) |> Enum.uniq() do
         [only] ->

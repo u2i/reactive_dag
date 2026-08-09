@@ -225,6 +225,27 @@ defmodule ReactiveDag.AttestationDslTest do
     assert %ReactiveDag.Plan{} = plan()
   end
 
+  test "a verdict node that IS the attested view is exempt from the lint" do
+    # first-class coverage: the view writes a row for EVERY raw row
+    # (covered/pending/refused), so it cannot swallow its own denominator.
+    defmodule AttestedVerdict do
+      use Ash.Resource,
+        domain: Domain,
+        data_layer: Ash.DataLayer.Simple,
+        extensions: [ReactiveDag.Node]
+
+      reactive do
+        id(:attested_verdict)
+        verdict?(true)
+        attested(over: :machines, requirement: :machine_ownership)
+      end
+    end
+
+    p = ReactiveDag.Node.graph([Machines, MachineHolders, AttestedVerdict])
+    assert p.cells["attested_verdict"].meta.verdict == true
+    assert p.cells["attested_verdict"].meta.attested.requirement.name == :machine_ownership
+  end
+
   test "a graph with no attestation vocabulary is untouched (no store leaf appears)" do
     p = ReactiveDag.Node.graph([Machines, MachineHolders])
     refute Map.has_key?(p.cells, ReactiveDag.Attestation.leaf_cell())
