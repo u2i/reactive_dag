@@ -6,7 +6,7 @@ defmodule ReactiveDag.MixProject do
   def project do
     [
       app: :reactive_dag,
-      version: "0.12.0",
+      version: "0.13.0",
       elixir: "~> 1.18",
       description:
         "Reactive DAG engine as an Ash extension: a dirty frontier + depth-ordered " <>
@@ -25,7 +25,7 @@ defmodule ReactiveDag.MixProject do
     [
       main: "getting-started",
       source_url: "https://github.com/u2i/reactive_dag",
-      source_ref: "v0.12.0",
+      source_ref: "v0.13.0",
       extras: [
         "guides/getting-started.md",
         "guides/authoring-nodes.md",

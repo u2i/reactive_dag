@@ -37,22 +37,42 @@ defmodule ReactiveDag.Attestation.Op do
   @behaviour ReactiveDag.Op
 
   alias ReactiveDag.{Attestation, Op, Tuple}
-  alias ReactiveDag.Attestation.{Evaluation, Requirement}
+  alias ReactiveDag.Attestation.{Evaluation, Requirement, Scope}
 
   @impl true
   def recompute(cell, _keys) do
     meta = attested_meta(cell)
-    %{over: over, requirement: %Requirement{scope: :key} = req} = meta
+    %{over: over, requirement: %Requirement{} = req} = meta
     mode = Map.get(meta, :mode, :require)
 
     raw_rows = Tuple.rows(over)
     stances = Attestation.stances(over)
     eligibility = Tuple.all_keys(to_string(req.signers))
     statuses = Requirement.statuses(req)
+    now = DateTime.utc_now()
 
-    admissions = Evaluation.evaluate(raw_rows, stances, eligibility, req, DateTime.utc_now())
+    by_key =
+      case req.scope do
+        :key ->
+          raw_rows
+          |> Evaluation.evaluate(stances, eligibility, req, now)
+          |> Map.new(fn %{scope: {:key, k}} = a -> {k, a} end)
 
-    by_key = Map.new(admissions, fn %{scope: {:key, k}} = a -> {k, a} end)
+        _filter ->
+          # SET-LEVEL: one admission per scope INSTANCE (the whole set, or one
+          # set per eligibility row), each evaluated against the rows its
+          # filter currently selects — so the basis moves when the set does.
+          by_scope = Enum.group_by(stances, & &1.scope)
+
+          for {inst_key, key_scope} <- instances(req, eligibility), into: %{} do
+            scope = {:filter, key_scope}
+            selected = Scope.select(scope, raw_rows)
+            scope_stances = Map.get(by_scope, scope, [])
+
+            {inst_key,
+             Evaluation.evaluate_scope(scope, selected, scope_stances, eligibility, req, now)}
+          end
+      end
 
     Tuple.reconcile(to_string(cell_id(cell)), Map.keys(by_key),
       upsert: fn key ->
@@ -70,6 +90,25 @@ defmodule ReactiveDag.Attestation.Op do
         Op.put(cell, key, opts) in [true, :ok]
       end
     )
+  end
+
+  @doc """
+  The SCOPE INSTANCES of a filter-shaped requirement — `{instance_key,
+  key_scope}` pairs, one view row each. Pure: `{:filter, ks}` yields the single
+  instance (keyed by the requirement's `instance_key`); `{:filter_by, fun}`
+  derives one per eligibility key (nil skips; deduped by instance key, first
+  wins).
+  """
+  @spec instances(Requirement.t(), [String.t()]) :: [{String.t(), term()}]
+  def instances(%Requirement{scope: {:filter, key_scope}} = req, _eligibility) do
+    [{req.instance_key || "all", key_scope}]
+  end
+
+  def instances(%Requirement{scope: {:filter_by, fun}}, eligibility) do
+    eligibility
+    |> Enum.map(fun)
+    |> Enum.reject(&is_nil/1)
+    |> Enum.uniq_by(&elem(&1, 0))
   end
 
   @doc """

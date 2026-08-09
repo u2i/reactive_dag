@@ -286,10 +286,37 @@ about the subset *and its boundary*: a member appearing inside the filter
 changes the basis, and the completeness claim lapses, correctly, even though
 every previously-signed member is untouched.
 
-The store and the evaluation support filter scopes fully
-(`ReactiveDag.Attestation.Evaluation.evaluate_scope/6`); the DSL wiring for
-set-level requirements is not yet built — today's `attestation` declarations
-are `scope :key`.
+A requirement declares its set-level shape with `scope`:
+
+```elixir
+attestation :estate_complete do
+  scope {:filter, {:prefix, "%"}}     # ONE instance: the whole set
+  instance_key "estate"               # the view row's key (default "all")
+  signers :admins
+  join fn _scope, admin -> admin end
+  tolerance days: 90
+end
+
+attestation :holdings_complete do
+  # one instance PER PERSON, derived from the eligibility cell itself:
+  # each candidate's own subset, signable only by them.
+  scope {:filter_by, fn "SER" <> _ = pair ->
+    [_serial, email] = String.split(pair, "|", parts: 2)
+    {email, {:segment, 2, "|", email}}
+  end}
+  signers :machine_match
+  join fn {:filter, {:segment, 2, "|", email}}, pair ->
+    if String.ends_with?(pair, "|" <> email), do: email
+  end
+end
+```
+
+The attested view over a filter-shaped requirement writes **one row per scope
+instance** (the estate row; one row per person), not one per raw row — the
+completeness cell hanging off the population, exactly the carrier the
+freshness ADR calls for. Unaffirmed instances write `pending` (unknown, never
+green); a member appearing in someone's subset moves their instance's basis
+and lapses their claim.
 
 ## Design rationale
 

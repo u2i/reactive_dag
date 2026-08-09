@@ -10,10 +10,17 @@ defmodule ReactiveDag.Attestation.Requirement do
     * `name` — the requirement's name; what `requirement:`/`gate:` reference.
     * `on` — the cell id the assertions are about (filled at graph assembly
       from the declaring node; records store this as their `cell_id`).
-    * `scope` — `:key` (per-grain: one assertion per row of `on`). Filter-scoped
-      requirements evaluate through the same store/evaluation machinery
-      (`ReactiveDag.Attestation.Evaluation.evaluate_scope/6`) but are not yet
-      wired through the DSL — the completeness slice.
+    * `scope` — the GRAIN of one assertion:
+        * `:key` — per row of `on` (one admission per raw row);
+        * `{:filter, key_scope}` — ONE set-level instance: an assertion about
+          the whole set the filter selects (estate completeness is the filter
+          that selects everything, e.g. `{:prefix, "%"}`). The view writes a
+          single row, keyed by `instance_key` (default `"all"`);
+        * `{:filter_by, fun}` — one set-level instance PER ELIGIBILITY ROW:
+          `fun.(eligibility_key)` returns `{instance_key, key_scope}` (or nil
+          to skip), deduped by instance key. The per-person completeness
+          shape: "these are ALL my machines" derives one filter per person
+          from the same cell that licenses them to sign it.
     * `signers` — the ELIGIBILITY CELL's id (an atom, like any `ref`). Who may
       sign is data: this cell's keys, filtered per-scope through `join`. It is a
       real input edge of every attested cell, so authority changes propagate and
@@ -36,6 +43,7 @@ defmodule ReactiveDag.Attestation.Requirement do
   defstruct name: nil,
             on: nil,
             scope: :key,
+            instance_key: "all",
             signers: nil,
             join: nil,
             quorum: :any,
@@ -46,10 +54,16 @@ defmodule ReactiveDag.Attestation.Requirement do
 
   @type quorum :: :any | :all | {:n_of, pos_integer()}
 
+  @type scope ::
+          :key
+          | {:filter, ReactiveDag.Tuple.key_scope()}
+          | {:filter_by, (String.t() -> {String.t(), ReactiveDag.Tuple.key_scope()} | nil)}
+
   @type t :: %__MODULE__{
           name: atom(),
           on: String.t() | nil,
-          scope: :key,
+          scope: scope(),
+          instance_key: String.t(),
           signers: atom(),
           join: (ReactiveDag.Attestation.Scope.t(), String.t() -> String.t() | nil),
           quorum: quorum(),

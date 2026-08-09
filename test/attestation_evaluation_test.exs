@@ -232,6 +232,36 @@ defmodule ReactiveDag.AttestationEvaluationTest do
     end
   end
 
+  describe "scope instances (the filter-shaped view's rows)" do
+    alias ReactiveDag.Attestation.Op
+
+    test "{:filter, ks} is ONE instance, keyed by the requirement's instance_key" do
+      r = req(scope: {:filter, {:prefix, "%"}}, instance_key: "estate")
+      assert Op.instances(r, ["anything"]) == [{"estate", {:prefix, "%"}}]
+    end
+
+    test "{:filter_by, fun} derives one instance per eligibility row, deduped" do
+      r =
+        req(
+          scope:
+            {:filter_by,
+             fn elig_key ->
+               case String.split(elig_key, "|", parts: 2) do
+                 [_serial, email] -> {email, {:segment, 2, "|", email}}
+                 _ -> nil
+               end
+             end}
+        )
+
+      elig = ["M1|alice@u2i.com", "M2|alice@u2i.com", "M3|bob@u2i.com", "garbage"]
+
+      assert Op.instances(r, elig) == [
+               {"alice@u2i.com", {:segment, 2, "|", "alice@u2i.com"}},
+               {"bob@u2i.com", {:segment, 2, "|", "bob@u2i.com"}}
+             ]
+    end
+  end
+
   describe "filter scope (set-level: the completeness carrier)" do
     test "signing THE SET lapses when the set gains a member" do
       mine = {:filter, {:prefix, "acme|%"}}

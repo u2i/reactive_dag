@@ -377,10 +377,15 @@ defmodule ReactiveDag.Node do
         doc: "the requirement's name (what `requirement:`/`gate:` reference)"
       ],
       scope: [
-        type: {:one_of, [:key]},
+        type: :any,
         default: :key,
         doc:
-          "the grain of one assertion. `:key` = per row. (Filter/set-level scopes evaluate through `Evaluation.evaluate_scope/6` but are not yet DSL-wired.)"
+          "the grain of one assertion: `:key` (per row), `{:filter, key_scope}` (ONE set-level instance — completeness of the whole selected set), or `{:filter_by, (eligibility_key -> {instance_key, key_scope} | nil)}` (one set-level instance per eligibility row — per-person completeness)."
+      ],
+      instance_key: [
+        type: :string,
+        default: "all",
+        doc: "the view row's key for a `{:filter, _}` single-instance scope"
       ],
       signers: [
         type: :atom,
