@@ -230,6 +230,83 @@ defmodule ReactiveDag.AttestationDslTest do
     refute Map.has_key?(p.cells, ReactiveDag.Attestation.leaf_cell())
   end
 
+  describe "non-blocking mode (:annotate)" do
+    defmodule BestEffortReport do
+      use Ash.Resource,
+        domain: Domain,
+        data_layer: Ash.DataLayer.Simple,
+        extensions: [ReactiveDag.Node]
+
+      reactive do
+        id(:best_effort_report)
+        verdict?(true)
+        op(:report)
+        compute(FakeReport)
+        # NON-BLOCKING: everything flows, signed distinguished from unsigned.
+        depends_on([{:machines, gate: :machine_ownership, mode: :annotate}])
+      end
+    end
+
+    test "an annotate gate interposes its OWN cell, distinct from the blocking one" do
+      p = ReactiveDag.Node.graph([Machines, MachineHolders, BestEffortReport, OwnershipVerdict])
+
+      blocking = ReactiveDag.Node.gated_id("machines", :machine_ownership)
+      annotate = ReactiveDag.Node.gated_id("machines", :machine_ownership, :annotate)
+
+      assert annotate == "machines@machine_ownership~annotate"
+      refute blocking == annotate
+
+      # two projections → two cells, same three inputs, same requirement.
+      assert p.cells[annotate].meta.attested.mode == :annotate
+      assert p.cells[blocking].meta.attested.mode == :require
+      assert p.cells[annotate].inputs == p.cells[blocking].inputs
+      assert annotate in p.cells["best_effort_report"].inputs
+    end
+
+    test "an all-annotate-gated verdict is NOT vacuous — nothing is withheld" do
+      # the same shape that raises under :require passes under :annotate,
+      # because unsigned rows flow (as `unsigned`) and remain countable.
+      assert %ReactiveDag.Plan{} =
+               ReactiveDag.Node.graph([Machines, MachineHolders, BestEffortReport])
+    end
+
+    test "a declared attested node takes mode: :annotate" do
+      defmodule AnnotatedMachines do
+        use Ash.Resource,
+          domain: Domain,
+          data_layer: Ash.DataLayer.Simple,
+          extensions: [ReactiveDag.Node]
+
+        reactive do
+          id(:annotated_machines)
+          attested(over: :machines, requirement: :machine_ownership, mode: :annotate)
+        end
+      end
+
+      p = ReactiveDag.Node.graph([Machines, MachineHolders, AnnotatedMachines])
+      assert p.cells["annotated_machines"].meta.attested.mode == :annotate
+    end
+
+    test "spine_status: the one place the modes differ is the unsigned row" do
+      statuses =
+        ReactiveDag.Attestation.Requirement.statuses(%ReactiveDag.Attestation.Requirement{})
+
+      for {state, require_status, annotate_status} <- [
+            {:affirmed, "covered", "covered"},
+            {:pending, "pending", "unsigned"},
+            # a rejection bites in BOTH modes: data someone said is wrong is not
+            # "best effort" data — passing it through would launder the objection.
+            {:refused, "refused", "refused"}
+          ] do
+        assert ReactiveDag.Attestation.Op.spine_status(state, :require, statuses) ==
+                 require_status
+
+        assert ReactiveDag.Attestation.Op.spine_status(state, :annotate, statuses) ==
+                 annotate_status
+      end
+    end
+  end
+
   test "gated refs nested inside compose legs get their interposed cell too" do
     defmodule NestedGate do
       use Ash.Resource,

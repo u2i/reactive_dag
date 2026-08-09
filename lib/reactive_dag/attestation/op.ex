@@ -11,13 +11,24 @@ defmodule ReactiveDag.Attestation.Op do
 
   ## What it writes
 
-  One spine row per admission, in the requirement's status vocabulary (default
-  `covered` / `pending` / `refused`) — so verdict rollup, first-class coverage,
-  and the freshness spine apply to attested views unchanged. Affirmed rows are
-  put with `strength: "attested"` in the writer opts: the spine-only default
-  writer drops it (strength is a host extension column), a host writer stamps
-  it — which keeps "the machinery assigns the strength" inside the existing
-  `CoordinationWriter` seam.
+  One spine row per admission, in the requirement's status vocabulary — so
+  verdict rollup, first-class coverage, and the freshness spine apply to
+  attested views unchanged. The mapping depends on the view's MODE
+  (`spine_status/3`):
+
+    * `:require` (blocking, the default) — `covered` / `pending` / `refused`.
+      A not-yet-signed row is withheld: consumers of the signed set read
+      `covered` and see nothing for it.
+    * `:annotate` (non-blocking) — `covered` / `unsigned` / `refused`. Best
+      effort: an unsigned row FLOWS, distinguished from signed rather than
+      withheld. A rejection still bites — data someone said is WRONG is a
+      different thing from data nobody has vouched for, and passing it through
+      as best-effort would launder the objection.
+
+  Affirmed rows are put with `strength: "attested"` in the writer opts: the
+  spine-only default writer drops it (strength is a host extension column), a
+  host writer stamps it — which keeps "the machinery assigns the strength"
+  inside the existing `CoordinationWriter` seam.
 
   Rows vanished from the raw cell are retired (delete): an attested view has no
   claim about data that no longer exists — the attestation RECORD survives in
@@ -30,7 +41,9 @@ defmodule ReactiveDag.Attestation.Op do
 
   @impl true
   def recompute(cell, _keys) do
-    %{over: over, requirement: %Requirement{scope: :key} = req} = attested_meta(cell)
+    meta = attested_meta(cell)
+    %{over: over, requirement: %Requirement{scope: :key} = req} = meta
+    mode = Map.get(meta, :mode, :require)
 
     raw_rows = Tuple.rows(over)
     stances = Attestation.stances(over)
@@ -47,9 +60,8 @@ defmodule ReactiveDag.Attestation.Op do
 
         opts =
           case state do
-            :affirmed -> [status: statuses.affirmed, strength: "attested"]
-            :pending -> [status: statuses.pending]
-            :refused -> [status: statuses.refused]
+            :affirmed -> [status: spine_status(state, mode, statuses), strength: "attested"]
+            _ -> [status: spine_status(state, mode, statuses)]
           end
 
         # a writer that reports the changed boolean keeps propagation
@@ -59,6 +71,17 @@ defmodule ReactiveDag.Attestation.Op do
       end
     )
   end
+
+  @doc """
+  The admission → spine-status projection, per mode. Pure — the one place the
+  blocking/non-blocking distinction lives (force evaluation is identical in
+  both; a mode only changes what a not-yet-signed row projects to).
+  """
+  @spec spine_status(:affirmed | :pending | :refused, :require | :annotate, map()) :: String.t()
+  def spine_status(:affirmed, _mode, statuses), do: statuses.affirmed
+  def spine_status(:pending, :require, statuses), do: statuses.pending
+  def spine_status(:pending, :annotate, statuses), do: statuses.unsigned
+  def spine_status(:refused, _mode, statuses), do: statuses.refused
 
   defp attested_meta(%{meta: %{attested: a}}), do: a
 

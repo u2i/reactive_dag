@@ -27,7 +27,10 @@ defmodule ReactiveDag.Attestation.Requirement do
       seconds, or `[days: n]` / `[hours: n]`.
     * `statuses` — optional override of the admission-state → spine-status
       vocabulary (default `%{affirmed: "covered", pending: "pending",
-      refused: "refused"}`); status vocabulary is the host's.
+      unsigned: "unsigned", refused: "refused"}`); status vocabulary is the
+      host's. `pending` is what a blocking (`:require`) gate writes for a
+      not-yet-signed row; `unsigned` is what a non-blocking (`:annotate`) view
+      writes for the same row — flowing, but distinguished from signed.
   """
 
   defstruct name: nil,
@@ -54,7 +57,12 @@ defmodule ReactiveDag.Attestation.Requirement do
           statuses: %{atom() => String.t()} | nil
         }
 
-  @default_statuses %{affirmed: "covered", pending: "pending", refused: "refused"}
+  @default_statuses %{
+    affirmed: "covered",
+    pending: "pending",
+    unsigned: "unsigned",
+    refused: "refused"
+  }
 
   @doc "The admission-state → spine-status map for this requirement."
   @spec statuses(t()) :: %{atom() => String.t()}

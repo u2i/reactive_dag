@@ -111,8 +111,13 @@ defmodule ReactiveDag.Node do
     attestation currently applies (`ReactiveDag.Attestation`). Signing is a
     property of the EDGE, not of the data: an ungated edge to the same target
     still sees everything, which is what keeps denominators honest.
+
+    `mode:` (with `gate:`) picks how a not-yet-signed row projects: `:require`
+    (default) withholds it; `:annotate` lets it FLOW as best effort, written
+    with the requirement's `unsigned` status so it stays distinguishable from
+    signed. A rejection bites in both modes.
     """
-    defstruct [:to, :gate, :__identifier__, :__spark_metadata__]
+    defstruct [:to, :gate, :mode, :__identifier__, :__spark_metadata__]
   end
 
   defmodule Compose do
@@ -145,6 +150,12 @@ defmodule ReactiveDag.Node do
         type: :atom,
         doc:
           "an attestation requirement name — consume the target through its ATTESTED view (only rows whose attestation currently applies are admitted; lowered to an interposed attested cell)"
+      ],
+      mode: [
+        type: {:one_of, [:require, :annotate]},
+        default: :require,
+        doc:
+          "with `gate:` — `:require` withholds unsigned rows (blocking); `:annotate` lets them flow as best effort, written with the `unsigned` status so signed stays distinguishable. Rejections bite in both."
       ]
     ]
   }
@@ -408,8 +419,11 @@ defmodule ReactiveDag.Node do
     named requirement — both cells exist in the graph (the raw list AND the
     signed list), and a consumer picks per edge. `ref :x, gate: :req` is sugar
     that interposes an anonymous cell of exactly this shape.
+
+    `mode: :annotate` makes the view NON-BLOCKING: unsigned rows flow (best
+    effort) under the `unsigned` status instead of being withheld as `pending`.
     """
-    defstruct [:over, :requirement, :__identifier__, :__spark_metadata__]
+    defstruct [:over, :requirement, :mode, :__identifier__, :__spark_metadata__]
   end
 
   @attested %Spark.Dsl.Entity{
@@ -424,6 +438,12 @@ defmodule ReactiveDag.Node do
         type: :atom,
         required: true,
         doc: "the attestation requirement's name (declared on the raw node)"
+      ],
+      mode: [
+        type: {:one_of, [:require, :annotate]},
+        default: :require,
+        doc:
+          "`:require` (blocking) withholds unsigned rows as `pending`; `:annotate` (non-blocking) flows them as `unsigned` — best effort, distinguished from signed"
       ]
     ]
   }
@@ -684,7 +704,9 @@ defmodule ReactiveDag.Node do
       resolved = Enum.map(cells, &resolve_attested_cell(&1, reqs, store))
 
       interposed =
-        Enum.map(gated, fn {over, gate} -> interposed_cell(over, gate, reqs, store) end)
+        Enum.map(gated, fn {over, gate, mode} ->
+          interposed_cell(over, gate, mode, reqs, store)
+        end)
 
       store_cell =
         if Enum.any?(cells, &(&1.id == store)) do
@@ -724,12 +746,14 @@ defmodule ReactiveDag.Node do
               "its records live under that cell's id, so the view must attest the same cell"
     end
 
+    mode = cell.meta.attested[:mode] || :require
+
     %{
       cell
       | inputs: Enum.uniq(cell.inputs ++ [to_string(req.signers), store]),
         meta:
           cell.meta
-          |> Map.put(:attested, %{over: over, requirement: req})
+          |> Map.put(:attested, %{over: over, requirement: req, mode: mode})
           # any signing (or eligibility change) may move any row, and the Op
           # re-evaluates the whole view — so an attested node is always :all
           # (the schema's :identity default would silently under-propagate).
@@ -740,8 +764,10 @@ defmodule ReactiveDag.Node do
   defp resolve_attested_cell(cell, _reqs, _store), do: cell
 
   # the anonymous attested cell a `gate:` lowers to — same shape as a declared
-  # `attested` node, at a reserved id (`<over>@<requirement>`).
-  defp interposed_cell(over, gate, reqs, store) do
+  # `attested` node, at a reserved id (`<over>@<requirement>`, with an
+  # `~annotate` suffix for the non-blocking mode: the two modes are two
+  # different projections, so a graph using both gets two cells).
+  defp interposed_cell(over, gate, mode, reqs, store) do
     req = fetch_requirement!(reqs, gate, "#{over} (gated edge)")
 
     if req.on != over do
@@ -752,7 +778,7 @@ defmodule ReactiveDag.Node do
     end
 
     %ReactiveDag.Cell{
-      id: gated_id(over, gate),
+      id: gated_id(over, gate, mode),
       op: :attested,
       inputs: [over, to_string(req.signers), store],
       leaf?: false,
@@ -760,7 +786,7 @@ defmodule ReactiveDag.Node do
         resource: nil,
         compute: ReactiveDag.Attestation.Op,
         key_rule: :all,
-        attested: %{over: over, requirement: req}
+        attested: %{over: over, requirement: req, mode: mode}
       }
     }
   end
@@ -775,12 +801,21 @@ defmodule ReactiveDag.Node do
       )
   end
 
-  @doc "The reserved id of the attested view a `gate:` interposes over `over`."
-  @spec gated_id(String.t(), atom()) :: String.t()
-  def gated_id(over, gate), do: "#{over}@#{gate}"
+  @doc """
+  The reserved id of the attested view a `gate:` interposes over `over` —
+  `<over>@<gate>` for the blocking mode, `<over>@<gate>~annotate` for the
+  non-blocking one (two projections → two cells).
+  """
+  @spec gated_id(String.t(), atom(), :require | :annotate) :: String.t()
+  def gated_id(over, gate, mode \\ :require)
+  def gated_id(over, gate, :require), do: "#{over}@#{gate}"
+  def gated_id(over, gate, :annotate), do: "#{over}@#{gate}~annotate"
 
   # the vacuity lint (step 5 above). Reference edges still count as paths here:
   # they are read paths, and a denominator read through a reference is honest.
+  # An :annotate view is likewise TRANSPARENT to the lint — it withholds
+  # nothing (unsigned rows flow, distinguished), so it cannot swallow a
+  # denominator; only :require gates block.
   defp lint_vacuous!(cells) do
     by_id = Map.new(cells, &{&1.id, &1})
 
@@ -793,7 +828,8 @@ defmodule ReactiveDag.Node do
                 "reactive_dag: #{cell.id} is structurally vacuous — every evidence path " <>
                   "reaches its leaves through the #{inspect(only)} gate, so the rows the gate " <>
                   "withholds are invisible to the very join meant to expose them. At least one " <>
-                  "leg (the denominator) must consume the raw cell ungated."
+                  "leg (the denominator) must consume the raw cell ungated (or through a " <>
+                  "non-blocking `mode: :annotate` view)."
 
         _mixed ->
           :ok
@@ -812,7 +848,7 @@ defmodule ReactiveDag.Node do
         # a dangling input — Graph.build raises its own, better error for this.
         false
 
-      is_map(by_id[id].meta[:attested]) ->
+      blocking_attested?(by_id[id]) ->
         false
 
       by_id[id].leaf? ->
@@ -828,11 +864,18 @@ defmodule ReactiveDag.Node do
       MapSet.member?(seen, id) or is_nil(by_id[id]) ->
         []
 
-      is_map(by_id[id].meta[:attested]) ->
+      blocking_attested?(by_id[id]) ->
         [by_id[id].meta.attested.requirement.name]
 
       true ->
         Enum.flat_map(by_id[id].inputs, &gates_below(&1, by_id, MapSet.put(seen, id)))
+    end
+  end
+
+  defp blocking_attested?(cell) do
+    case cell.meta[:attested] do
+      %{} = a -> Map.get(a, :mode, :require) == :require
+      _ -> false
     end
   end
 
@@ -941,11 +984,12 @@ defmodule ReactiveDag.Node do
      extra_meta(resource, all_refs)}
   end
 
-  # a flat depends_on entry: `:id`, or `{:id, gate: :requirement}`.
+  # a flat depends_on entry: `:id`, or `{:id, gate: :requirement}` (plus an
+  # optional `mode: :require | :annotate`).
   defp normalize_dep(id, _resource) when is_atom(id), do: %Ref{to: id}
 
   defp normalize_dep({id, opts}, _resource) when is_atom(id) and is_list(opts),
-    do: %Ref{to: id, gate: Keyword.fetch!(opts, :gate)}
+    do: %Ref{to: id, gate: Keyword.fetch!(opts, :gate), mode: Keyword.get(opts, :mode, :require)}
 
   defp normalize_dep(other, resource) do
     raise ArgumentError,
@@ -1049,8 +1093,8 @@ defmodule ReactiveDag.Node do
         nil ->
           %{}
 
-        %Attested{over: over, requirement: req} ->
-          %{attested: %{over: to_string(over), requirement: req}}
+        %Attested{over: over, requirement: req, mode: mode} ->
+          %{attested: %{over: to_string(over), requirement: req, mode: mode || :require}}
       end
 
     gated_meta =
@@ -1082,14 +1126,19 @@ defmodule ReactiveDag.Node do
     |> Map.merge(gated_meta)
   end
 
-  # every (raw, requirement) pair gated anywhere in this node's leg tree —
-  # including refs nested inside `compose` legs, whose gated ids the walk emits
-  # and which therefore need their interposed cells manufactured too.
+  # every (raw, requirement, mode) triple gated anywhere in this node's leg
+  # tree — including refs nested inside `compose` legs, whose gated ids the
+  # walk emits and which therefore need their interposed cells manufactured too.
   defp gated_pairs(legs) do
     Enum.flat_map(legs, fn
-      %Ref{to: to, gate: g} when not is_nil(g) -> [{to_string(to), g}]
-      %Compose{legs: nested} -> gated_pairs(nested)
-      _ -> []
+      %Ref{to: to, gate: g, mode: mode} when not is_nil(g) ->
+        [{to_string(to), g, mode || :require}]
+
+      %Compose{legs: nested} ->
+        gated_pairs(nested)
+
+      _ ->
+        []
     end)
   end
 
@@ -1129,9 +1178,14 @@ defmodule ReactiveDag.Node do
         # a GATED ref resolves to the interposed attested cell's id — the cell
         # itself is manufactured at graph assembly (resolve_attestations/1),
         # which reads the consumer's `gated_inputs` meta rather than parsing ids.
-        %Ref{to: to, gate: gate} when not is_nil(gate) -> gated_id(to_string(to), gate)
-        %Ref{to: to} -> to_string(to)
-        %Reference{to: to} -> to_string(to)
+        %Ref{to: to, gate: gate, mode: mode} when not is_nil(gate) ->
+          gated_id(to_string(to), gate, mode || :require)
+
+        %Ref{to: to} ->
+          to_string(to)
+
+        %Reference{to: to} ->
+          to_string(to)
       end,
       to_cell: &build_cell/3
     }

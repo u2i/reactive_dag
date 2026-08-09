@@ -97,19 +97,52 @@ Data that "requires attestation" must still flow *somewhere*. If every leg of a
 verdict consumes through the gate, an unsigned machine is simply **absent** —
 and the guarantee goes vacuously green, having swallowed its own denominator.
 Assembly enforces this: a verdict cell whose every evidence path passes through
-one requirement's gate **raises at graph build** as structurally vacuous. Keep
-one leg on the raw cell; the join between the legs is what makes the shortfall
-visible.
+one requirement's *blocking* gate **raises at graph build** as structurally
+vacuous. Keep one leg on the raw cell; the join between the legs is what makes
+the shortfall visible.
+
+### Non-blocking: best effort, distinguished
+
+Not every consumer should *withhold* unsigned data — a report, a metric, a
+downstream computation often wants the best available value while keeping
+signed and unsigned distinguishable. That is a **mode** of the view, declared
+where it is consumed:
+
+```elixir
+ref :machines, gate: :machine_ownership                    # blocking (default)
+ref :machines, gate: :machine_ownership, mode: :annotate   # non-blocking
+depends_on [{:machines, gate: :machine_ownership, mode: :annotate}]
+attested over: :machines, requirement: :machine_ownership, mode: :annotate
+```
+
+Force evaluation is **identical** in both modes — who signed, whether it still
+counts, the three lapse predicates. The mode changes only what a
+not-yet-signed row projects to: `:require` writes it as `pending` (withheld
+from consumers of the signed set); `:annotate` writes it as `unsigned` — it
+flows, best effort, and stays distinguishable from `covered`.
+
+Two consequences:
+
+- **A rejection bites in both modes.** Unsigned means nobody has vouched;
+  refused means someone said the data is *wrong* — passing that through as
+  best-effort would launder the objection. `refused` stays `refused`.
+- **The vacuity lint ignores annotate views.** They withhold nothing, so they
+  cannot swallow a denominator; an all-annotate-gated verdict is legitimate.
+
+The two modes are two projections, so a graph consuming both gets two
+interposed cells (`machines@machine_ownership` and
+`machines@machine_ownership~annotate`) over the same records — signing once
+moves both.
 
 ## What the view computes
 
-For each row of the raw cell, an **admission**:
+For each row of the raw cell, an **admission**, projected per the view's mode:
 
-| state | spine status | meaning |
-|---|---|---|
-| affirmed | `covered` | in-force affirmations meet the quorum |
-| pending | `pending` | nobody has signed — or every past signature has lapsed |
-| refused | `refused` | an in-force rejection exists |
+| state | `:require` writes | `:annotate` writes | meaning |
+|---|---|---|---|
+| affirmed | `covered` | `covered` | in-force affirmations meet the quorum |
+| pending | `pending` | `unsigned` | nobody has signed — or every signature lapsed |
+| refused | `refused` | `refused` | an in-force rejection exists |
 
 The status vocabulary is overridable per requirement (`statuses:`); the
 defaults compose with `ReactiveDag.Verdict` unchanged. Affirmed rows are put
