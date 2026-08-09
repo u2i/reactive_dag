@@ -1,0 +1,259 @@
+defmodule ReactiveDag.AttestationDslTest do
+  @moduledoc """
+  The attestation DSL → graph shape: a requirement declared ONCE on the raw
+  node, consumed by name from an `attested` view node and from `gate:`d edges —
+  both lowering to the same interposed-cell shape, with the eligibility cell
+  and the store leaf as REAL input edges (authority changes propagate; lineage
+  sees the join). Plus the vacuity lint: a verdict whose every evidence path is
+  gated on one requirement has swallowed its own denominator.
+  """
+  use ExUnit.Case, async: true
+
+  alias ReactiveDag.Attestation.Requirement
+
+  defmodule Domain do
+    use Ash.Domain, validate_config_inclusion?: false
+
+    resources do
+      allow_unregistered?(true)
+    end
+  end
+
+  # the RAW cell — owns its data AND the requirement's policy.
+  defmodule Machines do
+    use Ash.Resource,
+      domain: Domain,
+      data_layer: Ash.DataLayer.Simple,
+      extensions: [ReactiveDag.Node]
+
+    def holder(_scope, _elig_key), do: nil
+
+    reactive do
+      op(:source)
+      leaf?(true)
+
+      attestation :machine_ownership do
+        signers(:machine_holders)
+        join(&Machines.holder/2)
+        quorum(:any)
+        tolerance(days: 180)
+      end
+    end
+  end
+
+  # the ELIGIBILITY cell — who may sign is data.
+  defmodule MachineHolders do
+    use Ash.Resource,
+      domain: Domain,
+      data_layer: Ash.DataLayer.Simple,
+      extensions: [ReactiveDag.Node]
+
+    reactive do
+      op(:source)
+      leaf?(true)
+    end
+  end
+
+  # the declared ATTESTED VIEW: both cells exist — raw list AND signed list.
+  defmodule ConfirmedMachines do
+    use Ash.Resource,
+      domain: Domain,
+      data_layer: Ash.DataLayer.Simple,
+      extensions: [ReactiveDag.Node]
+
+    reactive do
+      id(:confirmed_machines)
+      attested(over: :machines, requirement: :machine_ownership)
+    end
+  end
+
+  # a consumer whose DENOMINATOR is the raw cell and whose other leg is gated.
+  defmodule OwnershipVerdict do
+    use Ash.Resource,
+      domain: Domain,
+      data_layer: Ash.DataLayer.Simple,
+      extensions: [ReactiveDag.Node]
+
+    reactive do
+      id(:ownership_verdict)
+      verdict?(true)
+      op(:reconcile)
+      compute(FakeReconcile)
+      depends_on([:machines, {:machines, gate: :machine_ownership}])
+    end
+  end
+
+  defp plan,
+    do: ReactiveDag.Node.graph([Machines, MachineHolders, ConfirmedMachines, OwnershipVerdict])
+
+  test "a declared attested node resolves: requirement struct + eligibility + store edges" do
+    cell = plan().cells["confirmed_machines"]
+
+    assert %{over: "machines", requirement: %Requirement{} = req} = cell.meta.attested
+    assert req.name == :machine_ownership
+    # `on` is filled from the DECLARING node at assembly — records live under it.
+    assert req.on == "machines"
+    assert Requirement.tolerance_seconds(req) == 180 * 86_400
+
+    assert Enum.sort(cell.inputs) ==
+             Enum.sort(["machines", "machine_holders", ReactiveDag.Attestation.leaf_cell()])
+
+    assert cell.meta.compute == ReactiveDag.Attestation.Op
+    assert cell.meta.key_rule == :all
+  end
+
+  test "a gate: interposes an anonymous attested cell of the same shape" do
+    id = ReactiveDag.Node.gated_id("machines", :machine_ownership)
+    cell = plan().cells[id]
+
+    assert cell.op == :attested
+    assert %{requirement: %Requirement{name: :machine_ownership}} = cell.meta.attested
+
+    assert Enum.sort(cell.inputs) ==
+             Enum.sort(["machines", "machine_holders", ReactiveDag.Attestation.leaf_cell()])
+
+    # the consumer's gated edge points AT the interposed cell; its raw edge stays raw.
+    verdict = plan().cells["ownership_verdict"]
+    assert id in verdict.inputs
+    assert "machines" in verdict.inputs
+  end
+
+  test "the store surfaces as ONE leaf cell — signing propagates like a scan" do
+    store = plan().cells[ReactiveDag.Attestation.leaf_cell()]
+    assert store.leaf?
+    assert store.meta.attestation_store
+
+    # it is below every attested cell, so a leaf write drains through them.
+    assert ReactiveDag.Attestation.leaf_cell() in plan().cells["confirmed_machines"].inputs
+  end
+
+  test "signing dirties the attested views: store + eligibility are PROPAGATING parents" do
+    p = plan()
+    gated = ReactiveDag.Node.gated_id("machines", :machine_ownership)
+
+    for parent_of <- [ReactiveDag.Attestation.leaf_cell(), "machine_holders", "machines"] do
+      assert "confirmed_machines" in p.parents[parent_of]
+      assert gated in p.parents[parent_of]
+    end
+  end
+
+  test "an unknown requirement fails assembly, naming what IS declared" do
+    defmodule Orphan do
+      use Ash.Resource,
+        domain: Domain,
+        data_layer: Ash.DataLayer.Simple,
+        extensions: [ReactiveDag.Node]
+
+      reactive do
+        id(:orphan)
+        attested(over: :machines, requirement: :no_such_requirement)
+      end
+    end
+
+    err =
+      assert_raise ArgumentError, fn ->
+        ReactiveDag.Node.graph([Machines, MachineHolders, Orphan])
+      end
+
+    assert err.message =~ "no_such_requirement"
+    assert err.message =~ "machine_ownership"
+  end
+
+  test "a requirement must be consumed against the cell it is declared on" do
+    defmodule OtherLeaf do
+      use Ash.Resource,
+        domain: Domain,
+        data_layer: Ash.DataLayer.Simple,
+        extensions: [ReactiveDag.Node]
+
+      reactive do
+        id(:other_leaf)
+        op(:source)
+        leaf?(true)
+      end
+    end
+
+    defmodule Mismatched do
+      use Ash.Resource,
+        domain: Domain,
+        data_layer: Ash.DataLayer.Simple,
+        extensions: [ReactiveDag.Node]
+
+      reactive do
+        id(:mismatched)
+        attested(over: :other_leaf, requirement: :machine_ownership)
+      end
+    end
+
+    err =
+      assert_raise ArgumentError, fn ->
+        ReactiveDag.Node.graph([Machines, MachineHolders, OtherLeaf, Mismatched])
+      end
+
+    assert err.message =~ "declared on"
+  end
+
+  test "VACUITY LINT: a verdict whose every evidence path is gated on one requirement raises" do
+    defmodule AllGated do
+      use Ash.Resource,
+        domain: Domain,
+        data_layer: Ash.DataLayer.Simple,
+        extensions: [ReactiveDag.Node]
+
+      reactive do
+        id(:all_gated)
+        verdict?(true)
+        op(:reconcile)
+        compute(FakeReconcile)
+        # BOTH legs through the same gate: the rows the gate withholds are
+        # invisible to the very join meant to expose them.
+        depends_on([{:machines, gate: :machine_ownership}])
+      end
+    end
+
+    err =
+      assert_raise ArgumentError, fn ->
+        ReactiveDag.Node.graph([Machines, MachineHolders, AllGated])
+      end
+
+    assert err.message =~ "structurally vacuous"
+    assert err.message =~ "machine_ownership"
+  end
+
+  test "the lint passes when a denominator leg consumes the raw cell ungated" do
+    # OwnershipVerdict has exactly that shape — assembly succeeds.
+    assert %ReactiveDag.Plan{} = plan()
+  end
+
+  test "a graph with no attestation vocabulary is untouched (no store leaf appears)" do
+    p = ReactiveDag.Node.graph([Machines, MachineHolders])
+    refute Map.has_key?(p.cells, ReactiveDag.Attestation.leaf_cell())
+  end
+
+  test "gated refs nested inside compose legs get their interposed cell too" do
+    defmodule NestedGate do
+      use Ash.Resource,
+        domain: Domain,
+        data_layer: Ash.DataLayer.Simple,
+        extensions: [ReactiveDag.Node]
+
+      reactive do
+        id(:nested_gate)
+        op(:union)
+        compute(FakeUnion)
+        ref(:machines)
+
+        compose :inner do
+          as(:inner)
+          ref(:machines, gate: :machine_ownership)
+        end
+      end
+    end
+
+    p = ReactiveDag.Node.graph([Machines, MachineHolders, NestedGate])
+    id = ReactiveDag.Node.gated_id("machines", :machine_ownership)
+
+    assert p.cells[id].op == :attested
+    assert id in p.cells["inner"].inputs
+  end
+end

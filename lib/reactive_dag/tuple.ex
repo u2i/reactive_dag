@@ -103,7 +103,10 @@ defmodule ReactiveDag.Tuple do
     {scope_sql, scope_params} = key_scope_clause(Keyword.get(opts, :key_scope), 2)
 
     %{rows: rows} =
-      query!("SELECT key FROM #{table()} WHERE cell_id = $1" <> scope_sql, [cell_id] ++ scope_params)
+      query!(
+        "SELECT key FROM #{table()} WHERE cell_id = $1" <> scope_sql,
+        [cell_id] ++ scope_params
+      )
 
     Enum.map(rows, fn [k] -> k end)
   end
@@ -124,6 +127,26 @@ defmodule ReactiveDag.Tuple do
       )
 
     Enum.map(rows, fn [k] -> k end)
+  end
+
+  @doc """
+  The SPINE ROWS of a cell — `%{key, status, observed_at}` maps, ordered by key,
+  optionally narrowed by `:key_scope`. The full-row companion to the key reads
+  above: what an evaluation that needs status alongside key consumes (the
+  attestation machinery's raw-rows and basis-digest input).
+  """
+  @spec rows(String.t(), keyword()) :: [%{key: key(), status: String.t(), observed_at: term()}]
+  def rows(cell_id, opts \\ []) do
+    {scope_sql, scope_params} = key_scope_clause(Keyword.get(opts, :key_scope), 2)
+
+    %{rows: rows} =
+      query!(
+        "SELECT key, status, observed_at FROM #{table()} WHERE cell_id = $1" <>
+          scope_sql <> " ORDER BY key",
+        [cell_id] ++ scope_params
+      )
+
+    Enum.map(rows, fn [k, s, o] -> %{key: k, status: s, observed_at: o} end)
   end
 
   @doc "Count of tuples per cell, as `%{cell_id => count}`."

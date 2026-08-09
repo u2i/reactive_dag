@@ -6,7 +6,7 @@ defmodule ReactiveDag.MixProject do
   def project do
     [
       app: :reactive_dag,
-      version: "0.1.0",
+      version: "0.9.0",
       elixir: "~> 1.18",
       description:
         "Reactive DAG engine as an Ash extension: a dirty frontier + depth-ordered " <>
