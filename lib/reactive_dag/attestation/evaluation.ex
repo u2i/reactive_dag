@@ -80,10 +80,14 @@ defmodule ReactiveDag.Attestation.Evaluation do
     # latest record per signer IS the stance — enforced here, not just at the
     # store read, because supersede is semantics: a rejector's own later
     # affirmation must replace their rejection, whatever the caller passed.
+    # A WITHDRAWAL supersedes like any record but then carries no force in
+    # either direction — the signer simply has no stance, and the scope
+    # returns to unaffirmed (never to refused).
     scope_stances =
       scope_stances
       |> Enum.group_by(& &1.who)
       |> Enum.map(fn {_who, records} -> Enum.max_by(records, & &1.signed_at, DateTime) end)
+      |> Enum.reject(&(&1.polarity == :withdraw))
 
     {in_force, lapsed} =
       scope_stances

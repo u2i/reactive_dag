@@ -86,6 +86,33 @@ defmodule ReactiveDag.AttestationEvaluationTest do
       assert admission.state == :refused
     end
 
+    test "a WITHDRAWAL clears the signer's word — back to pending, not refused" do
+      # "I no longer vouch" is not "the data is wrong": the withdrawal
+      # supersedes the affirmation but carries no force of its own, so the
+      # scope returns to unaffirmed — re-askable, and never contradicted.
+      earlier = stance(signed_at: ~U[2026-08-01 00:00:00.000000Z])
+      withdrawal = stance(polarity: :withdraw, signed_at: ~U[2026-08-05 00:00:00.000000Z])
+
+      admission = evaluate([earlier, withdrawal])
+      assert admission.state == :pending
+      assert admission.signers == []
+      # no stance at all — a withdrawal is absence, not a lapse to report.
+      assert admission.lapses == []
+    end
+
+    test "a withdrawal does not out-vote OTHER signers' affirmations" do
+      bob_affirms = stance(who: "bob@u2i.com")
+      alice_withdraws = stance(polarity: :withdraw)
+
+      admission =
+        evaluate([bob_affirms, alice_withdraws],
+          eligibility: ["AAA111|alice@u2i.com", "AAA111|bob@u2i.com"]
+        )
+
+      assert admission.state == :affirmed
+      assert admission.signers == ["bob@u2i.com"]
+    end
+
     test "the rejector's own LATER affirmation supersedes their rejection" do
       earlier =
         stance(

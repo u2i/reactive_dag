@@ -76,18 +76,35 @@ defmodule ReactiveDag.Attestation.Record do
   defmodule SignChange do
     @moduledoc """
     The `:sign` action's change: applies the resource's `who_from_actor` (an
-    actor present → `who` forced from it), and errors a `:reject` with a blank
-    `reason` — a rejection asserts the data is WRONG, and a bare "no" leaves
-    whoever must act with nothing to fix and an auditor with an unexplained
-    refusal.
+    actor present → `who` forced from it), validates the polarity, and errors
+    a `:reject` with a blank `reason` — a rejection asserts the data is WRONG,
+    and a bare "no" leaves whoever must act with nothing to fix and an auditor
+    with an unexplained refusal. (`:withdraw` — "I no longer vouch" — asserts
+    nothing about the data, so its reason stays optional.)
     """
     use Ash.Resource.Change
+
+    @valid_polarities ~w(affirm reject withdraw)
 
     @impl true
     def change(changeset, _opts, ctx) do
       changeset
       |> force_who(ctx.actor)
+      |> validate_polarity()
       |> require_reason_on_reject()
+    end
+
+    defp validate_polarity(changeset) do
+      p = changeset |> Ash.Changeset.get_attribute(:polarity) |> to_string()
+
+      if p in @valid_polarities do
+        changeset
+      else
+        Ash.Changeset.add_error(changeset,
+          field: :polarity,
+          message: "must be one of #{Enum.join(@valid_polarities, " | ")}"
+        )
+      end
     end
 
     defp force_who(changeset, nil), do: changeset

@@ -4,8 +4,8 @@ defmodule ReactiveDag.Attestation do
   immutable append-only history (the host project's ADR-002).
 
   A record is `(cell_id, scope, who, polarity, reason, basis, basis_version,
-  signed_at)`: someone (`who`) affirmed or rejected what a scope of `cell_id`'s
-  data looked like (`basis` — a content digest, `ReactiveDag.Attestation.Basis`)
+  signed_at)`: someone (`who`) affirmed, rejected, or withdrew their word on
+  what a scope of `cell_id`'s data looked like (`basis` — a content digest, `ReactiveDag.Attestation.Basis`)
   at a moment. Records are never updated or deleted; a signer's current STANCE
   on a scope is simply their most recent record, and whether that stance
   currently COUNTS is a read-time predicate
@@ -44,7 +44,7 @@ defmodule ReactiveDag.Attestation do
 
   @default_cell "attestations"
 
-  @type polarity :: :affirm | :reject
+  @type polarity :: :affirm | :reject | :withdraw
 
   @type record :: %{
           id: String.t(),
@@ -94,6 +94,20 @@ defmodule ReactiveDag.Attestation do
     end
 
     sign(cell_id, scope, who, :reject, reason, opts)
+  end
+
+  @doc """
+  Record that `who` WITHDRAWS their word on `scope` — "I no longer vouch",
+  which is a different act from rejecting ("the data is wrong"). A withdrawal
+  supersedes the signer's previous stance and itself carries NO force in
+  either direction: the scope returns to unaffirmed (pending / re-askable),
+  never to refused. `reason:` is optional — withdrawing asserts nothing about
+  the data, so there is nothing that must be explained.
+  """
+  @spec withdraw(String.t(), Scope.t(), String.t(), keyword()) ::
+          {:ok, record(), [String.t()]}
+  def withdraw(cell_id, scope, who, opts \\ []) do
+    sign(cell_id, scope, who, :withdraw, Keyword.get(opts, :reason), opts)
   end
 
   @doc """

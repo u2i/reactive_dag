@@ -170,6 +170,16 @@ data. The world moving lapses coverage with **no revocation bookkeeping**: a
 serial reused by a rebuilt host, a corrected row, a filter selecting a new
 member — all simply stop matching.
 
+### Withdrawal: clearing your word
+
+Between affirming and rejecting sits a third act: **withdraw** — "I no longer
+vouch" (handing the machine back, leaving the team), with no claim that
+anything is wrong. `Attestation.withdraw/4` supersedes the signer's stance
+like any record but carries **no force in either direction**: the scope
+returns to *pending* (unaffirmed, re-askable), never to refused, and other
+signers' affirmations are untouched. Its reason is optional — withdrawing
+asserts nothing about the data, so nothing must be explained.
+
 ### Rejection is sticky, and reasoned
 
 A rejection **requires a reason** (`reject/5` raises without one): an
