@@ -19,43 +19,50 @@ defmodule ReactiveDag.Drain do
   dirty directly, so a leaf shouldn't appear in the frontier; if one does, its
   claimed keys are treated as changed and just propagated.
 
+  Returns `{:ok, %ReactiveDag.Drain.Report{}}` — the processing trace: one
+  step per cell recompute (cell, pass, claimed, changed, triggered_by,
+  duration_us), in execution order, plus run totals. The drain knows all of
+  this as it works; the report is that knowledge kept instead of discarded.
+  Persistence is the host's (an Oban job's meta, a run table) — the library
+  reports, the host records.
+
   `run/2` opts:
     * `:recompute` — a `ReactiveDag.RecomputeStrategy` module (required unless the
       graph is leaves-only).
     * `:key_rule`  — a `ReactiveDag.KeyRule` module (default: identity mapping).
-    * `:on_step`   — optional `(cell, step) -> any` for tracing, called after each
-      cell recomputes. `step` is a map:
-        * `:claimed`      — the keys claimed from the frontier this pass
-        * `:changed`      — the keys the recompute reported as changed
-        * `:triggered_by` — the cell_id whose propagation last dirtied THIS cell
-          (nil for the drain's initial frontier), so a trace can reconstruct the
-          causal propagation tree without the frontier carrying reasons. The drain
-          tracks this itself: when it propagates from A to a parent B, it remembers
-          "B's next recompute was triggered by A".
-        * `:duration_us` — microseconds the cell's recompute took (the drain
-          brackets the `RecomputeStrategy` call).
+    * `:on_step`   — optional `(cell, step) -> any` for STREAMING (live progress
+      UI) — called after each cell recomputes with the same fields the report
+      step carries (minus `:cell`/`:pass`, which the report adds). The full
+      trace arrives in the report either way; use `on_step` only when you need
+      it before the drain finishes.
   """
 
   require Logger
 
-  alias ReactiveDag.{Cell, Frontier, Graph, Plan}
+  alias ReactiveDag.{Cell, Drain.Report, Frontier, Graph, Plan}
 
   @max_passes 100_000
 
-  @spec run(Plan.t(), keyword()) :: {:ok, non_neg_integer()}
+  @spec run(Plan.t(), keyword()) :: {:ok, Report.t()}
   def run(%Plan{} = plan, opts \\ []) do
-    do_run(plan, opts, 0, %{})
+    t0 = System.monotonic_time(:microsecond)
+    do_run(plan, opts, 0, %{}, [], t0)
   end
 
-  defp do_run(_plan, _opts, passes, _cause) when passes >= @max_passes do
+  defp do_run(_plan, _opts, passes, _cause, _steps, _t0) when passes >= @max_passes do
     raise "reactive_dag drain exceeded #{@max_passes} passes — likely a cycle or a " <>
             "recompute that keeps re-dirtying its own inputs"
   end
 
-  defp do_run(plan, opts, passes, cause) do
+  defp do_run(plan, opts, passes, cause, steps, t0) do
     case Frontier.next_cell(plan.depths) do
       nil ->
-        {:ok, passes}
+        {:ok,
+         %Report{
+           steps: Enum.reverse(steps),
+           passes: passes,
+           duration_us: System.monotonic_time(:microsecond) - t0
+         }}
 
       cell_id ->
         # A whole-cell claim ("*") SUBSUMES any co-claimed specific keys: if "*"
@@ -66,7 +73,7 @@ defmodule ReactiveDag.Drain do
         claimed = Frontier.claim(cell_id)
         keys = if "*" in claimed, do: ["*"], else: claimed
 
-        cause =
+        {cause, steps} =
           if keys != [] do
             cell = Map.fetch!(plan.cells, cell_id)
             {changed, us} = timed(fn -> recompute(cell, keys, opts) end)
@@ -77,22 +84,27 @@ defmodule ReactiveDag.Drain do
             prop = if "*" in keys, do: :all, else: changed
             parents = propagate(plan, cell_id, prop, opts)
 
-            if f = opts[:on_step] do
-              f.(cell, %{
-                claimed: keys,
-                changed: changed,
-                triggered_by: Map.get(cause, cell_id),
-                duration_us: us
-              })
-            end
+            step = %{
+              claimed: keys,
+              changed: changed,
+              triggered_by: Map.get(cause, cell_id),
+              duration_us: us
+            }
+
+            if f = opts[:on_step], do: f.(cell, step)
 
             # Every parent we just dirtied was triggered by this cell.
-            Enum.reduce(parents, cause, fn parent_id, acc -> Map.put(acc, parent_id, cell_id) end)
+            cause =
+              Enum.reduce(parents, cause, fn parent_id, acc ->
+                Map.put(acc, parent_id, cell_id)
+              end)
+
+            {cause, [Map.merge(step, %{cell: cell_id, pass: passes}) | steps]}
           else
-            cause
+            {cause, steps}
           end
 
-        do_run(plan, opts, passes + 1, cause)
+        do_run(plan, opts, passes + 1, cause, steps, t0)
     end
   end
 

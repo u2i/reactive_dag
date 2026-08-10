@@ -150,12 +150,23 @@ node shape.
 ```elixir
 plan = ReactiveDag.Node.graph([MyApp.FiscalLines, MyApp.BudgetRollups])
 
-{:ok, _passes} =
+{:ok, report} =
   ReactiveDag.Drain.run(plan,
     recompute: ReactiveDag.Node.Recompute,   # dispatches reduce/join/aggregate/compute
     key_rule: ReactiveDag.Node.KeyRule       # reads :identity | :all off the block
   )
+
+report.steps
+# one entry per cell recompute, in execution order:
+# %{cell: "budget_rollups", triggered_by: "fiscal_lines",
+#   claimed: ["fy24"], changed: ["fy24"], pass: 1, duration_us: 812}
 ```
+
+The `%ReactiveDag.Drain.Report{}` is the drain's processing trace — what ran,
+why (`triggered_by` reconstructs the causal tree), what actually changed, and
+how long each step took. Persist it wherever your runs live (a job's meta, a
+run table): the library reports, the host records. For progress *during* a
+long drain, pass `on_step: fn cell, step -> ... end`.
 
 `graph/2` validates the whole thing at assembly: every edge resolves, ids are
 unique, the graph is acyclic — an authoring mistake fails loudly here, not
