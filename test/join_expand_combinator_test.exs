@@ -48,6 +48,32 @@ defmodule ReactiveDag.JoinExpandCombinatorTest do
     end
   end
 
+  # OUTER JOIN: the reconcile shape — a right-only (actual-without-budget) key
+  # is a FINDING to emit, not a row to drop.
+  defmodule Reconcile do
+    use Ash.Resource, domain: Domain, data_layer: Ash.DataLayer.Simple, extensions: [ReactiveDag.Node]
+
+    reactive do
+      id :reconcile
+      op :join
+      key_rule :all
+
+      join over: :fiscal,
+           read: fn :fiscal -> Process.get(:fiscal, []) end,
+           left: fn %{kind: k, acct: a} -> k == :budget && a end,
+           right: fn %{kind: k, acct: a} -> k == :actual && a end,
+           key: fn acct -> "rc|#{acct}" end,
+           outer: true,
+           into: fn acct, b, a ->
+             %{acct: acct, status: (b && a && "covered") || "failing"}
+           end,
+           upsert: fn key, row ->
+             send(self(), {:upsert, key, row})
+             true
+           end
+    end
+  end
+
   # EXPAND: group budget lines by fy, then FAN OUT one row per bucket in the fy.
   defmodule Allocations do
     use Ash.Resource, domain: Domain, data_layer: Ash.DataLayer.Simple, extensions: [ReactiveDag.Node]
@@ -106,6 +132,27 @@ defmodule ReactiveDag.JoinExpandCombinatorTest do
       assert upserts["va|A"].actual == 90
       assert upserts["va|B"].variance == nil
       assert upserts["va|B"].actual == nil
+    end
+
+    test "outer: true emits right-only keys too — the full-outer reconcile" do
+      Process.put(:fiscal, [
+        %{kind: :budget, acct: "A", amount: 100},
+        %{kind: :budget, acct: "B", amount: 50},
+        %{kind: :actual, acct: "A", amount: 90},
+        # C has an actual but NO budget — outer join must surface it.
+        %{kind: :actual, acct: "C", amount: 7}
+      ])
+
+      cell = ReactiveDag.Node.to_cell(Reconcile)
+      {:ok, changed} = Recompute.recompute(cell, ["*"])
+      assert Enum.sort(changed) == ["rc|A", "rc|B", "rc|C"]
+
+      upserts = drain_upserts()
+      assert upserts["rc|A"].status == "covered"
+      # left-only: declared but unobserved.
+      assert upserts["rc|B"].status == "failing"
+      # right-only: observed but undeclared — present ONLY because outer: true.
+      assert upserts["rc|C"].status == "failing"
     end
   end
 

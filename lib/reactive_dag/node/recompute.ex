@@ -49,19 +49,32 @@ defmodule ReactiveDag.Node.Recompute do
 
   # a declarative JOIN combinator — read `over` into a LEFT and RIGHT index
   # (both `%{join_key => item}`), then for each left key emit `into.(jk, left,
-  # right_or_nil)` (a left join; right may be absent). One row per left key.
+  # right_or_nil)` (a left join; right may be absent). With `outer: true`,
+  # right-only keys ALSO emit (`into.(jk, nil, right)`) — the full-outer
+  # reconcile shape, where an undeclared right-side member is a finding.
   # `read` may be arity-2 for dirty-key scoping (see `reduce` above).
   def recompute(%Cell{meta: %{join: %{} = j}} = cell, keys) do
     items = read_items(j.read, j.over, scope(keys))
     left = index(items, j.left)
     right = index(items, j.right)
 
-    pairs =
+    left_pairs =
       Enum.flat_map(left, fn {jk, litem} ->
         j.into.(jk, litem, Map.get(right, jk)) |> rows_with_keys(j, jk)
       end)
 
-    {:ok, materialize(cell, pairs, j.upsert)}
+    right_only_pairs =
+      if Map.get(j, :outer, false) do
+        Enum.flat_map(right, fn {jk, ritem} ->
+          if Map.has_key?(left, jk),
+            do: [],
+            else: j.into.(jk, nil, ritem) |> rows_with_keys(j, jk)
+        end)
+      else
+        []
+      end
+
+    {:ok, materialize(cell, left_pairs ++ right_only_pairs, j.upsert)}
   end
 
   # a PURE-ASH-QUERY aggregate — the datastore groups + aggregates the `over`

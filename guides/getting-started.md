@@ -38,11 +38,27 @@ config :reactive_dag,
 `reactive_dag_dirty`); a name that doesn't match your migration yields empty
 results with no error, so set them explicitly.
 
-## Migrations (the host owns the tables)
+## Migrations (the host owns the tuple; the lib offers the frontier)
 
 The library defines the columns it needs and is their only reader/writer, but
 the physical tables live in *your* migrations — that's what lets a host add its
 own extension columns beside the spine.
+
+The dirty frontier has no extension columns, so the library can own its DDL —
+`ReactiveDag.Migration.up/1` / `down/1` create it for you (honoring
+`dirty_table:`):
+
+```elixir
+defmodule MyApp.Repo.Migrations.AddReactiveDag do
+  use Ecto.Migration
+
+  def up, do: ReactiveDag.Migration.up()
+  def down, do: ReactiveDag.Migration.down()
+end
+```
+
+Hand-write it only if you want to co-locate it with the tuple migration, as
+below. The TUPLE table stays yours either way (extension columns).
 
 ```elixir
 def change do
@@ -70,7 +86,8 @@ def change do
     add :enqueued_at, :utc_datetime_usec
   end
 
-  create index(:my_dirty, [:cell_id])
+  # UNIQUE is load-bearing: mark_dirty coalesces via ON CONFLICT (cell_id, key).
+  create unique_index(:my_dirty, [:cell_id, :key])
 end
 ```
 

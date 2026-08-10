@@ -276,11 +276,16 @@ defmodule ReactiveDag.Node do
 
   defmodule Join do
     @moduledoc """
-    A declarative LEFT JOIN: read an input's payload, index it into a LEFT and a
+    A declarative JOIN: read an input's payload, index it into a LEFT and a
     RIGHT side (each a `%{join_key => item}` built from a per-side key fn), then
     emit one row per left key joined to its right item (right may be absent). The
     common two-input reconcile/variance shape — the author writes the two side
     keys + the join row, not the read/write/changed plumbing.
+
+    LEFT join by default. `outer: true` makes it a FULL OUTER join: right-only
+    keys also emit (`into.(jk, nil, right_item)`), for reconciles where an
+    unexpected right-side member is itself a finding (a rogue repo the baseline
+    never declared) rather than something to silently drop.
     """
     defstruct [
       :over,
@@ -290,8 +295,9 @@ defmodule ReactiveDag.Node do
       :key,
       :into,
       :upsert,
-      :__identifier__,
-      :__spark_metadata__
+      outer: false,
+      __identifier__: nil,
+      __spark_metadata__: nil
     ]
   end
 
@@ -299,7 +305,7 @@ defmodule ReactiveDag.Node do
     name: :join,
     target: Join,
     describe:
-      "Declarative left join: index `over` into left/right sides, emit a row per left key.",
+      "Declarative join: index `over` into left/right sides, emit a row per left key (per EITHER side's key with `outer: true`).",
     schema: [
       over: [
         type: :atom,
@@ -330,7 +336,14 @@ defmodule ReactiveDag.Node do
       into: [
         type: {:fun, 3},
         required: true,
-        doc: "`(join_key, left_item, right_item_or_nil -> row)` — the joined output row"
+        doc:
+          "`(join_key, left_item_or_nil, right_item_or_nil -> row)` — the joined output row. left is nil only for `outer: true` right-only keys."
+      ],
+      outer: [
+        type: :boolean,
+        default: false,
+        doc:
+          "FULL OUTER: right-only keys also emit, via `into.(jk, nil, right_item)`. Default false (left join)."
       ],
       upsert: [
         type: {:fun, 2},
