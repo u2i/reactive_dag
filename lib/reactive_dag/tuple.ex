@@ -374,7 +374,9 @@ defmodule ReactiveDag.Tuple do
   end
 
   defp key_scope_clause({:segment, i, sep, v}, next) when is_integer(i) and i > 0 do
-    {" AND split_part(key, $#{next}, $#{next + 1}) = $#{next + 2}", [sep, i, v]}
+    # ::int — the one key_scope param that isn't text; cast explicitly rather
+    # than lean on the driver/PG inferring split_part's third argument type.
+    {" AND split_part(key, $#{next}, $#{next + 1}::int) = $#{next + 2}", [sep, i, v]}
   end
 
   defp query!(sql, params), do: repo().query!(sql, params)
