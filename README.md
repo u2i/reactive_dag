@@ -32,7 +32,7 @@ decides *how* or *what a value means*. Each host brings its domain at the seams:
 | Compiled plan | `ReactiveDag.Plan` | pure data: `cells / parents / depths`. |
 | Graph math | `ReactiveDag.Graph` | `build/1` (validate + parent edges + longest-path depths + cycle check); `dirty_parents/4` (propagation via the host `KeyRule`). |
 | Dirty frontier | `ReactiveDag.Frontier` | claim-as-delete over the host's dirty table; `mark_dirty / next_cell / claim / empty?`. |
-| Drain loop | `ReactiveDag.Drain` | depth-ordered incremental propagation; `run/2` parameterized by the two seams + an `:on_step` trace hook carrying `triggered_by` + `duration_us`. |
+| Drain loop | `ReactiveDag.Drain` | depth-ordered incremental propagation; `run/2` parameterized by the two seams, returning `{:ok, %Drain.Report{}}` — the processing trace (per-step cell/claimed/changed/`triggered_by`/`duration_us` + totals). An optional `:on_step` hook streams the same fields live. |
 | Coordination tuple | `ReactiveDag.Tuple` | the shared `(cell_id, key, status, freshness)` spine over the host's tuple table: `put / present_keys / all_keys / keys_by_status / status_histogram / reconcile / …` + a `:key_scope` selector. Payload stays in the host's typed resources, joined by `key`. |
 | Nested-expr lowering | `ReactiveDag.Lowering` | `walk/3` — the nested op-expression → flat-cell recursion both DSLs grew, parameterized by host callbacks (id grammar, ref resolution, cell construction). |
 | Compile pipeline | `ReactiveDag.Dsl` | `compile / validate_cells` — resolve → structural-validate, with a domain-validation hook. |
@@ -150,10 +150,12 @@ end
 ```elixir
 # assemble + run a Node-authored graph (no host-written dispatch):
 plan = ReactiveDag.Node.graph([BudgetRollups, FiscalLines, …], for_each: &fetch/1)
-{:ok, passes} =
+{:ok, report} =
   ReactiveDag.Drain.run(plan,
     recompute: ReactiveDag.Node.Recompute,   # runs reduce/join/aggregate or compute:
     key_rule:  ReactiveDag.Node.KeyRule)       # reads :identity | :all from the block
+# report is a ReactiveDag.Drain.Report — the processing trace: one step per
+# recompute (cell, claimed, changed, triggered_by, duration_us) + run totals.
 
 # config
 config :reactive_dag,
