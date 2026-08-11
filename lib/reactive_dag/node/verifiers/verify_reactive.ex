@@ -58,7 +58,8 @@ defmodule ReactiveDag.Node.Verifiers.VerifyReactive do
   end
 
   defp verify_entity(dsl, %Reduce{} = r) do
-    with :ok <- verify_key_rule_home(dsl, r.key_rule),
+    with :ok <- verify_over(dsl, r),
+         :ok <- verify_key_rule_home(dsl, r.key_rule),
          :ok <- verify_key_prefix(dsl, r.key, r.key_prefix),
          :ok <- verify_result_slots(dsl, :reduce, r.status, into: r.into, expand: r.expand),
          :ok <- verify_reduce_into(dsl, r) do
@@ -103,6 +104,55 @@ defmodule ReactiveDag.Node.Verifiers.VerifyReactive do
   end
 
   defp verify_entity(_dsl, _other), do: :ok
+
+  # the edge is declared ONE way: a node id (`over:`, with its own `group_by:`)
+  # or an Ash relationship (`over_rel:`, which supplies both).
+  defp verify_over(dsl, %Reduce{over: nil, over_rel: nil}) do
+    error(
+      dsl,
+      "a `reduce` declares neither `over:` nor `over_rel:` — name the input node " <>
+        "(`over: :expenses, group_by: [...]`), or an Ash relationship on this " <>
+        "resource that points at it (`over_rel: :expenses`)."
+    )
+  end
+
+  defp verify_over(dsl, %Reduce{over: over, over_rel: rel})
+       when not is_nil(over) and not is_nil(rel) do
+    error(
+      dsl,
+      "a `reduce` declares BOTH `over: #{inspect(over)}` and `over_rel: #{inspect(rel)}` — " <>
+        "they name the same edge two ways. Keep `over_rel:` (the relationship supplies " <>
+        "the grouping too), or `over:` alone."
+    )
+  end
+
+  defp verify_over(dsl, %Reduce{over_rel: nil, group_by: nil}) do
+    error(
+      dsl,
+      "a `reduce over:` must declare `group_by:` — the grouping is only implicit when " <>
+        "the edge is an Ash relationship (`over_rel:`), which carries its own " <>
+        "attribute pair."
+    )
+  end
+
+  defp verify_over(dsl, %Reduce{over_rel: rel}) when not is_nil(rel) do
+    case Ash.Resource.Info.relationship(dsl, rel) do
+      nil ->
+        names = Enum.map(Ash.Resource.Info.relationships(dsl), & &1.name)
+
+        error(
+          dsl,
+          "`over_rel: #{inspect(rel)}` names no such relationship on this resource. " <>
+            "Declare it in the `relationships` block, or name the node with `over:`. " <>
+            "Available: #{inspect(names)}"
+        )
+
+      _ ->
+        :ok
+    end
+  end
+
+  defp verify_over(_dsl, _r), do: :ok
 
   # the node-shape × result-slot matrix: a VERDICT node's result IS its status
   # (`status:` required, row slots forbidden); a payload node emits rows

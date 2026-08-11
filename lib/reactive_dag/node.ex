@@ -55,6 +55,7 @@ defmodule ReactiveDag.Node do
   | you want to… | use | rows into BEAM? | you write |
   |---|---|---|---|
   | group + `avg`/`sum`/`count` a relationship | `aggregate` | **none** (datastore GROUP BY) | attribute atoms |
+  | fold rows across a declared RELATIONSHIP | `reduce over_rel:` | the scoped slice | the relationship name + an `into:` fold |
   | fold one input's rows into per-group summaries | `reduce` | the scoped slice of `over` | `group_by:` attrs + an `into:` fold |
   | reconcile one input's two sides by key | `join` | the scoped slice of `over` | side attrs/`[key:, where:]` + picks |
   | a slot the attributes can't express | the slot's escape | same | `query:` (shape the Ash read), fn group/key/into, `expand:`, `status:` |
@@ -227,6 +228,7 @@ defmodule ReactiveDag.Node do
     """
     defstruct [
       :over,
+      :over_rel,
       :group_by,
       :key,
       :key_prefix,
@@ -246,15 +248,36 @@ defmodule ReactiveDag.Node do
     name: :reduce,
     target: Reduce,
     describe:
-      "Declarative fold: read `over`, group by `group_by`, reduce each group with `into`. " <>
-        "Ash-first: omit `read:` (the library reads the over node's resource, dirty-key " <>
-        "scoped), name attributes in `group_by:`, and declare the fold in `into:` — " <>
-        "each slot has a fn escape hatch when the shape outgrows attributes.",
+      "Declarative fold: read the input, group it, reduce each group with `into`. " <>
+        "Ash-first: name a relationship in `over_rel:` (it supplies the input node AND " <>
+        "the grouping pair), or `over:` a node id with explicit `group_by:`; omit " <>
+        "`read:` (the library reads the over node's resource, dirty-key scoped) and " <>
+        "declare the fold in `into:` — each slot has a fn escape hatch when the shape " <>
+        "outgrows attributes.",
     schema: [
       over: [
         type: :atom,
-        required: true,
-        doc: "the input node id whose payload is read + grouped"
+        required: false,
+        doc:
+          "the input node id whose payload is read + grouped. Exactly one of " <>
+            "`over:`/`over_rel:` — `over_rel:` names an Ash RELATIONSHIP that supplies " <>
+            "this and the grouping together."
+      ],
+      over_rel: [
+        type: :atom,
+        required: false,
+        doc:
+          "the ASH-NATIVE edge: name a `has_many` on THIS resource and the relationship " <>
+            "IS the edge — its destination resolves to the over node, and its " <>
+            "`source_attribute`/`destination_attribute` become the `group_by` pair " <>
+            "(`[source: :destination]`), so grouping, keys and `:group` claims all " <>
+            "derive from one declaration. The correspondence is declared once, on the " <>
+            "resource, and named here — exactly how `aggregate` already works and how " <>
+            "Ash relationships are used everywhere else. Sugar: it LOWERS to " <>
+            "`over:` + `group_by:` pairs, so both spellings share one execution path. " <>
+            "Declare `group_by:` explicitly to group by something other than the " <>
+            "relationship's own attributes. Not usable when the destination resource " <>
+            "expands to many cells (a `for_each` generator) — name the cell with `over:` there."
       ],
       read: [
         type: :atom,
@@ -277,9 +300,10 @@ defmodule ReactiveDag.Node do
       ],
       group_by: [
         type: {:or, [{:fun, 1}, :atom, {:list, :any}]},
-        required: true,
+        required: false,
         doc:
-          "an attribute or CALCULATION on the over resource (`:fund`, or `:month` where " <>
+          "REQUIRED with `over:`; with `over_rel:` it defaults to the relationship's own " <>
+            "attribute pair. An attribute or CALCULATION on the over resource (`:fund`, or `:month` where " <>
             "the over declares `calculate :month, :string, {ReactiveDag.Calendar, " <>
             "bucket: :month, of: :date}` — derived grouping values are Ash calculations, " <>
             "declared where the data lives; the library loads them). A list groups by " <>
@@ -1371,7 +1395,7 @@ defmodule ReactiveDag.Node do
     combinator_refs =
       case combinator(resource) do
         nil -> []
-        c -> [%Ref{to: c.over}]
+        c -> [%Ref{to: over_id!(c, resource)}]
       end
 
     attested_refs =
@@ -1400,6 +1424,127 @@ defmodule ReactiveDag.Node do
 
   # a flat depends_on entry: `:id`, or `{:id, gate: :requirement}` (plus an
   # optional `mode: :require | :annotate`).
+  # ── `over_rel:` — an Ash relationship IS the edge ───────────────────────────
+  #
+  # The relational correspondence Ash already knows how to state: a `has_many`
+  # names its destination and the attribute pair that relates them. We take all
+  # three facts from it — WHICH node (the destination resource's own node id),
+  # HOW rows group (source_attribute ← destination_attribute, i.e. the #34 pair),
+  # and thus how `:group` claims traverse back. Resolution happens per-resource
+  # rather than at assembly because the edge must be known before inputs are
+  # built; the destination's node id is declared on the destination itself, so
+  # nothing here needs the graph.
+
+  @doc false
+  # the over node's id, from `over:` directly or via `over_rel:`'s destination.
+  def over_id!(%{over: over, over_rel: rel}, resource) do
+    case {over, rel} do
+      {nil, nil} ->
+        raise ArgumentError,
+              "reactive_dag: the combinator on #{inspect(resource)} declares neither " <>
+                "`over:` nor `over_rel:` — name the input node id, or an Ash " <>
+                "relationship on this resource that points at it."
+
+      {over, nil} when not is_nil(over) ->
+        over
+
+      {nil, rel} ->
+        relationship!(resource, rel).__over_id__
+
+      {_, _} ->
+        raise ArgumentError,
+              "reactive_dag: the combinator on #{inspect(resource)} declares BOTH " <>
+                "`over: #{inspect(over)}` and `over_rel: #{inspect(rel)}` — they name the " <>
+                "same edge two ways. Keep `over_rel:` (the relationship supplies the " <>
+                "grouping too), or `over:` alone."
+    end
+  end
+
+  # a join has no `over_rel:` (its sides, not one relationship, name the edge)
+  def over_id!(%{over: over}, _resource), do: over
+
+  # the declared relationship, plus the node id its destination lowers to.
+  defp relationship!(resource, name) do
+    rel =
+      Ash.Resource.Info.relationship(resource, name) ||
+        raise ArgumentError,
+              "reactive_dag: `over_rel: #{inspect(name)}` on #{inspect(resource)} names no " <>
+                "such relationship. Declare it in the `relationships` block " <>
+                "(`has_many #{inspect(name)}, TheResource, source_attribute: …, " <>
+                "destination_attribute: …`), or name the node directly with `over:`. " <>
+                "Available: #{inspect(Enum.map(Ash.Resource.Info.relationships(resource), & &1.name))}"
+
+    dest = rel.destination
+
+    unless Spark.extensions(dest) |> Enum.member?(__MODULE__) do
+      raise ArgumentError,
+            "reactive_dag: `over_rel: #{inspect(name)}` on #{inspect(resource)} points at " <>
+              "#{inspect(dest)}, which is not a reactive node (it lacks the " <>
+              "`ReactiveDag.Node` extension) — a DAG edge must name a node. Add the " <>
+              "extension to #{inspect(dest)}, or use `over:` with `compute`/`run`."
+    end
+
+    if Ext.get_opt(dest, [:reactive], :for_each, nil) do
+      raise ArgumentError,
+            "reactive_dag: `over_rel: #{inspect(name)}` on #{inspect(resource)} points at " <>
+              "#{inspect(dest)}, a GENERATOR node — one resource expands to many cells, so " <>
+              "the relationship cannot name WHICH. Use `over:` with the instance id " <>
+              "(`<id>.<member>`)."
+    end
+
+    over_id =
+      Ext.get_opt(dest, [:reactive], :id, nil) ||
+        raise ArgumentError,
+              "reactive_dag: `over_rel: #{inspect(name)}` resolves to #{inspect(dest)}, " <>
+                "which declares no `id` in its `reactive` block."
+
+    Map.put(rel, :__over_id__, over_id)
+  end
+
+  # the relationship's own attribute pair, as a `group_by` entry:
+  # `[source_attribute: :destination_attribute]` — this node's column on the
+  # left, the child's field on the right, exactly the #34 spelling.
+  defp relationship_group_by(resource, name) do
+    rel = relationship!(resource, name)
+
+    cond do
+      Map.get(rel, :no_attributes?) ->
+        raise ArgumentError,
+              "reactive_dag: `over_rel: #{inspect(name)}` on #{inspect(resource)} is a " <>
+                "`no_attributes?` relationship — it relates every row to every row, so it " <>
+                "carries no grouping. Declare `group_by:` explicitly alongside it."
+
+      is_nil(rel.source_attribute) or is_nil(rel.destination_attribute) ->
+        raise ArgumentError,
+              "reactive_dag: `over_rel: #{inspect(name)}` on #{inspect(resource)} declares no " <>
+                "attribute pair to group by. Give it `source_attribute`/" <>
+                "`destination_attribute`, or declare `group_by:` explicitly."
+
+      true ->
+        [{rel.source_attribute, rel.destination_attribute}]
+    end
+  end
+
+  # SUGAR → CORE: rewrite an `over_rel:` reduce into the `over:` + `group_by:`
+  # pair form, so exactly one shape reaches assembly, recompute, the key rules
+  # and the verifiers. Nothing downstream knows relationships exist.
+  defp lower_over_rel(%Reduce{over_rel: nil} = r, resource) do
+    if is_nil(r.over) do
+      # surfaces the "neither declared" error at lowering, not as a nil edge
+      over_id!(r, resource)
+    end
+
+    r
+  end
+
+  defp lower_over_rel(%Reduce{over_rel: rel} = r, resource) do
+    %{
+      r
+      | over: over_id!(r, resource),
+        group_by: r.group_by || relationship_group_by(resource, rel)
+    }
+  end
+
   defp normalize_dep(id, _resource) when is_atom(id), do: %Ref{to: id}
 
   defp normalize_dep({id, opts}, _resource) when is_atom(id) and is_list(opts),
@@ -1506,7 +1651,7 @@ defmodule ReactiveDag.Node do
   defp extra_meta(resource, all_refs) do
     combinator_meta =
       case combinator(resource) do
-        %Reduce{} = r -> %{reduce: r}
+        %Reduce{} = r -> %{reduce: lower_over_rel(r, resource)}
         %Join{} = j -> %{join: j}
         nil -> %{}
       end

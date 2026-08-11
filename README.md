@@ -101,6 +101,12 @@ changed keys:
   node's resource is the group's resource; `over` is its `has_many`. Only for
   relationship aggregates (Ash has no arbitrary `GROUP BY … → rows`).
   Example: `aggregate over: :readings, avg: [flow: :avg_flow], count: :day_count`.
+- **`reduce over_rel:`** — the edge as an **Ash relationship**: name a
+  `has_many` on this resource and it supplies the input node (its destination),
+  the grouping (its `source_attribute`/`destination_attribute` pair) and the
+  `:group` claim traversal — the correspondence declared once and referenced by
+  name, as Ash does everywhere else. Sugar for `over:` + `group_by:` pairs.
+  Example: `reduce over_rel: :expenses, into: [sum: [amount: :total]]`.
 - **`reduce`** — an in-BEAM fold, declared: the library reads the over node's
   resource (primary or a named `:read` action), auto-scoped to the dirty keys;
   `group_by:` names attributes, `into:` declares the fold
