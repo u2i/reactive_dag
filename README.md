@@ -8,7 +8,7 @@ pipeline and the u2i compliance portal's `model_eval`), and now shared by both.
 
 **Documentation:** the guides are the front door — [Getting
 started](https://hexdocs.pm/reactive_dag/getting-started.html), [Authoring
-nodes](https://hexdocs.pm/reactive_dag/authoring-nodes.html), [Sources and
+nodes](https://hexdocs.pm/reactive_dag/authoring-nodes.html), [LLM nodes](https://hexdocs.pm/reactive_dag/llm-nodes.html), [Sources and
 scanning](https://hexdocs.pm/reactive_dag/sources.html),
 [Attestations](https://hexdocs.pm/reactive_dag/attestations.html) (human
 sign-off as a first-class input), and [The
