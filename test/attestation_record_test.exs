@@ -105,6 +105,20 @@ defmodule ReactiveDag.AttestationRecordTest do
       assert changed == [Scope.serialize({:key, "AAA111"})]
     end
 
+    test "meta rides the record and comes back on every read (not write-only)" do
+      # regression: the :sign action accepted :meta but to_record/1 dropped it —
+      # host context written through meta was invisible to stances/history.
+      {:ok, record, _} =
+        Attestation.affirm("machines", {:key, "AAA111"}, "alice@u2i.com",
+          rows: @rows,
+          meta: %{"ticket" => "SEC-421"}
+        )
+
+      assert record.meta == %{"ticket" => "SEC-421"}
+      assert [%{meta: %{"ticket" => "SEC-421"}}] = Attestation.stances("machines")
+      assert [%{meta: %{"ticket" => "SEC-421"}}] = Attestation.history("machines")
+    end
+
     test "reject without a reason raises before anything is written" do
       assert_raise ArgumentError, ~r/reason/, fn ->
         Attestation.reject("machines", {:key, "AAA111"}, "bob@u2i.com", "  ", rows: @rows)

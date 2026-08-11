@@ -4,7 +4,7 @@ defmodule ReactiveDag.Attestation do
   immutable append-only history (the host project's ADR-002).
 
   A record is `(cell_id, scope, who, polarity, reason, basis, basis_version,
-  signed_at)`: someone (`who`) affirmed, rejected, or withdrew their word on
+  signed_at, meta)`: someone (`who`) affirmed, rejected, or withdrew their word on
   what a scope of `cell_id`'s data looked like (`basis` — a content digest, `ReactiveDag.Attestation.Basis`)
   at a moment. Records are never updated or deleted; a signer's current STANCE
   on a scope is simply their most recent record, and whether that stance
@@ -55,7 +55,8 @@ defmodule ReactiveDag.Attestation do
           reason: String.t() | nil,
           basis: String.t(),
           basis_version: pos_integer(),
-          signed_at: DateTime.t()
+          signed_at: DateTime.t(),
+          meta: map() | nil
         }
 
   @doc "The id of the store's leaf cell (config `:attestation_cell`)."
@@ -66,8 +67,10 @@ defmodule ReactiveDag.Attestation do
   Record that `who` AFFIRMS `scope` of `cell_id` as it currently stands. The
   basis is digested from the rows the scope selects right now (pass `rows:` to
   supply them, e.g. in a transaction that just read them). `reason:` is
-  optional on an affirmation. `actor:` is passed through to Ash — with a
-  `who_from_actor` on the record resource, the signer is derived from it.
+  optional on an affirmation. `meta:` (a map) rides on the record and comes
+  back on every read — host context like a ticket id or a UI origin. `actor:`
+  is passed through to Ash — with a `who_from_actor` on the record resource,
+  the signer is derived from it.
 
   Returns `{:ok, record, changed_leaf_keys}` — the changed keys are for marking
   the store's leaf cell dirty (`leaf_cell/0`).
@@ -165,6 +168,12 @@ defmodule ReactiveDag.Attestation do
       signed_at: Keyword.get(opts, :signed_at, DateTime.utc_now())
     }
 
+    attrs =
+      case Keyword.fetch(opts, :meta) do
+        {:ok, meta} -> Map.put(attrs, :meta, meta)
+        :error -> attrs
+      end
+
     created =
       resource()
       |> Ash.Changeset.for_create(
@@ -190,7 +199,8 @@ defmodule ReactiveDag.Attestation do
       reason: struct.reason,
       basis: struct.basis,
       basis_version: struct.basis_version,
-      signed_at: struct.signed_at
+      signed_at: struct.signed_at,
+      meta: struct.meta
     }
   end
 
