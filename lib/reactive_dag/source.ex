@@ -19,17 +19,18 @@ defmodule ReactiveDag.Source do
 
   The scanner↔leaf binding has ONE home, chosen by cardinality:
 
-    * **1:1 (the common case) — inline on the leaf.** `observed :machines, scan:
-      MyApp.Sources.FleetScan` co-locates the leaf and its scanner in one
-      declaration (they travel together). `ReactiveDag.Source.drivers/2` reads
-      these off the graph.
+    * **1:1 (the common case) — inline on the leaf.** `source :fleet_scan` /
+      `driver MyApp.Sources.FleetScan` in the leaf's `reactive` block co-locates
+      the leaf and its scanner in one declaration (they travel together).
+      `ReactiveDag.Source.drivers/2` reads these off the graph (each leaf cell's
+      `meta.driver`).
     * **fan-out (rare) — on the driver.** A scanner that writes cells no single
-      `observed` owns (e.g. many guarantee sub-cells) omits `scan:` and names its
-      cells via its own `leaf_cells/1`; the host passes it as an `extra` driver.
+      leaf owns (e.g. many guarantee sub-cells) has no inline `driver` and names
+      its cells via its own `leaf_cells/1`; the host passes it as an `extra`
+      driver.
 
   Either way `verify!/2` confirms every named leaf is a real cell in the built
-  plan. `leaf_cells/1` is the general contract both paths satisfy (an inline
-  `scan:` driver's leaf is just the `observed` it's attached to).
+  plan (an inline driver's leaf is the node it's declared on).
 
   ## The contract
 
@@ -177,11 +178,12 @@ defmodule ReactiveDag.Source do
   end
 
   @doc """
-  The scanner drivers feeding a lowered `graph`: the inline ones declared on
-  `observed :x, scan: Driver` (read from each leaf cell's `meta.scan`), unioned
-  with any `extra` fan-out drivers a host passes (drivers that name their cells via
-  `leaf_cells/1` because no single leaf owns them). This is the full scanner set —
-  feed it to `verify!/2`, poll it in phase 1.
+  The scanner drivers feeding a lowered `graph`: the inline ones declared with
+  `driver MyApp.Sources.FleetScan` on a leaf's `reactive` block (read from each
+  leaf cell's `meta.driver`), unioned with any `extra` fan-out drivers a host
+  passes (drivers that name their cells via `leaf_cells/1` because no single
+  leaf owns them). This is the full scanner set — feed it to `verify!/2`, poll
+  it in phase 1.
   """
   @spec drivers(graph(), [module()]) :: [module()]
   def drivers(graph, extra \\ []) do
@@ -189,7 +191,7 @@ defmodule ReactiveDag.Source do
       graph.cells
       |> Map.values()
       |> Enum.flat_map(fn cell ->
-        case cell.meta[:scan] do
+        case cell.meta[:driver] do
           nil -> []
           driver -> [driver]
         end

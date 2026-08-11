@@ -68,6 +68,49 @@ defmodule ReactiveDag.SourceTest do
     end
   end
 
+  describe "drivers/2 (the inline scanner binding, through the real DSL)" do
+    defmodule Domain do
+      use Ash.Domain, validate_config_inclusion?: false
+
+      resources do
+        allow_unregistered?(true)
+      end
+    end
+
+    defmodule FleetScan do
+      def id, do: :fleet_scan
+      def leaf_cell, do: :machines
+      def poll(_), do: {:ok, %{changed: []}}
+    end
+
+    defmodule Machines do
+      use Ash.Resource,
+        domain: Domain,
+        data_layer: Ash.DataLayer.Simple,
+        extensions: [ReactiveDag.Node]
+
+      reactive do
+        op(:source)
+        leaf?(true)
+        source(:fleet_scan)
+        driver(ReactiveDag.SourceTest.FleetScan)
+      end
+    end
+
+    test "an inline `driver` declared in the reactive block is found on the graph" do
+      # regression: drivers/2 read meta[:scan], which the DSL never writes — every
+      # inline scanner silently vanished and verify!/2 verified an empty list.
+      plan = ReactiveDag.Node.graph([Machines])
+      assert ReactiveDag.Source.drivers(plan) == [FleetScan]
+      assert :ok = ReactiveDag.Source.verify!(ReactiveDag.Source.drivers(plan), plan)
+    end
+
+    test "extra fan-out drivers union in, deduped" do
+      plan = ReactiveDag.Node.graph([Machines])
+      assert ReactiveDag.Source.drivers(plan, [FleetScan, OneLeaf]) == [FleetScan, OneLeaf]
+    end
+  end
+
   describe "verify_cells!/2 (pre-resolved pairs — the fallback path)" do
     test "passes for resolved pairs whose cells all exist" do
       assert :ok =
