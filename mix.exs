@@ -3,10 +3,14 @@ defmodule ReactiveDag.MixProject do
 
   @moduledoc false
 
+  # release-please manages this version (and the tag/CHANGELOG) via the
+  # annotation below — bump it by merging the release PR, not by hand.
+  @version "0.16.0" # x-release-please-version
+
   def project do
     [
       app: :reactive_dag,
-      version: "0.16.0",
+      version: @version,
       elixir: "~> 1.18",
       description:
         "Reactive DAG engine as an Ash extension: a dirty frontier + depth-ordered " <>
@@ -25,7 +29,7 @@ defmodule ReactiveDag.MixProject do
     [
       main: "getting-started",
       source_url: "https://github.com/u2i/reactive_dag",
-      source_ref: "v0.16.0",
+      source_ref: "v#{@version}",
       extras: [
         "guides/getting-started.md",
         "guides/authoring-nodes.md",
