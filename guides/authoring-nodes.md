@@ -317,6 +317,11 @@ computation stays a first-class action: arguments, policies, testable with
 does its own domain writes, and the library `Op.put`s each returned key. The
 action must exist and be generic — verified at compile time.
 
+An **LLM node** is this rung with an [ash_ai](https://hexdocs.pm/ash_ai)
+prompt-backed action behind it — no library code required. See
+[LLM nodes](llm-nodes.html) for the shape, the `ref` vs `context` billing
+distinction, and how to test one without a model.
+
 ### `compute` — the outermost escape hatch
 
 ```elixir

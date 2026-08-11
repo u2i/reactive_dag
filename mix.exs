@@ -41,6 +41,7 @@ defmodule ReactiveDag.MixProject do
       extras: [
         "guides/getting-started.md",
         "guides/authoring-nodes.md",
+        "guides/llm-nodes.md",
         "guides/sources.md",
         "guides/attestations.md",
         "guides/seams.md",
@@ -96,6 +97,10 @@ defmodule ReactiveDag.MixProject do
       {:ash, "~> 3.5"},
       {:ash_postgres, "~> 2.0"},
       {:spark, "~> 2.7"},
+      # TEST-ONLY: proves an ash_ai prompt-backed action composes with `run`,
+      # so an LLM node needs no library code (see guides/llm-nodes.md). Never a
+      # runtime dependency — hosts that want LLM nodes add ash_ai themselves.
+      {:ash_ai, "~> 0.8", only: :test},
       {:ex_doc, "~> 0.34", only: :dev, runtime: false}
     ]
   end
