@@ -93,11 +93,23 @@ defmodule ReactiveDag.Source do
 
   @doc """
   Poll the external source: fetch → write the leaf tuples → return the leaf keys
-  that changed. `{:error, reason}` when it couldn't run (no credential, API down)
-  — contained, not raised, so one bad source doesn't abort a refresh. `arg` is
-  source-specific (a since-timestamp, a manifest path, opts).
+  that changed. `{:error, reason}` when it couldn't run at all (no credential,
+  API down) — contained, not raised, so one bad source doesn't abort a refresh.
+  `arg` is source-specific (a since-timestamp, a manifest path, opts).
+
+  A multi-upstream source that could observe SOME of its inputs reports the
+  others under the optional `unreachable:` key (`{upstream_label, reason}`
+  pairs) — the honest-gap discipline: a scan that couldn't look must never
+  render as a scan that found nothing, so write what you observed, retire
+  nothing you couldn't see, and surface the outage for the host to display.
   """
-  @callback poll(arg :: term()) :: {:ok, %{changed: [String.t()]}} | {:error, term()}
+  @callback poll(arg :: term()) ::
+              {:ok,
+               %{
+                 :changed => [String.t()],
+                 optional(:unreachable) => [{String.t(), term()}]
+               }}
+              | {:error, term()}
 
   @doc """
   Optional lineage for display: where this source's data comes from, as a map like
