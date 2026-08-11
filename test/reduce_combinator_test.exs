@@ -1,175 +1,154 @@
 defmodule ReactiveDag.ReduceCombinatorTest do
   @moduledoc """
-  The declarative `reduce` combinator on the reactive block: the author writes
-  only read/group_by/key/into/upsert; Node.Recompute runs the fold (group →
-  reduce → upsert → Op.put the changed keys). Escape hatch (`compute: Module`)
-  stays for arbitrary recomputes.
+  The `reduce` combinator's MECHANICS through its fn escape hatches: fn
+  group/key/into slots, the `upsert:` write override (write-elsewhere shape),
+  the `query:` transformer (shaping the Ash read without leaving Ash), and the
+  library-owned dirty-key scoping the transformer composes with.
   """
   use ExUnit.Case, async: false
 
   alias ReactiveDag.Node.Recompute
 
-  defmodule Writer do
-    @behaviour ReactiveDag.CoordinationWriter
-    @impl true
-    def put(cell_id, key, _opts), do: send(self(), {:put, cell_id, key})
-    @impl true
-    def delete(cell_id, keys), do: send(self(), {:delete, cell_id, keys})
-  end
-
   defmodule Domain do
     use Ash.Domain, validate_config_inclusion?: false
+
     resources do
       allow_unregistered?(true)
     end
   end
 
-  # a fold node: total `value` per {fund, fy} over the :lines input. `read`
-  # returns the (host) payload items; `upsert` records the row + reports changed.
-  defmodule Rollups do
-    use Ash.Resource, domain: Domain, data_layer: Ash.DataLayer.Simple, extensions: [ReactiveDag.Node]
+  defmodule Lines do
+    use Ash.Resource,
+      domain: Domain,
+      data_layer: Ash.DataLayer.Ets,
+      extensions: [ReactiveDag.Node]
+
+    ets do
+      private?(true)
+    end
+
+    attributes do
+      attribute :k, :string, primary_key?: true, allow_nil?: false, public?: true
+      attribute :fp, :string, public?: true
+      attribute :flagged, :boolean, public?: true, default: false
+    end
+
+    actions do
+      defaults [:read, :destroy]
+
+      create :create do
+        accept([:k, :fp, :flagged])
+      end
+    end
 
     reactive do
-      id :rollups
-      op :fold
-      key_rule :all
+      id(:lines)
+      op(:source)
+      leaf?(true)
+      payload_key(:k)
+    end
+  end
+
+  # write-elsewhere shape: fn slots + an upsert: override that captures writes
+  # and decides changed-ness (the host's fingerprint idiom).
+  defmodule Summary do
+    use Ash.Resource,
+      domain: Domain,
+      data_layer: Ash.DataLayer.Simple,
+      extensions: [ReactiveDag.Node]
+
+    reactive do
+      id(:summary)
+      op(:map)
 
       reduce over: :lines,
-             read: fn :lines -> Process.get(:test_lines, []) end,
-             group_by: fn line -> {line.fund, line.fy} end,
-             key: fn {fund, fy} -> "#{fund}|#{fy}" end,
-             into: fn {fund, fy}, lines ->
-               %{fund: fund, fy: fy, total: lines |> Enum.map(& &1.value) |> Enum.sum()}
+             query: fn q, dirty ->
+               send(ReactiveDag.ReduceCombinatorTest, {:query, dirty})
+               q
              end,
+             group_by: fn line -> line.k end,
+             key: fn k -> k end,
+             into: fn _k, [line | _] -> %{fp: line.fp} end,
              upsert: fn key, row ->
-               send(self(), {:upsert, key, row})
-               # "changed" iff the total is non-zero (a toy criterion).
-               row.total != 0
+               send(ReactiveDag.ReduceCombinatorTest, {:upsert, key, row})
+               # the host's change detection: flagged lines "changed"
+               String.starts_with?(row.fp, "new")
              end
     end
   end
 
-  setup do
-    prev = Application.get_env(:reactive_dag, :coordination_writer)
-    Application.put_env(:reactive_dag, :coordination_writer, Writer)
-    on_exit(fn -> Application.put_env(:reactive_dag, :coordination_writer, prev) end)
-    :ok
-  end
-
-  test "the reduce spec rides in the cell's meta with over as an input edge" do
-    cell = ReactiveDag.Node.to_cell(Rollups)
-    assert cell.op == :fold
-    assert cell.inputs == ["lines"]
-    assert %ReactiveDag.Node.Reduce{over: :lines} = cell.meta.reduce
-  end
-
-  test "recompute runs the fold: group → reduce → upsert → Op.put the changed keys" do
-    Process.put(:test_lines, [
-      %{fund: "A", fy: "25", value: 10.0},
-      %{fund: "A", fy: "25", value: 5.0},
-      %{fund: "B", fy: "25", value: 0.0}
-    ])
-
-    cell = ReactiveDag.Node.to_cell(Rollups)
-    {:ok, changed} = Recompute.recompute(cell, ["*"])
-
-    # A|25 summed to 15 (changed); B|25 summed to 0 (upsert reported unchanged).
-    assert changed == ["A|25"]
-    assert_received {:upsert, "A|25", %{total: total_a}}
-    assert total_a == 15.0
-    assert_received {:upsert, "B|25", %{total: total_b}}
-    assert total_b == 0.0
-    # only the CHANGED key got a coordination put.
-    assert_received {:put, "rollups", "A|25"}
-    refute_received {:put, "rollups", "B|25"}
-  end
-
-  test "the compute-module escape hatch still works alongside reduce" do
-    # a node WITHOUT a reduce still dispatches to meta.compute.
-    defmodule EchoOp do
-      @behaviour ReactiveDag.Op
-      @impl true
-      def recompute(_cell, keys), do: {:ok, keys}
-    end
-
-    cell = %ReactiveDag.Cell{id: "x", op: :map, meta: %{compute: EchoOp}}
-    assert {:ok, ["k"]} = Recompute.recompute(cell, ["k"])
-  end
-
-  # ── dirty-key scoping: an arity-2 `read` receives the claimed keys ──────────
-  defmodule Scoped do
-    use Ash.Resource, domain: Domain, data_layer: Ash.DataLayer.Simple, extensions: [ReactiveDag.Node]
-
-    reactive do
-      id :scoped
-      op :fold
-      key_rule :all
-      # arity-2 read: record the scope it was handed, then read only those keys.
-      reduce over: :lines,
-             read: &ReactiveDag.ReduceCombinatorTest.scoped_read/2,
-             group_by: & &1.k,
-             key: & &1,
-             into: fn k, _items -> %{key: k} end,
-             upsert: fn _k, _row -> true end
-    end
-  end
-
-  def scoped_read(:lines, scope) do
-    send(self(), {:read_scope, scope})
-    (scope || ["all"]) |> Enum.map(&%{k: &1})
-  end
-
-  test "arity-2 read is handed the dirty keys (scoped), nil on whole-cell" do
-    cell = ReactiveDag.Node.to_cell(Scoped)
-
-    # specific dirty keys → the read sees exactly them (a datastore scan can filter)
-    {:ok, _} = Recompute.recompute(cell, ["x", "y"])
-    assert_received {:read_scope, ["x", "y"]}
-
-    # whole-cell ("*") → the read sees nil (read everything)
-    {:ok, _} = Recompute.recompute(cell, ["*"])
-    assert_received {:read_scope, nil}
-  end
-
-  # ── coordination_opts: extension columns flow through the payload loop ──────
-  defmodule OptsWriter do
+  defmodule NullWriter do
     @behaviour ReactiveDag.CoordinationWriter
     @impl true
-    def put(cell_id, key, opts), do: send(ReactiveDag.ReduceCombinatorTest, {:put_opts, cell_id, key, opts})
+    def put(_cell_id, _key, _opts), do: :ok
     @impl true
     def delete(_cell_id, _keys), do: :ok
   end
 
-  defmodule WithCoordOpts do
-    use Ash.Resource, domain: Domain, data_layer: Ash.DataLayer.Simple, extensions: [ReactiveDag.Node]
-
-    reactive do
-      id :with_coord
-      op :fold
-      key_rule :all
-      # the node declares extension-column opts for its coordination write.
-      coordination_opts fn key, row -> [source_ref: %{"fp" => row.fp}, key: key] end
-
-      reduce over: :lines,
-             read: fn :lines -> [%{k: "a", fp: "h1"}] end,
-             group_by: & &1.k,
-             key: & &1.k,
-             into: fn _k, [item] -> %{key: item.k, fp: item.fp} end,
-             upsert: fn _k, _row -> true end
-    end
-  end
-
-  test "coordination_opts flows to the CoordinationWriter (extension columns in the loop)" do
+  setup do
     Process.register(self(), ReactiveDag.ReduceCombinatorTest)
     prev = Application.get_env(:reactive_dag, :coordination_writer)
-    Application.put_env(:reactive_dag, :coordination_writer, OptsWriter)
+    Application.put_env(:reactive_dag, :coordination_writer, NullWriter)
     on_exit(fn -> Application.put_env(:reactive_dag, :coordination_writer, prev) end)
 
-    cell = ReactiveDag.Node.to_cell(WithCoordOpts)
-    {:ok, _} = Recompute.recompute(cell, ["*"])
+    for {k, fp} <- [{"a", "new-h1"}, {"b", "old-h2"}, {"c", "new-h3"}] do
+      Lines |> Ash.Changeset.for_create(:create, %{k: k, fp: fp}) |> Ash.create!()
+    end
 
-    # the Op.put carried the node's extension opts (source_ref fingerprint)
-    assert_received {:put_opts, "with_coord", "a", opts}
-    assert opts[:source_ref] == %{"fp" => "h1"}
+    :ok
+  end
+
+  defp cell, do: ReactiveDag.Node.graph([Lines, Summary]).cells["summary"]
+
+  test "fn slots + upsert override: writes captured, only upsert-true keys propagate" do
+    {:ok, changed} = Recompute.recompute(cell(), ["*"])
+
+    # every group was written…
+    for k <- ["a", "b", "c"], do: assert_received({:upsert, ^k, _row})
+    # …but only the ones the host reported as changed propagate
+    assert Enum.sort(changed) == ["a", "c"]
+  end
+
+  test "query: receives the dirty keys, and the library STILL applies the scope" do
+    {:ok, changed} = Recompute.recompute(cell(), ["a"])
+
+    # the transformer saw the claimed keys…
+    assert_received {:query, ["a"]}
+    # …and the library's payload-key filter kept the read to that slice:
+    # only "a" was ever grouped/written.
+    assert_received {:upsert, "a", _}
+    refute_received {:upsert, "b", _}
+    assert changed == ["a"]
+  end
+
+  test "a whole-cell claim reaches query: as nil and reads everything" do
+    {:ok, _} = Recompute.recompute(cell(), ["*"])
+    assert_received {:query, nil}
+    for k <- ["a", "b", "c"], do: assert_received({:upsert, ^k, _})
+  end
+
+  test "into: returning a LIST raises instructively — that shape is expand:" do
+    defmodule ListInto do
+      use Ash.Resource,
+        domain: ReactiveDag.ReduceCombinatorTest.Domain,
+        data_layer: Ash.DataLayer.Simple,
+        extensions: [ReactiveDag.Node]
+
+      reactive do
+        id(:list_into)
+        op(:map)
+
+        reduce over: :lines,
+               group_by: fn l -> l.k end,
+               into: fn k, _ -> [%{key: k}] end,
+               upsert: fn _, _ -> true end
+      end
+    end
+
+    plan = ReactiveDag.Node.graph([Lines, ListInto])
+
+    assert_raise RuntimeError, ~r/ONE row per group.*expand/s, fn ->
+      Recompute.recompute(plan.cells["list_into"], ["*"])
+    end
   end
 end

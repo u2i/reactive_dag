@@ -23,6 +23,7 @@ defmodule ReactiveDag.Node.Recompute do
 
   require Logger
   alias ReactiveDag.Cell
+  alias ReactiveDag.Node.Recompute.{Declarative, Read}
 
   @impl true
   def recompute(%Cell{leaf?: true}, keys), do: {:ok, keys}
@@ -37,12 +38,28 @@ defmodule ReactiveDag.Node.Recompute do
   # claimed keys — e.g. `read: fn :fiscal_lines, keys -> FiscalDoc |> filter(keys) end`.
   # `keys` is the claimed dirty set, or `nil` for a whole-cell recompute (`"*"`).
   def recompute(%Cell{meta: %{reduce: %{} = r}} = cell, keys) do
+    group_by = Declarative.group_fn(r.group_by)
+    key_fn = Declarative.key_fn(r.key, r.key_prefix)
+
+    # which slot emits a group's [{key, row}] pairs — the verifier guarantees
+    # exactly the right one is declared for the node's shape.
+    emit =
+      cond do
+        is_function(r.status, 2) ->
+          fn group, items -> [{key_fn.(group), status_row(r.status.(group, items))}] end
+
+        is_function(r.expand, 2) ->
+          fn group, items -> expand_pairs(r.expand.(group, items), cell.id) end
+
+        true ->
+          into = Declarative.into_fn(r.into, r.group_by)
+          fn group, items -> into_pair(into.(group, items), key_fn, group) end
+      end
+
     pairs =
-      read_items(r.read, r.over, scope(keys))
-      |> Enum.group_by(r.group_by)
-      |> Enum.flat_map(fn {group, items} ->
-        group |> r.into.(items) |> rows_with_keys(r, group)
-      end)
+      Read.items(cell.meta[:over_source], r.over, r.query, scope(keys))
+      |> Enum.group_by(group_by)
+      |> Enum.flat_map(fn {group, items} -> emit.(group, items) end)
 
     {:ok, materialize(cell, pairs, r.upsert)}
   end
@@ -54,21 +71,26 @@ defmodule ReactiveDag.Node.Recompute do
   # reconcile shape, where an undeclared right-side member is a finding.
   # `read` may be arity-2 for dirty-key scoping (see `reduce` above).
   def recompute(%Cell{meta: %{join: %{} = j}} = cell, keys) do
-    items = read_items(j.read, j.over, scope(keys))
-    left = index(items, j.left)
-    right = index(items, j.right)
+    items = Read.items(cell.meta[:over_source], j.over, j.query, scope(keys))
+    left = index(items, Declarative.side_fn(j.left))
+    right = index(items, Declarative.side_fn(j.right))
+    key_fn = Declarative.key_fn(j.key, j.key_prefix)
+
+    emit =
+      if is_function(j.status, 3) do
+        fn jk, l, r -> [{key_fn.(jk), status_row(j.status.(jk, l, r))}] end
+      else
+        into = Declarative.join_into_fn(j.into)
+        fn jk, l, r -> into_pair(into.(jk, l, r), key_fn, jk) end
+      end
 
     left_pairs =
-      Enum.flat_map(left, fn {jk, litem} ->
-        j.into.(jk, litem, Map.get(right, jk)) |> rows_with_keys(j, jk)
-      end)
+      Enum.flat_map(left, fn {jk, litem} -> emit.(jk, litem, Map.get(right, jk)) end)
 
     right_only_pairs =
       if Map.get(j, :outer, false) do
         Enum.flat_map(right, fn {jk, ritem} ->
-          if Map.has_key?(left, jk),
-            do: [],
-            else: j.into.(jk, nil, ritem) |> rows_with_keys(j, jk)
+          if Map.has_key?(left, jk), do: [], else: emit.(jk, nil, ritem)
         end)
       else
         []
@@ -88,6 +110,34 @@ defmodule ReactiveDag.Node.Recompute do
     {:ok, ReactiveDag.Node.Recompute.Aggregate.recompute(cell, resource, agg)}
   end
 
+  # the ASH-NATIVE escape hatch: a GENERIC action on the node's own resource
+  # (`run :recompute_keys`). The action does its own DOMAIN writes and returns
+  # the changed keys; the library passes only the arguments the action declares
+  # (keys / cell_id) and closes the coordination loop with Op.put — an action
+  # has no %Cell{} to put through, so coordination stays the library's job,
+  # exactly as in the payload loop. MUST precede the compute-nil clause: a run
+  # node's meta carries compute: nil too.
+  def recompute(%Cell{meta: %{run: action, resource: resource}} = cell, keys)
+      when is_atom(action) and not is_nil(action) and not is_nil(resource) do
+    params =
+      %{keys: scope(keys), cell_id: cell.id}
+      |> Map.take(declared_args(resource, action))
+
+    case resource |> Ash.ActionInput.for_action(action, params) |> Ash.run_action() do
+      {:ok, changed} when is_list(changed) ->
+        Enum.each(changed, &ReactiveDag.Op.put(cell, &1))
+        {:ok, changed}
+
+      {:ok, other} ->
+        raise "reactive_dag: run action #{inspect(action)} on #{inspect(resource)} must " <>
+                "return the changed keys (`{:array, :string}`), got: #{inspect(other)}"
+
+      {:error, error} ->
+        raise "reactive_dag: run action #{inspect(action)} on #{inspect(resource)} failed: " <>
+                Exception.message(error)
+    end
+  end
+
   def recompute(%Cell{meta: %{compute: nil}, id: id}, keys) do
     Logger.warning("reactive_dag: node #{inspect(id)} has no compute module; passing keys through")
     {:ok, keys}
@@ -101,6 +151,14 @@ defmodule ReactiveDag.Node.Recompute do
   # treat like a leaf: pass through.
   def recompute(%Cell{}, keys), do: {:ok, keys}
 
+  # the arguments a `run` action declares — the library passes only these.
+  defp declared_args(resource, action) do
+    case Ash.Resource.Info.action(resource, action) do
+      %{arguments: args} -> Enum.map(args, & &1.name)
+      nil -> []
+    end
+  end
+
   # the claimed keys as a read scope: `nil` for a whole-cell recompute (`"*"`),
   # else the specific dirty keys a scoped `read` can filter its query to.
   defp scope(keys) do
@@ -111,32 +169,38 @@ defmodule ReactiveDag.Node.Recompute do
     end
   end
 
-  # call a combinator's `read`: arity-1 (`over -> items`, whole-cell) or arity-2
-  # (`over, scope -> items`) for dirty-key scoping. A whole-cell recompute passes
-  # `nil` scope to the arity-2 form (read everything).
-  defp read_items(read, over, scope) when is_function(read, 2), do: read.(over, scope)
-  defp read_items(read, over, _scope) when is_function(read, 1), do: read.(over)
+  # a `status:` result → the verdict row (`{status, strength}` when the host's
+  # tuple carries strength).
+  defp status_row({status, strength}), do: %{status: status, strength: strength}
+  defp status_row(status), do: %{status: status}
 
-  # normalize an `into` result (one row or a list) into `[{key, row}]`. Key
-  # resolution: a row that carries its own `:key` field SELF-IDENTIFIES (expand
-  # rows must, since one group → many keys); otherwise the spec's `key` fn is
-  # applied to the group term (the fold case, one row per group). Row-key wins so
-  # the `length == 1` ambiguity (a group that expands to exactly one row) is moot.
-  defp rows_with_keys(row_or_rows, spec, group_term) do
-    key_fn = Map.get(spec, :key)
+  # an `into:` result is ONE row: its own `:key` wins (a self-identified row),
+  # else the key derives from the group term / join key. A list here is the
+  # old expand overload — point at the `expand:` slot.
+  defp into_pair(rows, _key_fn, _term) when is_list(rows) do
+    raise "reactive_dag: `into:` returns ONE row per group — the group → many-rows " <>
+            "shape is the `expand:` slot (each row carrying its own :key)"
+  end
 
-    row_or_rows
-    |> List.wrap()
-    |> Enum.map(fn row ->
-      key =
-        cond do
-          is_map(row) and is_map_key(row, :key) -> row.key
-          is_function(key_fn, 1) -> key_fn.(group_term)
-          true -> raise "reactive_dag: cannot resolve a coordination key for row #{inspect(row)}"
-        end
+  defp into_pair(row, key_fn, term) when is_map(row) do
+    key = if is_map_key(row, :key), do: row.key, else: key_fn.(term)
+    [{key, row}]
+  end
 
-      {key, row}
+  # `expand:` rows fan one group out to many keys, so each row must self-key.
+  defp expand_pairs(rows, cell_id) when is_list(rows) do
+    Enum.map(rows, fn
+      %{key: key} = row ->
+        {key, row}
+
+      row ->
+        raise "reactive_dag: #{cell_id}: an `expand:` row must carry its own :key " <>
+                "(one group fans out to many keys) — got #{inspect(row)}"
     end)
+  end
+
+  defp expand_pairs(other, cell_id) do
+    raise "reactive_dag: #{cell_id}: `expand:` must return a LIST of rows, got #{inspect(other)}"
   end
 
   # write each {key, row}, Op.put the changed keys, return them. Shared by

@@ -15,9 +15,10 @@ defmodule ReactiveDag.PayloadLoopTest do
     end
   end
 
-  # the input the fold reads (raw per-day flow rows).
+  # the input the fold reads (raw per-day flow rows) — a leaf NODE, so the
+  # rollup's declarative read can resolve its resource at assembly.
   defmodule DmrRow do
-    use Ash.Resource, domain: Domain, data_layer: Ash.DataLayer.Ets
+    use Ash.Resource, domain: Domain, data_layer: Ash.DataLayer.Ets, extensions: [ReactiveDag.Node]
     ets do private?(true) end
     attributes do
       attribute :id, :string, primary_key?: true, allow_nil?: false, public?: true
@@ -28,6 +29,13 @@ defmodule ReactiveDag.PayloadLoopTest do
     actions do
       defaults [:read, :destroy]
       create :create do accept([:id, :plant, :month, :flow]) end
+    end
+
+    reactive do
+      id :dmr_rows
+      op :source
+      leaf? true
+      payload_key :id
     end
   end
 
@@ -56,17 +64,16 @@ defmodule ReactiveDag.PayloadLoopTest do
       op :fold
       key_rule :all
 
-      # NB: no `upsert:` — into returns the row, the library writes it into THIS
-      # resource (keyed by :key) and does the Op.put.
+      # NB: no `read:` (the library reads :dmr_rows itself) and no `upsert:` —
+      # into returns the row, the library writes it into THIS resource (keyed
+      # by :key) and does the Op.put. group/key/into stay fn escapes here.
       reduce over: :dmr_rows,
-             read: &ReactiveDag.PayloadLoopTest.read_rows/1,
              group_by: &ReactiveDag.PayloadLoopTest.group/1,
              key: &ReactiveDag.PayloadLoopTest.key/1,
              into: &ReactiveDag.PayloadLoopTest.into/2
     end
   end
 
-  def read_rows(:dmr_rows), do: Ash.read!(DmrRow)
   def group(r), do: {r.plant, r.month}
   def key({plant, month}), do: "#{plant}|#{month}"
 
@@ -99,8 +106,10 @@ defmodule ReactiveDag.PayloadLoopTest do
     :ok
   end
 
+  defp cell, do: ReactiveDag.Node.graph([DmrRow, FlowMonth]).cells["flow_month"]
+
   test "the lib writes the node's own payload (no upsert:) and reports changed keys" do
-    cell = ReactiveDag.Node.to_cell(FlowMonth)
+    cell = cell()
 
     # recompute with no host upsert callback — the lib closes the loop into FlowMonth
     {:ok, changed} = ReactiveDag.Node.Recompute.recompute(cell, ["*"])
@@ -115,7 +124,7 @@ defmodule ReactiveDag.PayloadLoopTest do
   end
 
   test "a second identical recompute is a no-op (change detection): no keys reported changed" do
-    cell = ReactiveDag.Node.to_cell(FlowMonth)
+    cell = cell()
 
     {:ok, _first} = ReactiveDag.Node.Recompute.recompute(cell, ["*"])
     {:ok, second} = ReactiveDag.Node.Recompute.recompute(cell, ["*"])
@@ -125,7 +134,7 @@ defmodule ReactiveDag.PayloadLoopTest do
   end
 
   test "meta.resource is what the lib writes into (the field is now USED, not just carried)" do
-    cell = ReactiveDag.Node.to_cell(FlowMonth)
+    cell = cell()
     assert cell.meta.resource == FlowMonth
     assert cell.meta.reduce.upsert == nil     # no override — the lib owns the write
   end
