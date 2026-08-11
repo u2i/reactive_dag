@@ -1,0 +1,24 @@
+name: publish
+
+# release-please cuts the GitHub Release; publishing that release pushes the
+# package (and its hexdocs) to hex.pm.
+on:
+  release:
+    types: [published]
+
+permissions:
+  contents: read
+
+jobs:
+  hex-publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: erlef/setup-beam@v1
+        with:
+          version-file: .tool-versions
+          version-type: strict
+      - run: mix deps.get
+      - run: mix hex.publish --yes
+        env:
+          HEX_API_KEY: ${{ secrets.HEX_API_KEY }}

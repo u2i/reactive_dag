@@ -13,15 +13,23 @@ defmodule ReactiveDag.MixProject do
       version: @version,
       elixir: "~> 1.18",
       description:
-        "Reactive DAG engine as an Ash extension: a dirty frontier + depth-ordered " <>
-          "incremental drain + change propagation + a shared coordination-tuple spine. " <>
-          "Author nodes as Ash resources (the `ReactiveDag.Node` extension) with " <>
-          "reduce/join/expand combinators, or bring your own cells. Domain plugs in at " <>
-          "three seams: recompute strategy (per-key Elixir or set-based SQL), key rule, " <>
-          "and coordination writer.",
+        "Reactive DAG engine as an Ash extension: dirty frontier, depth-ordered " <>
+          "incremental drain, change propagation, and a shared coordination-tuple " <>
+          "spine. Author nodes as Ash resources with reduce/join/aggregate " <>
+          "combinators; the domain plugs in at three seams.",
       elixirc_paths: elixirc_paths(Mix.env()),
       deps: deps(),
-      docs: docs()
+      docs: docs(),
+      package: package()
+    ]
+  end
+
+  defp package do
+    [
+      licenses: ["MIT"],
+      links: %{"GitHub" => "https://github.com/u2i/reactive_dag"},
+      # guides/ + docs/ ship in the package so hexdocs can build the extras
+      files: ~w(lib guides docs mix.exs README.md LICENSE)
     ]
   end
 
