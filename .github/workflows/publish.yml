@@ -1,10 +1,13 @@
 name: publish
 
 # release-please cuts the GitHub Release; publishing that release pushes the
-# package (and its hexdocs) to hex.pm.
+# package (and its hexdocs) to hex.pm. NOTE: a release event runs the workflow
+# file AT THE RELEASE TAG, so this only fires for tags that contain this file.
+# workflow_dispatch is the manual escape hatch (publishes the checked-out ref).
 on:
   release:
     types: [published]
+  workflow_dispatch:
 
 permissions:
   contents: read
