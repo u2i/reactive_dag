@@ -29,10 +29,12 @@ defmodule ReactiveDag.SetOp do
   alias ReactiveDag.Cell
 
   @impl true
-  def recompute(%Cell{leaf?: true} = cell, keys) do
-    # a leaf's tuples were written by its source; its changed keys ARE its dirty
-    # keys (or, whole-cell, its current keys via the shared spine).
-    if "*" in keys, do: {:ok, ReactiveDag.Tuple.all_keys(cell.id)}, else: {:ok, keys}
+  def recompute(%Cell{leaf?: true}, keys) do
+    # In a real drain this clause never runs — ReactiveDag.Drain passes a
+    # leaf's claimed keys through itself (and escalates a "*" claim to :all
+    # downstream). It exists for hosts calling the strategy directly (unit
+    # tests), and mirrors the drain's behavior exactly so the two paths agree.
+    {:ok, keys}
   end
 
   def recompute(%Cell{op: op} = cell, keys) do

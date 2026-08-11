@@ -49,6 +49,9 @@ defmodule ReactiveDag.Migration do
       add(:enqueued_at, :utc_datetime_usec)
     end
 
+    # one index serves everything: uniqueness backs mark_dirty's ON CONFLICT,
+    # and its leading column (cell_id) covers claim's WHERE and next_cell's
+    # SELECT DISTINCT cell_id as an index-only scan.
     create_if_not_exists(unique_index(name, [:cell_id, :key]))
   end
 

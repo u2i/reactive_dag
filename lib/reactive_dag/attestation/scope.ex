@@ -16,9 +16,12 @@ defmodule ReactiveDag.Attestation.Scope do
   A scope is stored on the record as text, and that text is load-bearing twice:
   it is the IDENTITY of what was signed (stances group by it), and for a filter
   it is re-parsed at evaluation time to re-select the current set. So the
-  serialization must be canonical — same scope, same text, always — and
-  versioned (the leading segment), so a format change cannot orphan or
-  mis-group existing records.
+  serialization must be canonical — same scope, same text, always — and carries
+  a version segment so a format change is DETECTABLE. This build accepts only
+  v1: `parse/1` raises on any other version (deliberately — a scope that cannot
+  be re-selected must not silently mis-group). Cross-version *tolerance* lives
+  one level down, in `ReactiveDag.Attestation.Basis`, where an unknown digest
+  version degrades to re-ask rather than an error.
 
   Fields are joined with the unit separator (`0x1F`), which the spine's key
   grammar has no business containing — unlike `|` or `:`, which hosts routinely

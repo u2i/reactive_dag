@@ -2,7 +2,10 @@ defmodule ReactiveDag.Frontier do
   @moduledoc """
   The dirty frontier, owned by the library and backed by the `reactive_dag_dirty`
   table (created by `ReactiveDag.Migration`). The host is an Ash/AshPostgres app,
-  so we go through its repo with parameterized SQL — claim-as-delete is a raw
+  so we go through its repo with raw SQL — values always parameterized; the
+  table name (the one identifier SQL cannot parameterize) comes from config and
+  is validated against an identifier grammar at read time, so a typo fails
+  loudly instead of as a syntax error deep in a query. Claim-as-delete is a raw
   `DELETE … RETURNING` that Ash actions don't express cleanly.
 
   The host supplies its `repo` (its AshPostgres repo module) via config, and may
@@ -83,5 +86,14 @@ defmodule ReactiveDag.Frontier do
       raise "reactive_dag: set `config :reactive_dag, repo: MyApp.Repo`"
   end
 
-  defp dirty, do: Application.get_env(:reactive_dag, :dirty_table, @default_dirty)
+  defp dirty do
+    name = Application.get_env(:reactive_dag, :dirty_table, @default_dirty)
+
+    if name =~ ~r/\A[a-zA-Z_][a-zA-Z0-9_]*\z/ do
+      name
+    else
+      raise ArgumentError,
+            "reactive_dag: dirty_table #{inspect(name)} is not a valid table identifier"
+    end
+  end
 end

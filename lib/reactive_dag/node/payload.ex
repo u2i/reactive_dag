@@ -20,7 +20,7 @@ defmodule ReactiveDag.Node.Payload do
 
   ## Change detection
 
-  `upsert/4` reads the existing row first and compares the writable attributes; it
+  `upsert/5` reads the existing row first and compares the writable attributes; it
   returns `:changed` only when a create or a real value change happened, so the
   drain's `Op.put`/parent-dirty only fires for genuine changes (a no-op recompute
   stays a no-op). Requires an upsert action on the resource — by default the

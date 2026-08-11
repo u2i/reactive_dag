@@ -276,11 +276,11 @@ defmodule ReactiveDag.Node do
 
   defmodule Join do
     @moduledoc """
-    A declarative JOIN: read an input's payload, index it into a LEFT and a
+    A declarative JOIN: read ONE input's payload, index it into a LEFT and a
     RIGHT side (each a `%{join_key => item}` built from a per-side key fn), then
     emit one row per left key joined to its right item (right may be absent). The
-    common two-input reconcile/variance shape — the author writes the two side
-    keys + the join row, not the read/write/changed plumbing.
+    common declared-vs-observed reconcile/variance shape — the author writes the
+    two side keys + the join row, not the read/write/changed plumbing.
 
     LEFT join by default. `outer: true` makes it a FULL OUTER join: right-only
     keys also emit (`into.(jk, nil, right_item)`), for reconciles where an

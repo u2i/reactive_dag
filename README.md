@@ -33,7 +33,7 @@ decides *how* or *what a value means*. Each host brings its domain at the seams:
 | Graph math | `ReactiveDag.Graph` | `build/1` (validate + parent edges + longest-path depths + cycle check); `dirty_parents/4` (propagation via the host `KeyRule`). |
 | Dirty frontier | `ReactiveDag.Frontier` | claim-as-delete over the host's dirty table; `mark_dirty / next_cell / claim / empty?`. |
 | Drain loop | `ReactiveDag.Drain` | depth-ordered incremental propagation; `run/2` parameterized by the two seams, returning `{:ok, %Drain.Report{}}` — the processing trace (per-step cell/claimed/changed/`triggered_by`/`duration_us` + totals). An optional `:on_step` hook streams the same fields live. |
-| Coordination tuple | `ReactiveDag.Tuple` | the shared `(cell_id, key, status, freshness)` spine over the host's tuple table: `put / present_keys / all_keys / keys_by_status / status_histogram / reconcile / …` + a `:key_scope` selector. Payload stays in the host's typed resources, joined by `key`. |
+| Coordination tuple | `ReactiveDag.Tuple` | the shared `(cell_id, key, status, freshness)` spine over the host's tuple table: `put / put_changed / rows / present_keys / all_keys / keys_by_status / status_histogram / max_observed_at / reconcile / reconcile_set` + a `:key_scope` selector. Payload stays in the host's typed resources, joined by `key`. |
 | Nested-expr lowering | `ReactiveDag.Lowering` | `walk/3` — the nested op-expression → flat-cell recursion both DSLs grew, parameterized by host callbacks (id grammar, ref resolution, cell construction). |
 | Compile pipeline | `ReactiveDag.Dsl` | `compile / validate_cells` — resolve → structural-validate, with a domain-validation hook. |
 | Op contract | `ReactiveDag.Op` | the behaviour a cell's compute module implements (`recompute(cell, keys) -> {:ok, changed}`) + the write API ops call (`put / tombstone / delete`, routed to the `CoordinationWriter`). |
@@ -97,8 +97,9 @@ the node's resource, or a custom `upsert:`) and `Op.put`s only the changed keys:
   `expand` entity; it's this list-returning shape of `reduce`.) `read` may be
   arity-2 (`over, dirty_keys -> items`) to **scope** the datastore read to the
   claimed keys instead of whole-cell — important for large inputs.
-- **`join`** — a two-input left join: index `over` into `left`/`right` sides, emit
-  one row per left key joined to its right (right may be absent).
+- **`join`** — a left join over ONE input's rows, split into `left`/`right`
+  sides by two key fns: emit one row per left key joined to its right (right
+  may be absent).
 - **`aggregate`** — a **pure-Ash-query** fold: the datastore groups + aggregates a
   relationship (`avg`/`sum`/`count`/…) in ONE query — no rows cross into the BEAM.
   The node's resource is the group's resource (one row per group); `over` is its `has_many`. Only for

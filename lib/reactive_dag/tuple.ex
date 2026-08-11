@@ -254,13 +254,12 @@ defmodule ReactiveDag.Tuple do
   @doc "Most-recent `observed_at` across the given cells, or nil if none have rows."
   @spec max_observed_at([String.t()]) :: DateTime.t() | nil
   def max_observed_at(cell_ids) do
-    %{rows: rows} =
+    # an unqualified aggregate always returns exactly one row — SQL NULL (→ nil)
+    # when nothing matches — so this match is total.
+    %{rows: [[ts]]} =
       query!("SELECT max(observed_at) FROM #{table()} WHERE cell_id = ANY($1)", [cell_ids])
 
-    case rows do
-      [[ts]] -> ts
-      _ -> nil
-    end
+    ts
   end
 
   @doc """
@@ -386,5 +385,14 @@ defmodule ReactiveDag.Tuple do
       raise "reactive_dag: set `config :reactive_dag, repo: MyApp.Repo`"
   end
 
-  defp table, do: Application.get_env(:reactive_dag, :tuple_table, @default_table)
+  defp table do
+    name = Application.get_env(:reactive_dag, :tuple_table, @default_table)
+
+    if name =~ ~r/\A[a-zA-Z_][a-zA-Z0-9_]*\z/ do
+      name
+    else
+      raise ArgumentError,
+            "reactive_dag: tuple_table #{inspect(name)} is not a valid table identifier"
+    end
+  end
 end

@@ -18,9 +18,12 @@ defmodule ReactiveDag.KeyRule do
       when their *members* leg changed. `rule/3` sees `parent`, the specific
       `child` (which input), and `changed`, so it can express exactly that.
 
-  Default implementation (`identity/3`) covers the common identity-mapping case;
-  a host provides its own module only for a richer algebra.
+  This module is ALSO the default implementation — the identity rule — so the
+  reference module satisfies its own behaviour; a host provides its own module
+  only for a richer algebra.
   """
+
+  @behaviour __MODULE__
 
   alias ReactiveDag.Cell
 
@@ -32,6 +35,9 @@ defmodule ReactiveDag.KeyRule do
   the `changed` keys, return how they propagate to the parent.
   """
   @callback rule(parent :: Cell.t(), child :: Cell.id(), changed :: [key()]) :: result()
+
+  @impl true
+  def rule(parent, child, changed), do: identity(parent, child, changed)
 
   @doc "The trivial identity rule — pass the changed keys straight through."
   @spec identity(Cell.t(), Cell.id(), [key()]) :: result()

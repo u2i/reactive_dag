@@ -42,10 +42,6 @@ defmodule ReactiveDag.Graph do
     end)
   end
 
-  # Allow the default module (identity/3) or a host KeyRule (rule/3).
-  defp apply_rule(ReactiveDag.KeyRule, parent, child, keys),
-    do: ReactiveDag.KeyRule.identity(parent, child, keys)
-
   defp apply_rule(mod, parent, child, keys), do: mod.rule(parent, child, keys)
 
   # ---- parents: inverse of each cell's inputs, EXCLUDING reference edges ----

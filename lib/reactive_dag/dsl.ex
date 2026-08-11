@@ -19,10 +19,13 @@ defmodule ReactiveDag.Dsl do
       id checks). Runs after the structural checks below.
 
   `compile/2` lowers every root via `Lowering.walk`, unions the cells (a shared
-  node appears once — it's a named root; refs are edges), then validates:
+  node appears once — it's a named root; refs are edges; a walk yielding the
+  same id twice is DEDUPED, first wins), then validates:
 
-    1. structural — every input/ref names a real cell; ids unique; acyclic
-       (delegated to `Graph.build`, which raises on a dangle/cycle).
+    1. structural — every input/ref names a real cell; acyclic (delegated to
+       `Graph.build`, which raises on a dangle/cycle). The duplicate-id check
+       bites only on `validate_cells/2`'s hand-built lists — `compile/2` has
+       already collapsed duplicates by design.
     2. domain — the host's `validate` hook.
 
   Returns `{:ok, cells}` or `{:error, message}`; a host transformer turns an

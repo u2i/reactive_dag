@@ -217,7 +217,9 @@ nobody-may-sign is a gap in the eligibility data, not a satisfied quorum.
 
 The store surfaces in the graph as **one leaf cell**
 (`ReactiveDag.Attestation.leaf_cell/0`, default `"attestations"`, injected
-automatically into any graph that uses the vocabulary). Signing is therefore a
+automatically into any graph that *consumes* the vocabulary — an `attested`
+view or a `gate:`d edge; a requirement declared but never consumed is inert
+and injects nothing). Signing is therefore a
 leaf write like any other: mark the returned keys dirty on that leaf, drain,
 and every attested view downstream re-evaluates — structurally identical to a
 scan finishing. Sub-second, and it cannot fail on a vendor being down: it

@@ -44,7 +44,7 @@ Two variations worth knowing:
   `dirty_keys` is `nil` for whole-cell) to narrow the datastore read to the
   claimed keys. Important for large inputs.
 
-### `join` — a two-input left join
+### `join` — a left join (one input, two sides)
 
 ```elixir
 join over: :observations,
@@ -107,6 +107,11 @@ reactive do
                                  # current people the next time it runs
 end
 ```
+
+One boundary: a `reference` edge still participates in depth ordering (that is
+what guarantees the target settles first), so it cannot form a cycle —
+`Graph.build` raises. It reads settled upstream context; it is not a feedback
+mechanism.
 
 `gate:` is covered in the [Attestations](attestations.md) guide — it interposes
 an attested view on the edge, admitting only signed rows.

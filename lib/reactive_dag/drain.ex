@@ -177,8 +177,13 @@ defmodule ReactiveDag.Drain do
   defp recompute(cell, keys, opts) do
     case opts[:recompute] do
       nil ->
-        Logger.warning("reactive_dag: cell #{inspect(cell.id)} has no recompute strategy; passing keys through")
-        keys
+        # a DERIVED cell reached with no strategy is a config error, not a
+        # recoverable state — passing keys through silently propagates values
+        # nothing recomputed. (Leaves never reach here; a leaves-only graph
+        # needs no :recompute.)
+        raise ArgumentError,
+              "reactive_dag: derived cell #{inspect(cell.id)} claimed dirty keys but " <>
+                "Drain.run was given no :recompute strategy"
 
       strategy ->
         {:ok, changed} = strategy.recompute(cell, keys)

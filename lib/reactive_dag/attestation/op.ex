@@ -101,7 +101,9 @@ defmodule ReactiveDag.Attestation.Op do
   """
   @spec instances(Requirement.t(), [String.t()]) :: [{String.t(), term()}]
   def instances(%Requirement{scope: {:filter, key_scope}} = req, _eligibility) do
-    [{req.instance_key || "all", key_scope}]
+    # instance_key's default lives on the Requirement struct ("all") — no
+    # second copy here.
+    [{req.instance_key, key_scope}]
   end
 
   def instances(%Requirement{scope: {:filter_by, fun}}, eligibility) do

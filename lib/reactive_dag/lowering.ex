@@ -55,15 +55,17 @@ defmodule ReactiveDag.Lowering do
       :op ->
         legs = cb.legs.(node)
 
-        {input_ids, sub} =
+        {input_ids, rev_subs} =
           legs
           |> Enum.with_index()
           |> Enum.map_reduce([], fn {leg, i}, acc ->
             leg_id = cb.leg_id.(id, i, leg)
             {lid, lsub} = walk(leg_id, leg, cb)
-            {lid, acc ++ lsub}
+            # prepend + reverse below: appending per leg is quadratic in cells
+            {lid, [lsub | acc]}
           end)
 
+        sub = rev_subs |> Enum.reverse() |> Enum.concat()
         {id, sub ++ [cb.to_cell.(id, node, input_ids)]}
     end
   end

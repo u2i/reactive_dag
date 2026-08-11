@@ -43,12 +43,15 @@ defmodule ReactiveDag.DslTest do
     assert msg =~ "ghost"
   end
 
-  test "a duplicate id fails" do
+  test "compile/2 DEDUPES a repeated id (first wins) — a shared node reached twice is fine" do
     roots = [{"dup", %{leaf: "a"}}, {"dup", %{leaf: "b"}}]
-    # dedup keeps one, so this actually SUCCEEDS with a single cell — assert that
-    # (the host shouldn't emit true dup ids; the pipeline is forgiving of a
-    # shared node reached twice).
     assert {:ok, [%{id: "dup"}]} = Dsl.compile(roots, %{lowering: lowering()})
+  end
+
+  test "validate_cells/2 (hand-built lists) is where duplicate ids FAIL" do
+    cells = [%{id: "dup", inputs: []}, %{id: "dup", inputs: []}]
+    assert {:error, msg} = Dsl.validate_cells(cells)
+    assert msg =~ "duplicate"
   end
 
   test "the domain validate hook can reject" do
