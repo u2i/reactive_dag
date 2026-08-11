@@ -13,7 +13,44 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: googleapis/release-please-action@v4
+        id: release
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
           # strategy + versions live in release-please-config.json /
           # .release-please-manifest.json at the repo root
+
+      # PUBLISH HERE, in the same run that cut the release — not from a
+      # separate workflow listening for `release: [published]`.
+      #
+      # GitHub deliberately raises NO workflow-triggering events for actions
+      # taken with GITHUB_TOKEN (a recursion guard), so a release created by
+      # the action above is invisible to any `on: release` workflow. That is
+      # silent: release-please succeeds, nothing publishes, and hex quietly
+      # stays a version behind — which is exactly what happened to v0.17.0-rc.
+      #
+      # The alternatives were a PAT (a credential to scope and rotate, purely
+      # to defeat a safety feature) or remembering to dispatch by hand (which
+      # has already been forgotten). Publishing from this job needs neither,
+      # and runs at the release commit by construction.
+      - uses: actions/checkout@v4
+        if: ${{ steps.release.outputs.releases_created }}
+        with:
+          # the release commit, whose mix.exs carries the bumped version —
+          # release-please writes it in that commit, so the default checkout
+          # of the pushed ref would be right too, but pinning the tag makes
+          # the published version explicit rather than incidental.
+          ref: ${{ steps.release.outputs.tag_name }}
+
+      - uses: erlef/setup-beam@v1
+        if: ${{ steps.release.outputs.releases_created }}
+        with:
+          version-file: .tool-versions
+          version-type: strict
+
+      - run: mix deps.get
+        if: ${{ steps.release.outputs.releases_created }}
+
+      - run: mix hex.publish --yes
+        if: ${{ steps.release.outputs.releases_created }}
+        env:
+          HEX_API_KEY: ${{ secrets.HEX_API_KEY }}
