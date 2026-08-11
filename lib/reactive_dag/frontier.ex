@@ -11,7 +11,10 @@ defmodule ReactiveDag.Frontier do
 
       config :reactive_dag, repo: MyApp.Repo, dirty_table: "my_dirty"
 
-  Coalesced by `(cell, key)`; depth-ordered `next_cell`; atomic `claim`. This is
+  Coalesced by `(cell, key)`; depth-ordered `next_cell`; `claim` atomic per
+  cell (`DELETE … RETURNING` — a key is consumed exactly once). The
+  `next_cell`-then-`claim` PAIR is not serialized: concurrent drains can pick
+  the same cell — see the concurrency note on `ReactiveDag.Drain`. This is
   the shared substrate both hosts previously hand-rolled (cascade's
   `Cascade.Engine.Frontier`, the portal's `model_dirty` access) — now provided.
   """

@@ -26,6 +26,15 @@ defmodule ReactiveDag.Drain do
   Persistence is the host's (an Oban job's meta, a run table) — the library
   reports, the host records.
 
+  ## Concurrency
+
+  The per-cell claim is atomic (a `DELETE … RETURNING`): a dirty KEY is
+  consumed exactly once. But the pick-then-claim PAIR is not serialized — two
+  concurrent drains over the same graph can select the same cell and both
+  recompute it (each claiming a disjoint slice of its keys). Run ONE drain at a
+  time per graph (both hosts do: a single worker), or make recomputes
+  idempotent so a doubled recompute is merely wasted work.
+
   `run/2` opts:
     * `:recompute` — a `ReactiveDag.RecomputeStrategy` module (required unless the
       graph is leaves-only).
