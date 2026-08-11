@@ -35,7 +35,9 @@ defmodule ReactiveDag.Source do
 
   Two apps (a data pipeline and a compliance model) independently grew the same
   three-callback shape — `id` / `leaf_cells` / `poll → changed-keys` — which is
-  why it lives here rather than in either app.
+  why it lives here rather than in either app. A single-leaf source (the common
+  case) may export `leaf_cell/0` instead of `leaf_cells/1`; `cells_of/2`
+  resolves whichever is present.
 
       defmodule MyApp.Sources.FleetScan do
         @behaviour ReactiveDag.Source
@@ -74,8 +76,19 @@ defmodule ReactiveDag.Source do
   the binding `verify/2` validates. Single-leaf sources return `[leaf]`; fan-out
   sources compute their per-instance leaves from the graph; multi-leaf sources
   list every cell they write.
+
+  OPTIONAL: a single-leaf source may instead export `leaf_cell/0` (the common
+  case — one scanner, one leaf) and skip this; `cells_of/2` resolves whichever
+  the module exports. A module must export at least one of the two.
   """
   @callback leaf_cells(graph()) :: [String.t()]
+
+  @doc """
+  Single-leaf fallback for `leaf_cells/1`: the ONE cell id this source feeds.
+  For the common one-scanner-one-leaf driver, this is the whole binding — no
+  graph-dependent computation to write.
+  """
+  @callback leaf_cell() :: String.t() | atom()
 
   @doc """
   Poll the external source: fetch → write the leaf tuples → return the leaf keys
@@ -92,28 +105,54 @@ defmodule ReactiveDag.Source do
   """
   @callback origin() :: map() | nil
 
-  @optional_callbacks origin: 0
+  @optional_callbacks origin: 0, leaf_cells: 1, leaf_cell: 0
+
+  @doc """
+  The cells `source` feeds in `graph` — the resolver behind `verify!/2`. Uses
+  the module's `leaf_cells/1` when exported, else the single-leaf `leaf_cell/0`
+  fallback (as `[to_string(leaf_cell())]`). Raises `ArgumentError` when the
+  module exports neither.
+  """
+  @spec cells_of(module(), graph()) :: [String.t()]
+  def cells_of(source, graph) do
+    # ensure_loaded: function_exported?/3 is false for a merely-unloaded module.
+    cond do
+      not Code.ensure_loaded?(source) ->
+        raise ArgumentError, "reactive_dag: source #{inspect(source)} is not a loadable module"
+
+      function_exported?(source, :leaf_cells, 1) ->
+        source.leaf_cells(graph)
+
+      function_exported?(source, :leaf_cell, 0) ->
+        [to_string(source.leaf_cell())]
+
+      true ->
+        raise ArgumentError,
+              "reactive_dag: source #{inspect(source)} exports neither leaf_cells/1 nor " <>
+                "leaf_cell/0 — a source must name the cell(s) it feeds"
+    end
+  end
 
   @doc """
   Verify every source's declared leaves resolve to real cells in `graph` — the
-  authoritative scanner↔leaf check. Each driver's `leaf_cells/1` names the cells
-  it writes; this confirms every one is a real cell in the built plan. Needs the
-  lowered graph (a host may expand generator leaves from live data), so it runs at
+  authoritative scanner↔leaf check. Each driver's leaves are resolved via
+  `cells_of/2` (`leaf_cells/1`, or the single-leaf `leaf_cell/0` fallback); this
+  confirms every one is a real cell in the built plan. Needs the lowered graph
+  (a host may expand generator leaves from live data), so it runs at
   assembly/boot time, not compile time.
 
   Returns `:ok`, or raises `ArgumentError` naming every `{source, dangling_leaf}`.
   """
   @spec verify!([module()], graph()) :: :ok
   def verify!(sources, graph) do
-    verify_cells!(Enum.map(sources, &{&1, &1.leaf_cells(graph)}), graph)
+    verify_cells!(Enum.map(sources, &{&1, cells_of(&1, graph)}), graph)
   end
 
   @doc """
   The same dangling-leaf check as `verify!/2`, but over already-resolved
-  `{source, [cell_id]}` pairs instead of calling each module's `leaf_cells/1`.
-  Use this when a host resolves fed cells itself — e.g. it keeps a single-leaf
-  fallback (`leaf_cells/1` optional, defaulting to one representative leaf) that
-  the module-based `verify!/2` (which requires `leaf_cells/1`) can't express.
+  `{source, [cell_id]}` pairs instead of resolving each module via `cells_of/2`.
+  Use this when a host resolves fed cells itself (its own conventions beyond
+  `leaf_cells/1` / `leaf_cell/0`).
   Returns `:ok`, or raises `ArgumentError` naming every `{source, dangling_leaf}`.
   """
   @spec verify_cells!([{module(), [String.t()]}], graph()) :: :ok

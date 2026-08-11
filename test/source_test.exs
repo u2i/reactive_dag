@@ -32,6 +32,42 @@ defmodule ReactiveDag.SourceTest do
     end
   end
 
+  # single-leaf fallback: exports leaf_cell/0 only (no leaf_cells/1)
+  defmodule SingleLeaf do
+    def id, do: :single
+    def leaf_cell, do: :a
+    def poll(_), do: {:ok, %{changed: []}}
+  end
+
+  defmodule NoLeaves do
+    def id, do: :nothing
+    def poll(_), do: {:ok, %{changed: []}}
+  end
+
+  describe "cells_of/2 (the leaf resolver)" do
+    test "leaf_cells/1 wins when exported" do
+      assert ReactiveDag.Source.cells_of(OneLeaf, graph(["a"])) == ["a"]
+    end
+
+    test "falls back to leaf_cell/0 (stringified) for a single-leaf source" do
+      assert ReactiveDag.Source.cells_of(SingleLeaf, graph(["a"])) == ["a"]
+    end
+
+    test "raises when the module exports neither" do
+      assert_raise ArgumentError, ~r/neither leaf_cells\/1 nor leaf_cell\/0/, fn ->
+        ReactiveDag.Source.cells_of(NoLeaves, graph(["a"]))
+      end
+    end
+
+    test "verify!/2 accepts a leaf_cell/0-only source" do
+      assert :ok = ReactiveDag.Source.verify!([SingleLeaf], graph(["a"]))
+
+      assert_raise ArgumentError, ~r/SingleLeaf -> a/, fn ->
+        ReactiveDag.Source.verify!([SingleLeaf], graph(["b"]))
+      end
+    end
+  end
+
   describe "verify_cells!/2 (pre-resolved pairs — the fallback path)" do
     test "passes for resolved pairs whose cells all exist" do
       assert :ok =

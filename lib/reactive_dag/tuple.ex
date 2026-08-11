@@ -284,6 +284,52 @@ defmodule ReactiveDag.Tuple do
     {:ok, changed_up ++ vanished}
   end
 
+  @doc """
+  The BULK variant of `reconcile/3`, for set-based recomputes. Where `reconcile`
+  calls `upsert.(key)` once per want-key (N statements — the per-key leaf
+  shape), `reconcile_set` hands the WHOLE want set to one `:upsert_all`
+  callback, so an interior set-op that produced its result row-set in one pass
+  writes it in ONE bulk statement (spine + the host's extension columns
+  together). Same skeleton, same set math, one write.
+
+  Options:
+
+    * `:upsert_all` (required) — `([key] -> [changed_key])`: write every want
+      row in one statement (the host's bulk `VALUES` upsert; WHAT a row contains
+      is host domain), returning the subset whose verdict ACTUALLY changed (an
+      `IS DISTINCT FROM`-guarded upsert's `RETURNING`). Not called for an empty
+      want set.
+    * `:retire` — how vanished keys leave, as `reconcile/3`: `:delete` (the
+      default) or a `(keys -> any)` fun (tombstone).
+    * `:current` — the baseline `vanished` is computed against, as
+      `reconcile/3`. Defaults to `all_keys(cell_id, key_scope: opts[:key_scope])`.
+    * `:key_scope` — a `t:key_scope/0` narrowing the DEFAULT baseline to the
+      slice this recompute repriced: a dirty-key-scoped set-op must not see keys
+      outside its slice as vanished. Ignored when `:current` is given.
+
+  Returns `{:ok, changed_keys}` where `changed_keys = changed_upserts ++ vanished`.
+  """
+  @spec reconcile_set(String.t(), [key()] | MapSet.t(), keyword()) :: {:ok, [key()]}
+  def reconcile_set(cell_id, want_keys, opts) do
+    upsert_all = Keyword.fetch!(opts, :upsert_all)
+    retire = Keyword.get(opts, :retire, :delete)
+
+    want_set = MapSet.new(want_keys)
+    want = MapSet.to_list(want_set)
+
+    changed_up = if want == [], do: [], else: upsert_all.(want)
+
+    current =
+      Keyword.get_lazy(opts, :current, fn ->
+        all_keys(cell_id, key_scope: Keyword.get(opts, :key_scope))
+      end)
+
+    vanished = Enum.reject(current, &MapSet.member?(want_set, &1))
+    do_retire(cell_id, vanished, retire)
+
+    {:ok, changed_up ++ vanished}
+  end
+
   defp do_retire(_cell_id, [], _), do: :ok
   defp do_retire(cell_id, keys, :delete), do: delete(cell_id, keys)
   defp do_retire(_cell_id, keys, fun) when is_function(fun, 1), do: fun.(keys)
