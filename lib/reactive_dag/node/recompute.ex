@@ -23,6 +23,7 @@ defmodule ReactiveDag.Node.Recompute do
 
   require Logger
   alias ReactiveDag.Cell
+  alias ReactiveDag.Node.Recompute.{Declarative, Read}
 
   @impl true
   def recompute(%Cell{leaf?: true}, keys), do: {:ok, keys}
@@ -37,11 +38,14 @@ defmodule ReactiveDag.Node.Recompute do
   # claimed keys — e.g. `read: fn :fiscal_lines, keys -> FiscalDoc |> filter(keys) end`.
   # `keys` is the claimed dirty set, or `nil` for a whole-cell recompute (`"*"`).
   def recompute(%Cell{meta: %{reduce: %{} = r}} = cell, keys) do
+    group_by = Declarative.group_fn(r.group_by)
+    into = Declarative.into_fn(r.into, r.group_by)
+
     pairs =
-      read_items(r.read, r.over, scope(keys))
-      |> Enum.group_by(r.group_by)
+      Read.items(r.read, r.over, cell.meta[:over_source], scope(keys))
+      |> Enum.group_by(group_by)
       |> Enum.flat_map(fn {group, items} ->
-        group |> r.into.(items) |> rows_with_keys(r, group)
+        group |> into.(items) |> rows_with_keys(r, group)
       end)
 
     {:ok, materialize(cell, pairs, r.upsert)}
@@ -54,13 +58,14 @@ defmodule ReactiveDag.Node.Recompute do
   # reconcile shape, where an undeclared right-side member is a finding.
   # `read` may be arity-2 for dirty-key scoping (see `reduce` above).
   def recompute(%Cell{meta: %{join: %{} = j}} = cell, keys) do
-    items = read_items(j.read, j.over, scope(keys))
-    left = index(items, j.left)
-    right = index(items, j.right)
+    items = Read.items(j.read, j.over, cell.meta[:over_source], scope(keys))
+    left = index(items, Declarative.side_fn(j.left))
+    right = index(items, Declarative.side_fn(j.right))
+    into = Declarative.join_into_fn(j.into)
 
     left_pairs =
       Enum.flat_map(left, fn {jk, litem} ->
-        j.into.(jk, litem, Map.get(right, jk)) |> rows_with_keys(j, jk)
+        into.(jk, litem, Map.get(right, jk)) |> rows_with_keys(j, jk)
       end)
 
     right_only_pairs =
@@ -68,7 +73,7 @@ defmodule ReactiveDag.Node.Recompute do
         Enum.flat_map(right, fn {jk, ritem} ->
           if Map.has_key?(left, jk),
             do: [],
-            else: j.into.(jk, nil, ritem) |> rows_with_keys(j, jk)
+            else: into.(jk, nil, ritem) |> rows_with_keys(j, jk)
         end)
       else
         []
@@ -111,29 +116,23 @@ defmodule ReactiveDag.Node.Recompute do
     end
   end
 
-  # call a combinator's `read`: arity-1 (`over -> items`, whole-cell) or arity-2
-  # (`over, scope -> items`) for dirty-key scoping. A whole-cell recompute passes
-  # `nil` scope to the arity-2 form (read everything).
-  defp read_items(read, over, scope) when is_function(read, 2), do: read.(over, scope)
-  defp read_items(read, over, _scope) when is_function(read, 1), do: read.(over)
-
   # normalize an `into` result (one row or a list) into `[{key, row}]`. Key
   # resolution: a row that carries its own `:key` field SELF-IDENTIFIES (expand
-  # rows must, since one group → many keys); otherwise the spec's `key` fn is
-  # applied to the group term (the fold case, one row per group). Row-key wins so
-  # the `length == 1` ambiguity (a group that expands to exactly one row) is moot.
+  # rows must, since one group → many keys); otherwise the spec's `key` fn — or
+  # the declarative default (group values joined with "|", `key_prefix`-aware) —
+  # is applied to the group term (the fold case, one row per group). Row-key
+  # wins so the `length == 1` ambiguity (a group that expands to exactly one
+  # row) is moot.
   defp rows_with_keys(row_or_rows, spec, group_term) do
-    key_fn = Map.get(spec, :key)
+    key_fn = Declarative.key_fn(Map.get(spec, :key), Map.get(spec, :key_prefix))
 
     row_or_rows
     |> List.wrap()
     |> Enum.map(fn row ->
       key =
-        cond do
-          is_map(row) and is_map_key(row, :key) -> row.key
-          is_function(key_fn, 1) -> key_fn.(group_term)
-          true -> raise "reactive_dag: cannot resolve a coordination key for row #{inspect(row)}"
-        end
+        if is_map(row) and is_map_key(row, :key),
+          do: row.key,
+          else: key_fn.(group_term)
 
       {key, row}
     end)
