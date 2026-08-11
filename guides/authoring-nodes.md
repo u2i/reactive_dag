@@ -187,29 +187,30 @@ keys that actually changed.
 
 ```elixir
 ref :transcripts                  # recompute edge: a change dirties this node
-reference :people                 # read-as-context: consulted, never triggers
+context :people                   # read-as-context: consulted, never triggers
 depends_on [:a, :b]               # flat sugar — one ref per id
 reduce over: :x, ...              # a combinator's `over:` implies a ref
 ref :machines, gate: :ownership   # gated: consume through the attested view
 ```
 
-**`ref` vs `reference`** is the load-bearing distinction. A `reference` edge is
-a real input — validated, depth-ordered so the target settles first, read at
-recompute — but the target's changes do **not** re-trigger this node. Use it
-when recompute is expensive or non-deterministic and consults mutable context
-it shouldn't be re-run by:
+**`ref` vs `context`** is the load-bearing distinction — a change to a `ref`
+target propagates; a `context` target is read as settled context and never
+triggers. A `context` edge is still a real input — validated, depth-ordered so
+the target settles first, read at recompute. Use it when recompute is
+expensive or non-deterministic and consults mutable context it shouldn't be
+re-run by:
 
 ```elixir
 reactive do
   op :map
   compute MyApp.EnhanceMinutes   # an LLM pass
   ref :transcripts               # a transcript change RE-RUNS the LLM
-  reference :people              # a people edit does NOT — the LLM just reads
+  context :people                # a people edit does NOT — the LLM just reads
                                  # current people the next time it runs
 end
 ```
 
-One boundary: a `reference` edge still participates in depth ordering (that is
+One boundary: a `context` edge still participates in depth ordering (that is
 what guarantees the target settles first), so it cannot form a cycle —
 `Graph.build` raises. It reads settled upstream context; it is not a feedback
 mechanism.

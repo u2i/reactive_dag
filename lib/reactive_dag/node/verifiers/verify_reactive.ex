@@ -9,7 +9,7 @@ defmodule ReactiveDag.Node.Verifiers.VerifyReactive do
   use Spark.Dsl.Verifier
 
   alias ReactiveDag.Node.Recompute.Declarative
-  alias ReactiveDag.Node.{Compose, Compute, Join, Reduce, Reference, Ref, Run}
+  alias ReactiveDag.Node.{Compose, Compute, Context, Join, Reduce, Ref, Run}
   alias Spark.Dsl.Verifier
 
   @impl true
@@ -17,7 +17,7 @@ defmodule ReactiveDag.Node.Verifiers.VerifyReactive do
     entities =
       Verifier.get_entities(dsl, [:reactive])
       |> Enum.reject(
-        &(match?(%Ref{}, &1) or match?(%Reference{}, &1) or match?(%Compose{}, &1) or
+        &(match?(%Ref{}, &1) or match?(%Context{}, &1) or match?(%Compose{}, &1) or
             match?(%ReactiveDag.Attestation.Requirement{}, &1))
       )
 

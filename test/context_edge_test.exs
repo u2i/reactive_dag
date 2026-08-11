@@ -1,9 +1,9 @@
-defmodule ReactiveDag.ReferenceEdgeTest do
+defmodule ReactiveDag.ContextEdgeTest do
   @moduledoc """
-  A `reference` edge: an input a node READS as context but is NOT recomputed on.
+  A `context` edge: an input a node READS as settled context but is NOT recomputed on.
   It's a real input (validated, depth-ordered, read at recompute) — it just isn't
   a propagation parent. For an expensive/non-deterministic node (an LLM step) that
-  consults mutable reference data (a human-curated people/positions table) it
+  consults mutable context data (a human-curated people/positions table) it
   shouldn't be re-triggered by.
   """
   use ExUnit.Case, async: true
@@ -15,7 +15,7 @@ defmodule ReactiveDag.ReferenceEdgeTest do
     end
   end
 
-  # two source leaves + a node that RECOMPUTES on :transcripts but only REFERENCES
+  # two source leaves + a node that RECOMPUTES on :transcripts but only READS
   # :people (mirrors the enhanced-minutes shape).
   defmodule Transcripts do
     use Ash.Resource, domain: Domain, data_layer: Ash.DataLayer.Simple, extensions: [ReactiveDag.Node]
@@ -33,9 +33,9 @@ defmodule ReactiveDag.ReferenceEdgeTest do
     reactive do
       id :enhanced_minutes
       op :map
-      compute ReactiveDag.ReferenceEdgeTest.FakeOp
+      compute ReactiveDag.ContextEdgeTest.FakeOp
       ref :transcripts        # RECOMPUTE edge — a transcript change re-runs the LLM
-      reference :people       # REFERENCE edge — a people edit does NOT re-run it
+      context :people         # CONTEXT edge — a people edit does NOT re-run it
     end
   end
 
@@ -47,12 +47,12 @@ defmodule ReactiveDag.ReferenceEdgeTest do
 
   defp plan, do: ReactiveDag.Node.graph([Transcripts, People, EnhancedMinutes])
 
-  test "a reference edge is still a real INPUT (in inputs, validated, depth-ordered)" do
+  test "a context edge is still a real INPUT (in inputs, validated, depth-ordered)" do
     cell = ReactiveDag.Node.to_cell(EnhancedMinutes)
     # both edges are inputs — the node reads both when it recomputes
     assert Enum.sort(cell.inputs) == ["people", "transcripts"]
-    # the reference edge is recorded so the graph can exclude it from propagation
-    assert cell.meta.reference_inputs == ["people"]
+    # the context edge is recorded so the graph can exclude it from propagation
+    assert cell.meta.context_inputs == ["people"]
 
     p = plan()
     # depth: the node sits BELOW both leaves (so people settles before it reads)
@@ -72,7 +72,7 @@ defmodule ReactiveDag.ReferenceEdgeTest do
     assert [] = ReactiveDag.Graph.dirty_parents(p, "people", ["smythe"], ReactiveDag.Node.KeyRule)
   end
 
-  test "a node with only a reference edge to a leaf is never triggered by that leaf" do
+  test "a node with only a context edge to a leaf is never triggered by that leaf" do
     # sanity: the propagation graph has no edge people → enhanced_minutes
     p = plan()
     assert Map.get(p.parents, "people", []) == []
