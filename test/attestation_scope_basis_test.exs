@@ -93,6 +93,14 @@ defmodule ReactiveDag.AttestationScopeBasisTest do
       assert is_binary(Basis.digest([]))
     end
 
+    test "a row WITHOUT a status raises — absent must never hash like present" do
+      # regression: a missing :status silently defaulted to "present", so
+      # %{key: "x"} and %{key: "x", status: "present"} digested identically —
+      # a caller passing hand-built rows got a basis asserting a status
+      # nobody observed.
+      assert_raise KeyError, fn -> Basis.digest([%{key: "x"}]) end
+    end
+
     test "a record from an unknown (future) scheme degrades to re-ask, not to a crash" do
       assert Basis.digest([%{key: "x", status: "present"}], 99) == :unknown_version
       refute Basis.matches?("whatever", [%{key: "x", status: "present"}], 99)

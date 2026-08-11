@@ -36,6 +36,11 @@ defmodule ReactiveDag.Attestation.Basis do
   Digest `rows` (spine-row maps with `:key` and `:status`) under `version`.
   Returns the digest string, or `:unknown_version` for a version this build
   does not know — which the evaluation treats as a non-matching basis.
+
+  Every row MUST carry both fields (`ReactiveDag.Tuple.rows/2` always does);
+  a row without a `:status` raises rather than digesting a status nobody
+  observed — the basis is the load-bearing content identity for lapse, so
+  absent must never hash like present.
   """
   @spec digest([map()], pos_integer()) :: String.t() | :unknown_version
   def digest(rows, version \\ @current)
@@ -43,7 +48,7 @@ defmodule ReactiveDag.Attestation.Basis do
   def digest(rows, 1) do
     canonical =
       rows
-      |> Enum.map(&{&1.key, Map.get(&1, :status, "present")})
+      |> Enum.map(&{Map.fetch!(&1, :key), Map.fetch!(&1, :status)})
       |> Enum.sort()
       |> Enum.map_join("\n", fn {k, s} -> "#{k}\x1F#{s}" end)
 
