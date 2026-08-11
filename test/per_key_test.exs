@@ -559,4 +559,90 @@ defmodule ReactiveDag.PerKeyTest do
       assert Calls.count() - before == 1
     end
   end
+  describe "embeddings (#30 item 5)" do
+    # An embeddings NODE is just `per_key` with an embedding action — the
+    # result is a list of floats instead of a string, and nothing else changes.
+    # No new rung is needed. (For embeddings on the SAME resource as the text,
+    # ash_ai's own `vectorize` is the better tool — it hooks the changeset, so
+    # it detects change without a fingerprint round-trip.)
+    defmodule Embeddings do
+      use Ash.Resource,
+        domain: ReactiveDag.PerKeyTest.Domain,
+        data_layer: Ash.DataLayer.Ets,
+        extensions: [ReactiveDag.Node]
+
+      ets do
+      end
+
+      attributes do
+        attribute :key, :string, primary_key?: true, allow_nil?: false, public?: true
+        attribute :vector, {:array, :float}, public?: true
+        attribute :fingerprint, :string, public?: true
+      end
+
+      identities do
+        identity :by_key, [:key], pre_check_with: ReactiveDag.PerKeyTest.Domain
+      end
+
+      actions do
+        defaults [:read, :destroy]
+
+        create :upsert do
+          upsert?(true)
+          upsert_identity(:by_key)
+          accept([:key, :vector, :fingerprint])
+        end
+
+        # stands in for an AshAi.EmbeddingModel call
+        action :embed, :map do
+          argument :text, :string, allow_nil?: false
+
+          run fn input, _ctx ->
+            ReactiveDag.PerKeyTest.Calls.record(input.arguments.text)
+            {:ok, %{"vector" => [1.0, byte_size(input.arguments.text) / 1.0, 0.5]}}
+          end
+        end
+      end
+
+      reactive do
+        id(:embeddings)
+        recompute_by :key, to: :transcripts, from: :key
+
+        per_key :embed,
+          args: [text: :body],
+          fingerprint: [:body],
+          into: [vector: :vector]
+      end
+    end
+
+    setup do
+      Embeddings |> Ash.read!() |> Enum.each(&Ash.destroy!/1)
+      :ok
+    end
+
+    test "an embeddings node is per_key with an embedding action — vectors and all" do
+      cell = ReactiveDag.Node.graph([Transcripts, Embeddings]).cells["embeddings"]
+
+      {:ok, changed, meta} = Recompute.recompute(cell, ["*"])
+
+      assert Enum.sort(changed) == ["t1", "t2"]
+      assert meta == %{called: 2, skipped: 0}
+
+      rows = Embeddings |> Ash.read!() |> Map.new(&{&1.key, &1.vector})
+      assert [1.0, 10.0, 0.5] = rows["t1"]
+      assert length(rows["t2"]) == 3
+    end
+
+    test "fingerprinting works the same — re-embedding is not paid for twice" do
+      cell = ReactiveDag.Node.graph([Transcripts, Embeddings]).cells["embeddings"]
+      {:ok, _, _} = Recompute.recompute(cell, ["*"])
+      before = Calls.count()
+
+      {:ok, changed, meta} = Recompute.recompute(cell, ["*"])
+
+      assert changed == []
+      assert meta == %{called: 0, skipped: 2}
+      assert Calls.count() == before
+    end
+  end
 end
