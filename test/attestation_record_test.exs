@@ -119,6 +119,19 @@ defmodule ReactiveDag.AttestationRecordTest do
       assert [%{meta: %{"ticket" => "SEC-421"}}] = Attestation.history("machines")
     end
 
+    test "an unknown option raises — a typo'd :actor must not silently disable who_from_actor" do
+      # regression: opts were allowlisted with Keyword.take, so `acto:` was
+      # dropped without a word and the write succeeded with the caller's who.
+      assert_raise ArgumentError, ~r/unknown option.*:acto\b/s, fn ->
+        Attestation.affirm("machines", {:key, "AAA111"}, "alice@u2i.com",
+          rows: @rows,
+          acto: %{email: "alice@u2i.com"}
+        )
+      end
+
+      assert Attestation.history("machines") == []
+    end
+
     test "reject without a reason raises before anything is written" do
       assert_raise ArgumentError, ~r/reason/, fn ->
         Attestation.reject("machines", {:key, "AAA111"}, "bob@u2i.com", "  ", rows: @rows)

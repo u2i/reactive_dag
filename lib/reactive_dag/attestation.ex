@@ -151,7 +151,21 @@ defmodule ReactiveDag.Attestation do
 
   # ── internals ───────────────────────────────────────────────────────────────
 
+  @sign_opts [:rows, :reason, :signed_at, :meta, :actor, :tenant, :authorize?]
+
   defp sign(cell_id, scope, who, polarity, reason, opts) do
+    # Unknown opts RAISE rather than drop: a misspelled :actor would otherwise
+    # silently disable who_from_actor and let the caller-supplied `who` stand —
+    # a security degradation hiding behind a typo.
+    case Keyword.keys(opts) -- @sign_opts do
+      [] ->
+        :ok
+
+      unknown ->
+        raise ArgumentError,
+              "attestation: unknown option(s) #{inspect(unknown)} — supported: #{inspect(@sign_opts)}"
+    end
+
     rows = Keyword.get_lazy(opts, :rows, fn -> Scope.select_db(scope, cell_id) end)
     version = Basis.current_version()
     scope_text = Scope.serialize(scope)
