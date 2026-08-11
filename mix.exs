@@ -40,6 +40,7 @@ defmodule ReactiveDag.MixProject do
       source_ref: "v#{@version}",
       extras: [
         "guides/getting-started.md",
+        "guides/configuration.md",
         "guides/authoring-nodes.md",
         "guides/llm-nodes.md",
         "guides/sources.md",

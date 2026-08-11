@@ -35,6 +35,10 @@ config :reactive_dag,
   coordination_writer: MyApp.Writer    # OPTIONAL — a spine-only default ships
 ```
 
+Only `:repo` is required. Every key the library reads — with its default, what
+reads it, and when you would change it — is in
+[Configuration](configuration.html).
+
 `tuple_table` / `dirty_table` **default silently** (`reactive_dag_tuple` /
 `reactive_dag_dirty`); a name that doesn't match your migration yields empty
 results with no error, so set them explicitly.
