@@ -105,6 +105,26 @@ defmodule ReactiveDag.AttestationRecordTest do
       assert changed == [Scope.serialize({:key, "AAA111"})]
     end
 
+    test "withdraw round-trips through the store — the third polarity is write-safe" do
+      # regression coverage: the store's polarity round-trip (to_record/1's
+      # String.to_existing_atom) was only ever exercised for :affirm/:reject;
+      # :withdraw's atom existing was an accident of the @type declaration.
+      {:ok, _, _} =
+        Attestation.affirm("machines", {:key, "AAA111"}, "alice@u2i.com", rows: @rows)
+
+      {:ok, record, changed} =
+        Attestation.withdraw("machines", {:key, "AAA111"}, "alice@u2i.com", rows: @rows)
+
+      assert record.polarity == :withdraw
+      assert record.reason == nil
+      assert changed == [Scope.serialize({:key, "AAA111"})]
+
+      # stance = the latest record per signer: the withdrawal supersedes
+      assert [%{polarity: :withdraw, who: "alice@u2i.com"}] = Attestation.stances("machines")
+      # history keeps both acts, newest first
+      assert [:withdraw, :affirm] = Attestation.history("machines") |> Enum.map(& &1.polarity)
+    end
+
     test "meta rides the record and comes back on every read (not write-only)" do
       # regression: the :sign action accepted :meta but to_record/1 dropped it —
       # host context written through meta was invisible to stances/history.

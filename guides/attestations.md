@@ -209,6 +209,10 @@ nobody-may-sign is a gap in the eligibility data, not a satisfied quorum.
 {:ok, record, changed} =
   ReactiveDag.Attestation.reject("machines", {:key, "AAA111"}, "bob@u2i.com",
     "this serial is a rebuild; the machine was recycled")
+
+# the third act: clear your own word (reason optional — see "Withdrawal" above)
+{:ok, record, changed} =
+  ReactiveDag.Attestation.withdraw("machines", {:key, "AAA111"}, "alice@u2i.com")
 ```
 
 The store surfaces in the graph as **one leaf cell**
