@@ -21,13 +21,58 @@ defmodule ReactiveDag.Node.Recompute.Declarative do
   values. An entry names an attribute OR a CALCULATION on the over resource —
   derived grouping values (a calendar bucket, a normalized code) are Ash
   calculations, declared where the data lives; the library loads them in the
-  read (`ReactiveDag.Calendar` ships the calendar ones).
+  read (`ReactiveDag.Calendar` ships the calendar ones). The RELATIONAL-JOIN
+  spelling `{parent_field, child_field}` (`[category: :expense_cat]`) groups by
+  the CHILD field while the row carries the PARENT column — Ash's
+  source/destination-attribute pair, for the DAG edge.
   """
   def group_fn(fun) when is_function(fun, 1), do: fun
   def group_fn(attr) when is_atom(attr), do: fn item -> Map.get(item, attr) end
 
   def group_fn(entries) when is_list(entries) do
-    fn item -> entries |> Enum.map(&Map.get(item, &1)) |> List.to_tuple() end
+    children = group_children(entries)
+    fn item -> children |> Enum.map(&Map.get(item, &1)) |> List.to_tuple() end
+  end
+
+  @doc "The CHILD (over-resource) field of each group entry — what is read and grouped."
+  def group_children(entries) when is_list(entries),
+    do: Enum.map(entries, fn
+      {_parent, child} -> child
+      attr -> attr
+    end)
+
+  def group_children(attr) when is_atom(attr), do: [attr]
+
+  @doc "The PARENT (this node's) column of each group entry — what the row carries."
+  def group_dests(entries) when is_list(entries),
+    do: Enum.map(entries, fn
+      {parent, _child} -> parent
+      attr -> attr
+    end)
+
+  def group_dests(attr) when is_atom(attr), do: [attr]
+
+  @doc """
+  The IDENTITY key serializer for a composite-primary-key node: the cell key is
+  the row's identity fields, in primary-key order, joined with `"|"` (the same
+  canonical serialization derived keys have always used) — the key is no longer
+  a stored column but the serialization of the row's Ash identity.
+  """
+  def identity_key_fn(fields, prefix) do
+    fn row ->
+      fields
+      |> Enum.map_join("|", fn f ->
+        case Map.fetch(row, f) do
+          {:ok, v} when not is_nil(v) ->
+            to_string(v)
+
+          _ ->
+            raise "reactive_dag: an identity-keyed row must carry its identity " <>
+                    "field #{inspect(f)} — got #{inspect(Map.keys(row))}"
+        end
+      end)
+      |> prefixed(prefix)
+    end
   end
 
   @doc """
@@ -58,7 +103,7 @@ defmodule ReactiveDag.Node.Recompute.Declarative do
   def into_fn(fun, _group_by) when is_function(fun, 2), do: fun
 
   def into_fn(folds, group_by) when is_list(folds) do
-    dests = List.wrap(group_by)
+    dests = group_dests(group_by)
 
     fn group_term, items ->
       dests

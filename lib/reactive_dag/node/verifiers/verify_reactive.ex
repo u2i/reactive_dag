@@ -205,7 +205,15 @@ defmodule ReactiveDag.Node.Verifiers.VerifyReactive do
   end
 
 
-  defp declarative_group?(g), do: is_atom(g) or (is_list(g) and Enum.all?(g, &is_atom/1))
+  defp declarative_group?(g) do
+    is_atom(g) or
+      (is_list(g) and
+         Enum.all?(g, fn
+           a when is_atom(a) -> true
+           {parent, child} when is_atom(parent) and is_atom(child) -> true
+           _ -> false
+         end))
+  end
 
   defp verify_fold_shapes(dsl, folds) do
     Enum.reduce_while(folds, :ok, fn
@@ -248,24 +256,41 @@ defmodule ReactiveDag.Node.Verifiers.VerifyReactive do
     if MapSet.size(payload_attrs) == 0 do
       :ok
     else
-      dests = List.wrap(group_by) ++ fold_dests(folds)
+      dests = Declarative.group_dests(group_by) ++ fold_dests(folds)
 
-      case Enum.reject(dests, &MapSet.member?(payload_attrs, &1)) do
-        [] ->
-          :ok
-
-        missing ->
+      cond do
+        (missing = Enum.reject(dests, &MapSet.member?(payload_attrs, &1))) != [] ->
           error(
             dsl,
             "the declarative `into:` row would carry #{inspect(missing)}, but this " <>
               "resource has no such attribute(s) — the payload loop writes row columns " <>
               "into the node's own attributes. Declared: #{inspect(MapSet.to_list(payload_attrs))}"
           )
+
+        (uncovered = identity_uncovered(dsl, dests)) != [] ->
+          error(
+            dsl,
+            "an IDENTITY-KEYED node's row must produce every primary-key field — " <>
+              "#{inspect(uncovered)} never appear(s) in the group columns or fold " <>
+              "destinations, so the upsert could not identify its row"
+          )
+
+        true ->
+          :ok
       end
     end
   end
 
   defp verify_dests(_dsl, _reduce_with_upsert, _folds), do: :ok
+
+  # for a composite primary key, the row IS its identity: every pk field must
+  # be produced by the declarative row (group dests ∪ fold dests).
+  defp identity_uncovered(dsl, dests) do
+    case Ash.Resource.Info.primary_key(dsl) do
+      pk when is_list(pk) and length(pk) > 1 -> pk -- dests
+      _ -> []
+    end
+  end
 
   defp fold_dests(folds) do
     Enum.flat_map(folds, fn

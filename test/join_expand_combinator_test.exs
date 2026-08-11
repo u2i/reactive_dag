@@ -46,7 +46,6 @@ defmodule ReactiveDag.JoinExpandCombinatorTest do
       id(:fiscal)
       op(:source)
       leaf?(true)
-      payload_key(:k)
     end
   end
 

@@ -65,6 +65,17 @@ the group's attributes plus the fold results (`count`/`sum`/`avg`/`min`/`max`/
 payload loop. `read: :recent` names a `:read` action on the over resource
 instead of its primary — same auto-scoping.
 
+**Keys are Ash keys.** A single-attribute primary key is the payload key,
+derived — `payload_key` exists only for non-PK key columns. Better: declare a
+**composite primary key** (`fund` + `fy`) and drop the key column entirely —
+the row IS its identity, the upsert conflicts on the primary key, and the cell
+key is the identity's serialization in primary-key order. The verifier checks
+every identity field is produced by the row (group columns ∪ fold dests). And
+the DAG edge reads as a **relational join**: a `group_by` entry may be the
+pair `parent_column: :child_field` (`group_by: [fund: :fund_code, fy: :fy]` —
+"this node's `fund` = the child's `fund_code`"), Ash's source/destination
+attributes for the graph.
+
 A combinator read is **always an Ash read** — to shape it, stay in the query:
 
 ```elixir

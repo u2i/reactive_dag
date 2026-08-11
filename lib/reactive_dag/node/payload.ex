@@ -52,6 +52,41 @@ defmodule ReactiveDag.Node.Payload do
     if changed?, do: :changed, else: :unchanged
   end
 
+  @doc """
+  Upsert an IDENTITY-KEYED row (a composite-primary-key node): the row carries
+  its identity fields, the upsert conflicts on the primary key (Ash's default
+  for `upsert? true`), and no key column exists — the cell key is the
+  identity's serialization, derived elsewhere. Returns `:changed` | `:unchanged`
+  with the same read-compare change detection as `upsert/5`.
+  """
+  @spec upsert_identity(module(), [atom()], map(), atom()) :: :changed | :unchanged
+  def upsert_identity(resource, identity_fields, row, action \\ :upsert) do
+    attrs = Map.drop(row, [:key])
+
+    changed? =
+      case existing_by(resource, Map.take(attrs, identity_fields)) do
+        nil -> true
+        record -> differs?(record, attrs)
+      end
+
+    {:ok, _} =
+      resource
+      |> Ash.Changeset.for_create(action, attrs)
+      |> Ash.create()
+
+    if changed?, do: :changed, else: :unchanged
+  end
+
+  defp existing_by(resource, identity_map) do
+    resource
+    |> Ash.Query.do_filter(Enum.to_list(identity_map))
+    |> Ash.read_one()
+    |> case do
+      {:ok, record} -> record
+      _ -> nil
+    end
+  end
+
   defp existing(resource, key_attr, cell_key) do
     resource
     |> Ash.Query.do_filter([{key_attr, cell_key}])

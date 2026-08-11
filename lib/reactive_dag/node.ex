@@ -11,26 +11,26 @@ defmodule ReactiveDag.Node do
           data_layer: AshPostgres.DataLayer,     # the node's OWN payload table
           extensions: [ReactiveDag.Node]
 
-        attributes do                             # the payload columns
-          attribute :key, :string, primary_key?: true
-          attribute :plant, :string
-          attribute :avg_flow, :float
+        attributes do                             # the payload columns; the row
+          attribute :plant, :string, primary_key?: true   # IS its identity — the
+          attribute :month, :string, primary_key?: true   # cell key "north|2024-01"
+          attribute :avg_flow, :float                     # is its serialization
         end
 
         actions do
-          create :upsert do upsert?(true); upsert_identity(:key); accept([:key, :plant, :avg_flow]) end
+          create :upsert do upsert?(true); accept([:plant, :month, :avg_flow]) end
         end
 
         reactive do
           op :fold
-          key_rule :all
-          # ASH-FIRST: the library reads :dmr_rows (dirty-key scoped), groups
-          # by the attributes, folds each group, and writes the row into THIS
-          # resource (keyed by :key) with the coordination Op.put. No `read:`,
-          # no `key:`, no `upsert:` — each slot has a fn escape hatch when the
-          # shape outgrows attributes.
+          # ASH-FIRST: the library reads :dmr_rows, groups by the attributes,
+          # folds each group, and upserts the row by its Ash IDENTITY with the
+          # coordination Op.put. No `read:`, no `key:`, no key column, no
+          # `upsert:` — each slot has an escape hatch when the shape outgrows
+          # attributes.
           reduce over: :dmr_rows,
                  group_by: [:plant, :month],
+                 key_rule: :group,
                  into: [avg: [flow: :avg_flow]]
         end
       end
@@ -40,9 +40,12 @@ defmodule ReactiveDag.Node do
   (`ReactiveDag.Node.Payload`) with change-detection. Writing into a *different*
   resource is the explicit deviation — supply a custom `upsert:` for that.
 
-  The cell key maps to the resource's `payload_key` attribute (default `:key`) via
-  the `payload_action` upsert (default `:upsert`); set those in the `reactive`
-  block if they're named otherwise.
+  Keys work like Ash keys. A SINGLE-attribute primary key is the payload key
+  (derived — declare `payload_key` only for a non-PK key column); a COMPOSITE
+  primary key means the row IS its identity: no key column at all, the upsert
+  conflicts on the primary key, and the cell key is the identity's
+  serialization in primary-key order (`"gf|2025"`). The `payload_action`
+  upsert defaults to `:upsert`.
 
   ## Which computation? (the Ash-first ladder)
 
@@ -273,14 +276,17 @@ defmodule ReactiveDag.Node do
             "`dirty_keys` is nil for a whole-cell recompute."
       ],
       group_by: [
-        type: {:or, [{:fun, 1}, :atom, {:list, :atom}]},
+        type: {:or, [{:fun, 1}, :atom, {:list, :any}]},
         required: true,
         doc:
           "an attribute or CALCULATION on the over resource (`:fund`, or `:month` where " <>
             "the over declares `calculate :month, :string, {ReactiveDag.Calendar, " <>
             "bucket: :month, of: :date}` — derived grouping values are Ash calculations, " <>
             "declared where the data lives; the library loads them). A list groups by " <>
-            "the TUPLE of values. The fn escape hatch: `(item -> group_term)`."
+            "the TUPLE of values; an entry may be the RELATIONAL-JOIN pair " <>
+            "`parent_column: :child_field` (`[category: :expense_cat]` — group by the " <>
+            "child's field, carry it as this node's column: Ash's source/destination " <>
+            "attributes, for the DAG edge). The fn escape hatch: `(item -> group_term)`."
       ],
       key: [
         type: {:fun, 1},
@@ -754,9 +760,13 @@ defmodule ReactiveDag.Node do
       leaf?: [type: :boolean, default: false, doc: "true for a source-fed leaf (no compute)"],
       payload_key: [
         type: :atom,
-        default: :key,
         doc:
-          "the resource attribute the cell key writes to when the library closes the payload loop (a `reduce`/`join` with no `upsert:`). Defaults to `:key`."
+          "the resource attribute the cell key writes to when the library closes the " <>
+            "payload loop. DERIVED like Ash derives keys: defaults to the resource's " <>
+            "single-attribute primary key (else `:key`) — declare it only for a " <>
+            "non-primary key column. A COMPOSITE primary key needs no payload_key at " <>
+            "all: the row is upserted by its identity and the cell key is the " <>
+            "identity's serialization."
       ],
       payload_action: [
         type: :atom,
@@ -955,7 +965,9 @@ defmodule ReactiveDag.Node do
 
         source = %{
           resource: resource,
-          payload_key: over.meta[:payload_key] || :key,
+          # nil for an IDENTITY-KEYED over (composite PK): its cell keys are
+          # serialized identities, not a column — key scoping then stands down.
+          payload_key: over.meta[:payload_key],
           read_action: read,
           load: loads,
           group_key_plan: group_key_plan(spec, resource)
@@ -978,7 +990,7 @@ defmodule ReactiveDag.Node do
   # anything richer resolves by lookup and reads whole (or `query:`-scoped).
   defp group_key_plan(%Reduce{group_by: g, key: nil}, resource) when is_atom(g) or is_list(g) do
     g
-    |> List.wrap()
+    |> ReactiveDag.Node.Recompute.Declarative.group_children()
     |> Enum.map(fn name ->
       cond do
         attr = Ash.Resource.Info.attribute(resource, name) ->
@@ -1017,10 +1029,14 @@ defmodule ReactiveDag.Node do
   defp declarative_loads!(cell, spec, resource) do
     names =
       case spec do
-        %Reduce{group_by: g} when is_atom(g) -> [g]
-        %Reduce{group_by: g} when is_list(g) -> g
-        %Join{} = j -> side_attrs(j.left) ++ side_attrs(j.right)
-        _ -> []
+        %Reduce{group_by: g} when is_atom(g) or is_list(g) ->
+          ReactiveDag.Node.Recompute.Declarative.group_children(g)
+
+        %Join{} = j ->
+          side_attrs(j.left) ++ side_attrs(j.right)
+
+        _ ->
+          []
       end
 
     Enum.reduce(names, [], fn name, loads ->
@@ -1453,6 +1469,27 @@ defmodule ReactiveDag.Node do
     end
   end
 
+  # a COMPOSITE primary key means the node is IDENTITY-KEYED: rows upsert by
+  # identity, and the cell key is the serialization of these fields in order.
+  defp identity_fields(resource) do
+    case Ash.Resource.Info.primary_key(resource) do
+      pk when is_list(pk) and length(pk) > 1 -> pk
+      _ -> nil
+    end
+  end
+
+  # ASH-DERIVED payload key: the resource's single-attribute primary key (the
+  # resource already declares its identity — restating it was duplication).
+  # Composite primary keys return nil: those nodes are IDENTITY-KEYED (the row
+  # upserts by its identity; the cell key is the identity's serialization, in
+  # primary-key order).
+  defp derived_payload_key(resource) do
+    case Ash.Resource.Info.primary_key(resource) do
+      [single] -> single
+      _ -> nil
+    end
+  end
+
   # public, non-primary-key attributes — the payload columns a verdict node must not have.
   defp payload_attributes(resource) do
     resource
@@ -1514,9 +1551,10 @@ defmodule ReactiveDag.Node do
         source: Ext.get_opt(resource, [:reactive], :source, nil),
         driver: Ext.get_opt(resource, [:reactive], :driver, nil),
         over: Ext.get_opt(resource, [:reactive], :over, nil),
-        payload_key: Ext.get_opt(resource, [:reactive], :payload_key, nil),
+        payload_key: Ext.get_opt(resource, [:reactive], :payload_key, nil) || derived_payload_key(resource),
         payload_action: Ext.get_opt(resource, [:reactive], :payload_action, nil),
         coordination_opts: Ext.get_opt(resource, [:reactive], :coordination_opts, nil),
+        identity_fields: identity_fields(resource),
         verdict: verdict_flag(resource),
         context_inputs: context_inputs(resource)
       }

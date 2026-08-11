@@ -40,6 +40,7 @@ defmodule ReactiveDag.Node.Recompute do
   def recompute(%Cell{meta: %{reduce: %{} = r}} = cell, keys) do
     group_by = Declarative.group_fn(r.group_by)
     key_fn = Declarative.key_fn(r.key, r.key_prefix)
+    keyer = row_keyer(cell, r, key_fn)
 
     # which slot emits a group's [{key, row}] pairs — the verifier guarantees
     # exactly the right one is declared for the node's shape.
@@ -53,7 +54,7 @@ defmodule ReactiveDag.Node.Recompute do
 
         true ->
           into = Declarative.into_fn(r.into, r.group_by)
-          fn group, items -> into_pair(into.(group, items), key_fn, group) end
+          fn group, items -> into_pair(into.(group, items), keyer, group) end
       end
 
     pairs =
@@ -75,13 +76,14 @@ defmodule ReactiveDag.Node.Recompute do
     left = index(items, Declarative.side_fn(j.left))
     right = index(items, Declarative.side_fn(j.right))
     key_fn = Declarative.key_fn(j.key, j.key_prefix)
+    keyer = row_keyer(cell, j, key_fn)
 
     emit =
       if is_function(j.status, 3) do
         fn jk, l, r -> [{key_fn.(jk), status_row(j.status.(jk, l, r))}] end
       else
         into = Declarative.join_into_fn(j.into)
-        fn jk, l, r -> into_pair(into.(jk, l, r), key_fn, jk) end
+        fn jk, l, r -> into_pair(into.(jk, l, r), keyer, jk) end
       end
 
     left_pairs =
@@ -237,17 +239,30 @@ defmodule ReactiveDag.Node.Recompute do
   defp status_row(status), do: %{status: status}
 
   # an `into:` result is ONE row: its own `:key` wins (a self-identified row),
-  # else the key derives from the group term / join key. A list here is the
-  # old expand overload — point at the `expand:` slot.
-  defp into_pair(rows, _key_fn, _term) when is_list(rows) do
+  # else the cell keyer derives it — from the row's IDENTITY fields for a
+  # composite-primary-key node, else from the group term / join key. A list
+  # here is the old expand overload — point at the `expand:` slot.
+  defp into_pair(rows, _keyer, _term) when is_list(rows) do
     raise "reactive_dag: `into:` returns ONE row per group — the group → many-rows " <>
             "shape is the `expand:` slot (each row carrying its own :key)"
   end
 
-  defp into_pair(row, key_fn, term) when is_map(row) do
-    key = if is_map_key(row, :key), do: row.key, else: key_fn.(term)
+  defp into_pair(row, keyer, term) when is_map(row) do
+    key = if is_map_key(row, :key), do: row.key, else: keyer.(row, term)
     [{key, row}]
   end
+
+  # how a payload row gets its cell key: an IDENTITY-KEYED node (composite
+  # primary key) serializes the row's identity fields in primary-key order —
+  # the key IS the identity, not a stored column; anything else derives from
+  # the group term / join key as ever.
+  defp row_keyer(%Cell{meta: %{identity_fields: fields}}, spec, _key_fn)
+       when is_list(fields) do
+    id_key = Declarative.identity_key_fn(fields, Map.get(spec, :key_prefix))
+    fn row, _term -> id_key.(row) end
+  end
+
+  defp row_keyer(_cell, _spec, key_fn), do: fn _row, term -> key_fn.(term) end
 
   # `expand:` rows fan one group out to many keys, so each row must self-key.
   defp expand_pairs(rows, cell_id) when is_list(rows) do
@@ -328,9 +343,21 @@ defmodule ReactiveDag.Node.Recompute do
         """
 
       resource ->
-        key_attr = meta[:payload_key] || :key
         action = meta[:payload_action] || :upsert
-        fn key, row -> ReactiveDag.Node.Payload.upsert(resource, key_attr, key, row, action) == :changed end
+
+        case meta[:identity_fields] do
+          fields when is_list(fields) ->
+            fn _key, row ->
+              ReactiveDag.Node.Payload.upsert_identity(resource, fields, row, action) == :changed
+            end
+
+          _ ->
+            key_attr = meta[:payload_key] || :key
+
+            fn key, row ->
+              ReactiveDag.Node.Payload.upsert(resource, key_attr, key, row, action) == :changed
+            end
+        end
     end
   end
 

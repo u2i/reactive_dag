@@ -54,6 +54,10 @@ defmodule ReactiveDag.Node.Recompute.Read do
 
   defp scope_query(query, _pk, nil), do: query
 
+  # an IDENTITY-KEYED over (composite PK) has no key column to filter — the
+  # keyed scope stands down and the read stays whole (or `query:`-scoped).
+  defp scope_query(query, nil, {:keys, _keys}), do: query
+
   defp scope_query(query, pk, {:keys, keys}),
     do: Ash.Query.do_filter(query, [{pk, [in: keys]}])
 

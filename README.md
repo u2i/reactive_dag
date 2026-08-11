@@ -64,24 +64,23 @@ defmodule MyApp.BudgetRollups do
     extensions: [ReactiveDag.Node]
 
   attributes do
-    attribute :key, :string, primary_key?: true          # the payload columns
-    attribute :fund, :string
-    attribute :fy, :integer
-    attribute :total, :float
+    attribute :fund, :string, primary_key?: true         # the row IS its identity —
+    attribute :fy, :integer, primary_key?: true          # no :key column; the cell
+    attribute :total, :float                             # key is "gf|2025", derived
   end
   actions do
-    create :upsert do upsert?(true); upsert_identity(:key); accept([:key, :fund, :fy, :total]) end
+    create :upsert do upsert?(true); accept([:fund, :fy, :total]) end
   end
 
   reactive do
     op :fold
-    key_rule :all
-    # ASH-FIRST: the library reads :fiscal_lines (dirty-key scoped), groups by
-    # the attributes, folds each group, writes the row into THIS resource, and
-    # Op.puts only the changed keys. Keys derive as "gf|2025". Every slot has a
-    # fn escape hatch when the shape outgrows attributes.
+    # ASH-FIRST: the library reads :fiscal_lines, groups by the attributes,
+    # folds each group, upserts the row by its Ash IDENTITY, and Op.puts only
+    # the changed keys. `key_rule: :group` claims per changed group. Every
+    # slot has an escape hatch when the shape outgrows attributes.
     reduce over: :fiscal_lines,
            group_by: [:fund, :fy],
+           key_rule: :group,
            into: [sum: [amount: :total]]
   end
 end
