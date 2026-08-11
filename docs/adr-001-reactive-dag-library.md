@@ -162,9 +162,11 @@ was larger, and in exactly the places the proposal was unsure about:
   declares its op + dependencies + computation in a `reactive` block, and
   `ReactiveDag.Node.graph/2` assembles the whole `Plan` from the node resources (the central
   pipeline module dissolves onto the resources). Computation is declared with
-  three combinators — `reduce` (fold), `expand` (group → many rows), `join`
-  (two-input left join) — for the common map/reduce shapes, with `compute: Module`
-  (a `ReactiveDag.Op`) as the escape hatch for LLM/fetch/bespoke recomputes. This
+  three combinators — `reduce` (fold; its `into` may return a *list* of rows,
+  the group → many-rows "expand" shape), `join` (index one input into left/right
+  sides), and `aggregate` (a pure-datastore relationship aggregate) — for the
+  common map/reduce shapes, with `compute Module` (a `ReactiveDag.Op` entity) as
+  the escape hatch for LLM/fetch/bespoke recomputes. This
   is the Ash calculation model (DSL for common, module for arbitrary) applied to
   DAG nodes. `Node.Recompute`/`Node.KeyRule` run a Node graph with no host-written
   dispatch. Cascade authors several ops this way; full adoption of either app's
