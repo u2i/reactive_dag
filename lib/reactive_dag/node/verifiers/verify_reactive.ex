@@ -68,7 +68,8 @@ defmodule ReactiveDag.Node.Verifiers.VerifyReactive do
   end
 
   defp verify_entity(dsl, %Join{} = j) do
-    with :ok <- verify_key_rule_home(dsl, j.key_rule),
+    with :ok <- verify_join_edge(dsl, j),
+         :ok <- verify_key_rule_home(dsl, j.key_rule),
          :ok <- verify_key_prefix(dsl, j.key, j.key_prefix),
          :ok <- verify_side(dsl, :left, j.left),
          :ok <- verify_side(dsl, :right, j.right),
@@ -153,6 +154,70 @@ defmodule ReactiveDag.Node.Verifiers.VerifyReactive do
   end
 
   defp verify_over(_dsl, _r), do: :ok
+
+  # a join's edge is declared ONE way too: `over:` with both sides projected
+  # from it, or a relationship per side (each carrying its own resource).
+  defp verify_join_edge(dsl, %Join{left_rel: nil, right_rel: nil} = j) do
+    cond do
+      is_nil(j.over) ->
+        error(
+          dsl,
+          "a `join` declares no input — name one node to split (`over: :lines` with " <>
+            "`left:`/`right:`), or a relationship per side (`left_rel:`/`right_rel:`)."
+        )
+
+      is_nil(j.left) or is_nil(j.right) ->
+        error(
+          dsl,
+          "a `join over:` must declare BOTH `left:` and `right:` — the sides are only " <>
+            "implicit when each names a relationship (`left_rel:`/`right_rel:`), which " <>
+            "carries its own join key and filter."
+        )
+
+      true ->
+        :ok
+    end
+  end
+
+  defp verify_join_edge(dsl, %Join{} = j) do
+    cond do
+      not is_nil(j.over) ->
+        error(
+          dsl,
+          "a `join` declares both `over:` and a side relationship — with " <>
+            "`left_rel:`/`right_rel:` each side carries its own resource, so there is " <>
+            "no single `over:`. Drop `over:`, or spell the sides with `left:`/`right:`."
+        )
+
+      is_nil(j.left_rel) or is_nil(j.right_rel) ->
+        missing = if is_nil(j.left_rel), do: "left_rel:", else: "right_rel:"
+
+        error(
+          dsl,
+          "a relationship-sided `join` needs BOTH sides — `#{missing}` is missing. " <>
+            "(To mix, spell the other side with `left:`/`right:` and `over:`.)"
+        )
+
+      true ->
+        Enum.reduce_while([j.left_rel, j.right_rel], :ok, fn rel, :ok ->
+          case Ash.Resource.Info.relationship(dsl, rel) do
+            nil ->
+              names = Enum.map(Ash.Resource.Info.relationships(dsl), & &1.name)
+
+              {:halt,
+               error(
+                 dsl,
+                 "join side `#{inspect(rel)}` names no such relationship on this " <>
+                   "resource. Declare it in the `relationships` block, or spell the " <>
+                   "side with `left:`/`right:`. Available: #{inspect(names)}"
+               )}
+
+            _ ->
+              {:cont, :ok}
+          end
+        end)
+    end
+  end
 
   # the node-shape × result-slot matrix: a VERDICT node's result IS its status
   # (`status:` required, row slots forbidden); a payload node emits rows

@@ -30,7 +30,7 @@ real change.
 | rung | you write | when |
 |---|---|---|
 | `aggregate` | attribute atoms only | the fold is a datastore aggregate over a relationship |
-| `reduce over_rel:` | a relationship name + the fold | the edge is a declared Ash relationship — it carries the grouping too |
+| `reduce over_rel:` / `join left_rel:` | relationship names + the fold/picks | the edges are declared Ash relationships — they carry the grouping/join keys too |
 | declarative `reduce`/`join` | attributes + fold keywords | grouping/joining by attributes; the library reads Ash for you |
 | per-slot escapes | a fn for the one slot that outgrew attributes | `query:`, computed groups/keys/rows, `expand:`, `status:` |
 | `run :action` | a generic Ash action on this resource | arbitrary recompute that should stay a first-class action |
@@ -200,7 +200,54 @@ non-default in both places is a compile error. `test/date_rollup_demo_test.exs`
 and `test/group_rule_test.exs` are the worked demos: touch one reading (or one
 expense), watch exactly one month (or category) recompute and propagate.
 
-### `join` — a left join (one input, two sides), declared
+### `join` — a left join, declared
+
+The Ash-native spelling gives **each side a relationship**:
+
+```elixir
+relationships do
+  has_many :budget_lines, MyApp.Budget do
+    source_attribute :acct
+    destination_attribute :account_code
+  end
+
+  has_many :actual_lines, MyApp.Actual do
+    source_attribute :acct
+    destination_attribute :acct
+  end
+end
+
+reactive do
+  join left_rel: :budget_lines,
+       right_rel: :actual_lines,
+       into: [left: [amount: :budget], right: [amount: :actual]]
+end
+```
+
+Each side carries its own **resource** (the relationship's destination), its
+**join key** (`destination_attribute`) and its **membership predicate** (the
+relationship's own `filter`). Because each side names its own node, the two
+sides may be **different nodes** — read and scoped independently, each
+contributing its own input edge, so a change on either side propagates through
+it.
+
+The **discriminator split** — one node divided into two sides — is then just
+two relationships pointing at the same resource, with the predicate living in
+Ash's own `filter`:
+
+```elixir
+has_many :budget_lines, MyApp.Line do
+  source_attribute :acct
+  destination_attribute :acct
+  filter expr(kind == "budget")      # what `where:` used to say
+end
+```
+
+(The filter must be equality pairs, optionally `and`-chained — that is what the
+in-BEAM side matcher can honour. Anything richer raises, pointing at the
+explicit spelling.)
+
+Or index **one** input into two sides directly:
 
 ```elixir
 join over: :entries,
@@ -212,8 +259,7 @@ join over: :entries,
 One row per **left** key, right side optional; an absent side yields `nil`
 columns, so the declared-vs-observed gap is information, not an error. A plain
 attribute is the two-column case (`left: :declared_id` — a nil value means
-"not on this side"); `[key:, where:]` splits ONE input into sides by a
-discriminator field. `outer: true` also emits right-only keys (an undeclared
+"not on this side"). `outer: true` also emits right-only keys (an undeclared
 member is a finding). The fn escapes: `left: fn item -> ... end` for computed
 side keys, `into: fn jk, l, r -> ... end` for computed columns
 (variance = budget − actual); a verdict join declares `status:`

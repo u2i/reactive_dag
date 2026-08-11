@@ -72,9 +72,9 @@ defmodule ReactiveDag.Node.Recompute do
   # reconcile shape, where an undeclared right-side member is a finding.
   # `read` may be arity-2 for dirty-key scoping (see `reduce` above).
   def recompute(%Cell{meta: %{join: %{} = j}} = cell, keys) do
-    items = Read.items(cell.meta[:over_source], j.over, j.query, scope(keys), auto_scope(cell, keys))
-    left = index(items, Declarative.side_fn(j.left))
-    right = index(items, Declarative.side_fn(j.right))
+    {left_items, right_items} = join_items(cell, j, keys)
+    left = index(left_items, Declarative.side_fn(j.left))
+    right = index(right_items, Declarative.side_fn(j.right))
     key_fn = Declarative.key_fn(j.key, j.key_prefix)
     keyer = row_keyer(cell, j, key_fn)
 
@@ -225,6 +225,33 @@ defmodule ReactiveDag.Node.Recompute do
 
   # the claimed keys as a read scope: `nil` for a whole-cell recompute (`"*"`),
   # else the specific dirty keys a scoped `read` can filter its query to.
+  # a join's item sets: ONE read indexed into both sides (the `over:`
+  # self-join), or one read PER SIDE when each side names its own relationship
+  # — the sides may be different resources, so they are read and scoped
+  # independently. A side whose relationship is absent falls back to the other
+  # side's items (the mixed `left_rel:` + `right:` spelling).
+  defp join_items(%Cell{meta: %{side_sources: %{} = sides}} = cell, j, keys) do
+    auto = auto_scope(cell, keys)
+    claimed = scope(keys)
+
+    read = fn
+      nil -> nil
+      source -> Read.items(source, j.over, j.query, claimed, auto)
+    end
+
+    left = read.(sides[:left])
+    right = read.(sides[:right])
+
+    {left || right, right || left}
+  end
+
+  defp join_items(cell, j, keys) do
+    items =
+      Read.items(cell.meta[:over_source], j.over, j.query, scope(keys), auto_scope(cell, keys))
+
+    {items, items}
+  end
+
   defp scope(keys) do
     cond do
       is_nil(keys) -> nil
