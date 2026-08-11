@@ -58,7 +58,8 @@ defmodule ReactiveDag.Node.Verifiers.VerifyReactive do
   end
 
   defp verify_entity(dsl, %Reduce{} = r) do
-    with :ok <- verify_key_prefix(dsl, r.key, r.key_prefix),
+    with :ok <- verify_key_rule_home(dsl, r.key_rule),
+         :ok <- verify_key_prefix(dsl, r.key, r.key_prefix),
          :ok <- verify_result_slots(dsl, :reduce, r.status, into: r.into, expand: r.expand),
          :ok <- verify_reduce_into(dsl, r) do
       :ok
@@ -66,7 +67,8 @@ defmodule ReactiveDag.Node.Verifiers.VerifyReactive do
   end
 
   defp verify_entity(dsl, %Join{} = j) do
-    with :ok <- verify_key_prefix(dsl, j.key, j.key_prefix),
+    with :ok <- verify_key_rule_home(dsl, j.key_rule),
+         :ok <- verify_key_prefix(dsl, j.key, j.key_prefix),
          :ok <- verify_side(dsl, :left, j.left),
          :ok <- verify_side(dsl, :right, j.right),
          :ok <- verify_result_slots(dsl, :join, j.status, into: j.into),
@@ -144,6 +146,26 @@ defmodule ReactiveDag.Node.Verifiers.VerifyReactive do
 
       true ->
         :ok
+    end
+  end
+
+  # the combinator's key_rule: is the preferred home (the claim grain and the
+  # computation it must agree with, in one unit) — a NON-DEFAULT block-level
+  # key_rule alongside it is two contradictory declarations.
+  defp verify_key_rule_home(_dsl, nil), do: :ok
+
+  defp verify_key_rule_home(dsl, _entity_rule) do
+    case Verifier.get_option(dsl, [:reactive], :key_rule) do
+      rule when rule in [nil, :identity] ->
+        :ok
+
+      block_rule ->
+        error(
+          dsl,
+          "key_rule is declared BOTH on the combinator and at block level " <>
+            "(#{inspect(block_rule)}) — declare it once, on the combinator " <>
+            "(the claim grain and the computation it must agree with belong together)"
+        )
     end
   end
 
