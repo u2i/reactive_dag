@@ -948,6 +948,20 @@ defmodule ReactiveDag.Node do
             "and the computation it must agree with belong in one unit."
       ],
       leaf?: [type: :boolean, default: false, doc: "true for a source-fed leaf (no compute)"],
+      dirties_on: [
+        type: {:list, {:one_of, [:create, :update, :destroy]}},
+        required: false,
+        doc:
+          "make ordinary Ash writes trigger the cascade: a `:create`/`:update`/`:destroy` " <>
+            "on THIS resource marks the written record's key dirty on this cell, so the " <>
+            "next drain picks it up. Without it a host must call " <>
+            "`ReactiveDag.Frontier.mark_dirty/3` at every write site, and a missed call " <>
+            "is silent staleness. Wired as an `after_action` change, so the mark runs " <>
+            "INSIDE the write's transaction — a rolled-back write leaves no dirty key, " <>
+            "and a committed one always leaves one. (A NOTIFIER cannot promise that: " <>
+            "Ash dispatches notifications after commit.) Opt-in, and not implied by " <>
+            "`leaf?` — a leaf fed by a `ReactiveDag.Source` poll would double-trigger."
+      ],
       payload_key: [
         type: :atom,
         doc:
@@ -1034,6 +1048,7 @@ defmodule ReactiveDag.Node do
 
   use Spark.Dsl.Extension,
     sections: [@reactive],
+    transformers: [ReactiveDag.Node.Transformers.AddMarkDirty],
     verifiers: [ReactiveDag.Node.Verifiers.VerifyReactive]
 
   # ── introspection + graph assembly ────────────────────────────────────────

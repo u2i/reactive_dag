@@ -23,6 +23,10 @@ decides *how* or *what a value means*. Each host brings its domain at the seams:
   Returns the keys that actually changed.
 - **`ReactiveDag.KeyRule`** — how a change propagates to a parent (identity, a
   remap, or `:all` for a whole-cell recompute).
+- **`dirties_on`** — make ordinary Ash writes trigger the cascade: a
+  create/update/destroy on a leaf resource marks that record's key dirty,
+  inside the write's own transaction. Opt-in; without it the host calls
+  `Frontier.mark_dirty/3` itself.
 - **`ReactiveDag.CoordinationWriter`** — how a cell's coordination tuples are
   written (the host writes its spine + extension columns in one atomic upsert).
   A default spine-only writer ships; hosts with extension columns supply their own.
@@ -43,6 +47,7 @@ decides *how* or *what a value means*. Each host brings its domain at the seams:
 | **Node authoring** | `ReactiveDag.Node` | the authoring surface — an **Ash resource extension**: a resource declares its op + dependencies + computation in a `reactive do … end` block. The resource *is* the node **and** its own payload table. `ReactiveDag.Node.graph/2` assembles the `Plan` from the node resources. |
 | **Payload loop** | `ReactiveDag.Node.Payload` | writes a combinator's row into the node's own resource (the default; omit `upsert:`). A `verdict? true` node stores nothing of its own — its result is the coordination tuple. |
 | **Introspection** | `ReactiveDag.Insights` | the engine viewed from outside, for a dashboard/mix task/health check: `levels/1` + `edges/1` (structure), `cell_status/2` + `summary/1` (status histogram, key count, freshness, failing sample), `pending/1` (what the next drain would do), and an opt-in rolling window of `%Drain.Report{}`s (`record/1` / `recent/1` / `last_report/0`). All reads, no UI dependency — [reactive_dag_dashboard](https://github.com/u2i/reactive_dag_dashboard) renders it. |
+| **Write triggers** | `dirties_on` | make ordinary Ash writes trigger the cascade: a create/update/destroy on a leaf resource marks that record's key dirty, **inside the write's own transaction** (so a rollback leaves nothing, and a commit always leaves the mark). Opt-in; without it the host calls `Frontier.mark_dirty/3` at every write site. Contrast `Source`, which polls state the datastore does not own. |
 | **Scanner seam** | `ReactiveDag.Source` | the behaviour a scanner implements (`id / leaf_cells / poll`) — reads external state into a leaf in a *poll* phase outside the drain; `verify!/2` checks every declared leaf resolves to a real cell. |
 
 The host owns its **physical tables** (dirty + tuple, named via config), its
