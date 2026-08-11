@@ -176,6 +176,28 @@ defmodule ReactiveDag.Node.Recompute do
       :identity -> keyed_scope(keys)
       nil -> keyed_scope(keys)
       {:bucket, kind} -> bucket_hull(meta[:over_source], kind, scope(keys))
+      :group -> group_attr_scope(meta, scope(keys))
+      _ -> nil
+    end
+  end
+
+  # `:group` claims are group labels; when assembly proved the group is one
+  # plain string attribute with default keys (over_source.group_scope_attr),
+  # the labels ARE that attribute's values (minus any key_prefix) — filter it.
+  defp group_attr_scope(_meta, nil), do: nil
+
+  defp group_attr_scope(meta, labels) do
+    with %{group_scope_attr: attr} when not is_nil(attr) <- meta[:over_source] do
+      prefix = get_in(meta, [:reduce]) |> then(&(&1 && Map.get(&1, :key_prefix)))
+
+      values =
+        case prefix do
+          nil -> labels
+          p -> Enum.map(labels, &String.replace_prefix(&1, p <> "|", ""))
+        end
+
+      {:attr, attr, values}
+    else
       _ -> nil
     end
   end
