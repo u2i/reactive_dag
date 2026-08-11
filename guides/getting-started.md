@@ -45,8 +45,10 @@ the physical tables live in *your* migrations — that's what lets a host add it
 own extension columns beside the spine.
 
 The dirty frontier has no extension columns, so the library can own its DDL —
-`ReactiveDag.Migration.up/1` / `down/1` create it for you (honoring
-`dirty_table:`):
+`ReactiveDag.Migration.up/1` / `down/1` create it for you, resolving the table
+name exactly as the runtime does (`config :reactive_dag, dirty_table:`, with an
+explicit `dirty_table:` option overriding), so the migrated table and the
+queried table can't silently diverge:
 
 ```elixir
 defmodule MyApp.Repo.Migrations.AddReactiveDag do

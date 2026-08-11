@@ -11,12 +11,15 @@ defmodule ReactiveDag.Migration do
         def down, do: ReactiveDag.Migration.down()
       end
 
+  The table name resolves exactly as `Frontier`'s reads do — an explicit
+  `:dirty_table` option, else `config :reactive_dag, dirty_table:`, else
+  `"reactive_dag_dirty"` — so a host that sets the config gets a migration
+  matching the table the runtime queries, with no second place to keep in sync.
+
   Options (both directions):
 
-    * `:dirty_table` — the table name, when the host overrides
-      `config :reactive_dag, dirty_table:` (default `"reactive_dag_dirty"`,
-      matching `Frontier`). A host adopting the library onto an existing
-      hand-rolled table keeps its name in BOTH places.
+    * `:dirty_table` — override the resolved table name for this migration
+      only (rare; the config is the normal home).
 
   The coordination TUPLE table is deliberately not created here: its schema is
   host-extended (extension columns like `strength` ride the host's
@@ -26,9 +29,18 @@ defmodule ReactiveDag.Migration do
 
   @default_dirty "reactive_dag_dirty"
 
+  @doc false
+  # option > config > default — the same resolution Frontier's reads use, so
+  # the migrated table and the queried table cannot silently diverge.
+  def table_name(opts \\ []) do
+    Keyword.get_lazy(opts, :dirty_table, fn ->
+      Application.get_env(:reactive_dag, :dirty_table, @default_dirty)
+    end)
+  end
+
   @doc "Create the dirty-frontier table + its coalescing unique index."
   def up(opts \\ []) do
-    name = Keyword.get(opts, :dirty_table, @default_dirty)
+    name = table_name(opts)
 
     create_if_not_exists table(name, primary_key: false) do
       add(:cell_id, :text, null: false)
@@ -42,7 +54,7 @@ defmodule ReactiveDag.Migration do
 
   @doc "Drop the dirty-frontier table."
   def down(opts \\ []) do
-    name = Keyword.get(opts, :dirty_table, @default_dirty)
+    name = table_name(opts)
     drop_if_exists(unique_index(name, [:cell_id, :key]))
     drop_if_exists(table(name))
   end
