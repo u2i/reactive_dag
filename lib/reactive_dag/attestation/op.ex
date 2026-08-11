@@ -96,8 +96,8 @@ defmodule ReactiveDag.Attestation.Op do
   The SCOPE INSTANCES of a filter-shaped requirement — `{instance_key,
   key_scope}` pairs, one view row each. Pure: `{:filter, ks}` yields the single
   instance (keyed by the requirement's `instance_key`); `{:filter_by, fun}`
-  derives one per eligibility key (nil skips; deduped by instance key, first
-  wins).
+  derives one per eligibility key (nil — or a clause that doesn't match the
+  key — skips; deduped by instance key, first wins).
   """
   @spec instances(Requirement.t(), [String.t()]) :: [{String.t(), term()}]
   def instances(%Requirement{scope: {:filter, key_scope}} = req, _eligibility) do
@@ -106,9 +106,26 @@ defmodule ReactiveDag.Attestation.Op do
 
   def instances(%Requirement{scope: {:filter_by, fun}}, eligibility) do
     eligibility
-    |> Enum.map(fun)
+    |> Enum.map(&instance_of(fun, &1))
     |> Enum.reject(&is_nil/1)
     |> Enum.uniq_by(&elem(&1, 0))
+  end
+
+  # "nil skips" must hold for a CLAUSE MISS too: the fun is mapped over EVERY
+  # eligibility key, and a host fn written for its expected key shape would
+  # otherwise crash the drain on the first unexpected row. Only the host fn's
+  # own miss is a skip — a FunctionClauseError from deeper code re-raises.
+  defp instance_of(fun, eligibility_key) do
+    fun.(eligibility_key)
+  rescue
+    e in FunctionClauseError ->
+      info = Function.info(fun)
+
+      if e.module == info[:module] and e.function == info[:name] and e.arity == 1 do
+        nil
+      else
+        reraise e, __STACKTRACE__
+      end
   end
 
   @doc """

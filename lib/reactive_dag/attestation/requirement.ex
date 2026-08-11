@@ -17,8 +17,9 @@ defmodule ReactiveDag.Attestation.Requirement do
           that selects everything, e.g. `{:prefix, "%"}`). The view writes a
           single row, keyed by `instance_key` (default `"all"`);
         * `{:filter_by, fun}` — one set-level instance PER ELIGIBILITY ROW:
-          `fun.(eligibility_key)` returns `{instance_key, key_scope}` (or nil
-          to skip), deduped by instance key. The per-person completeness
+          `fun.(eligibility_key)` returns `{instance_key, key_scope}` (nil —
+          or a clause that doesn't match the key — skips it), deduped by
+          instance key. The per-person completeness
           shape: "these are ALL my machines" derives one filter per person
           from the same cell that licenses them to sign it.
     * `signers` — the ELIGIBILITY CELL's id (an atom, like any `ref`). Who may

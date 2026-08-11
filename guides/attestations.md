@@ -299,10 +299,15 @@ end
 
 attestation :holdings_complete do
   # one instance PER PERSON, derived from the eligibility cell itself:
-  # each candidate's own subset, signable only by them.
-  scope {:filter_by, fn "SER" <> _ = pair ->
-    [_serial, email] = String.split(pair, "|", parts: 2)
-    {email, {:segment, 2, "|", email}}
+  # each candidate's own subset, signable only by them. Return nil (or just
+  # don't match) for an eligibility key that derives no instance.
+  scope {:filter_by, fn
+    "SER" <> _ = pair ->
+      [_serial, email] = String.split(pair, "|", parts: 2)
+      {email, {:segment, 2, "|", email}}
+
+    _other ->
+      nil
   end}
   signers :machine_match
   join fn {:filter, {:segment, 2, "|", email}}, pair ->

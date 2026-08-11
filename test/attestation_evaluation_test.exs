@@ -260,6 +260,36 @@ defmodule ReactiveDag.AttestationEvaluationTest do
                {"bob@u2i.com", {:segment, 2, "|", "bob@u2i.com"}}
              ]
     end
+
+    test "a clause miss on an unexpected eligibility key SKIPS, like nil" do
+      # regression: a single-clause fn (the shape the guide showed) used to
+      # raise FunctionClauseError mid-recompute on the first unexpected row.
+      r =
+        req(
+          scope:
+            {:filter_by,
+             fn "SER" <> _ = pair ->
+               [_serial, email] = String.split(pair, "|", parts: 2)
+               {email, {:segment, 2, "|", email}}
+             end}
+        )
+
+      assert Op.instances(r, ["SER1|a@x", "garbage"]) == [{"a@x", {:segment, 2, "|", "a@x"}}]
+    end
+
+    test "a FunctionClauseError from DEEPER code still raises — only the fn's own miss skips" do
+      r =
+        req(
+          scope:
+            {:filter_by,
+             fn _key ->
+               # a genuine bug inside the host fn: a clause miss in code it CALLS
+               String.split(:not_a_string, "|")
+             end}
+        )
+
+      assert_raise FunctionClauseError, fn -> Op.instances(r, ["any"]) end
+    end
   end
 
   describe "filter scope (set-level: the completeness carrier)" do
