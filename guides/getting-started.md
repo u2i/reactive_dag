@@ -16,7 +16,8 @@ running two-cell graph.
 # mix.exs
 defp deps do
   [
-    {:reactive_dag, git: "git@github.com:u2i/reactive_dag.git", tag: "v0.9.0"}
+    # pin the latest tag — https://github.com/u2i/reactive_dag/tags
+    {:reactive_dag, git: "git@github.com:u2i/reactive_dag.git", tag: "v0.15.0"}
   ]
 end
 ```

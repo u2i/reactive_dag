@@ -219,6 +219,6 @@ Status: **both hosts run on the substrate** — the shared engine spans a per-ke
 Elixir recompute (cascade) and a set-based SQL recompute (the portal), all
 coordination writes routed through the seam, proven by both suites green. Cascade
 authors several ops via the `Node` `reduce`/`join` combinators; the standalone
-compliance app consumes tagged releases (`tag: "v0.9.0"`). See
+compliance app consumes tagged releases. See
 [docs/adr-001-reactive-dag-library.md](docs/adr-001-reactive-dag-library.md)
 for the boundary, the seams, and the design law behind them.
