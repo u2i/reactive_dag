@@ -8,6 +8,11 @@ on:
   release:
     types: [published]
   workflow_dispatch:
+    inputs:
+      replace:
+        description: "Replace an existing release (hex allows this within 1h of publish)"
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -22,6 +27,6 @@ jobs:
           version-file: .tool-versions
           version-type: strict
       - run: mix deps.get
-      - run: mix hex.publish --yes
+      - run: mix hex.publish --yes ${{ inputs.replace == true && '--replace' || '' }}
         env:
           HEX_API_KEY: ${{ secrets.HEX_API_KEY }}

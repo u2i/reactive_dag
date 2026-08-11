@@ -7,9 +7,12 @@ from two apps that independently grew the same engine (the Red Hook `cascade`
 pipeline and the u2i compliance portal's `model_eval`), and now shared by both.
 
 **Documentation:** the guides are the front door — [Getting
-started](guides/getting-started.md), [Authoring nodes](guides/authoring-nodes.md),
-[Sources and scanning](guides/sources.md), [Attestations](guides/attestations.md)
-(human sign-off as a first-class input), and [The seams](guides/seams.md). This
+started](https://hexdocs.pm/reactive_dag/getting-started.html), [Authoring
+nodes](https://hexdocs.pm/reactive_dag/authoring-nodes.html), [Sources and
+scanning](https://hexdocs.pm/reactive_dag/sources.html),
+[Attestations](https://hexdocs.pm/reactive_dag/attestations.html) (human
+sign-off as a first-class input), and [The
+seams](https://hexdocs.pm/reactive_dag/seams.html). This
 README is the reference-style overview.
 
 The substrate decides *when* and *in what order* cells recompute; it never
@@ -221,5 +224,5 @@ Elixir recompute (cascade) and a set-based SQL recompute (the portal), all
 coordination writes routed through the seam, proven by both suites green. Cascade
 authors several ops via the `Node` `reduce`/`join` combinators; the standalone
 compliance app consumes tagged releases. See
-[docs/adr-001-reactive-dag-library.md](docs/adr-001-reactive-dag-library.md)
+[ADR-001](https://hexdocs.pm/reactive_dag/adr-001-reactive-dag-library.html)
 for the boundary, the seams, and the design law behind them.
