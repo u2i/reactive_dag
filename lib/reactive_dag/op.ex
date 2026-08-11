@@ -57,7 +57,13 @@ defmodule ReactiveDag.Op do
   @spec tombstone(struct() | String.t(), [key()]) :: :ok
   def tombstone(cell, keys) do
     w = W.writer()
-    if function_exported?(w, :tombstone, 2), do: w.tombstone(id(cell), keys), else: w.delete(id(cell), keys)
+
+    # ensure_loaded: function_exported?/3 is false for a module that merely isn't
+    # LOADED yet, which would silently downgrade tombstone to hard delete on the
+    # first call in a lazily-loading VM (dev, `mix run`).
+    if Code.ensure_loaded?(w) and function_exported?(w, :tombstone, 2),
+      do: w.tombstone(id(cell), keys),
+      else: w.delete(id(cell), keys)
   end
 
   @doc "Hard-delete `keys` of `cell`."
