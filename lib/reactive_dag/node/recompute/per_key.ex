@@ -30,21 +30,50 @@ defmodule ReactiveDag.Node.Recompute.PerKey do
     fp_attr = spec.fingerprint_attribute || @default_fingerprint_attr
     existing = existing_fingerprints(cell, fp_attr, rows, source)
 
-    {changed, called, skipped} =
-      Enum.reduce(rows, {[], 0, 0}, fn row, {changed, called, skipped} ->
-        key = row_key(row, source)
+    # PARTITION FIRST, then call. Skips are decided before anything runs, so a
+    # bounded stream spends its slots only on rows that genuinely need the
+    # action — a whole-cell claim over mostly-unchanged rows costs almost
+    # nothing regardless of the concurrency setting.
+    {to_call, skipped} =
+      Enum.split_with(rows, fn row ->
         want = fingerprint(spec.fingerprint, row)
-
-        if want != nil and want == Map.get(existing, key) do
-          # nothing the result depends on moved — do not pay for the call
-          {changed, called, skipped + 1}
-        else
-          write_row(cell, spec, key, row, want, fp_attr)
-          {[key | changed], called + 1, skipped}
-        end
+        want == nil or want != Map.get(existing, row_key(row, source))
       end)
 
-    {Enum.reverse(changed), %{called: called, skipped: skipped}}
+    changed = call_rows(cell, spec, to_call, source, fp_attr)
+
+    {changed, %{called: length(to_call), skipped: length(skipped)}}
+  end
+
+  # one at a time (the default) — no process overhead, no supervision, and the
+  # shape every node had before concurrency was an option.
+  defp call_rows(cell, %{max_concurrency: n} = spec, rows, source, fp_attr)
+       when is_nil(n) or n == 1 do
+    Enum.map(rows, fn row ->
+      key = row_key(row, source)
+      write_row(cell, spec, key, row, fingerprint(spec.fingerprint, row), fp_attr)
+      key
+    end)
+  end
+
+  # bounded concurrency. `ordered: true` (the default) is deliberate: results
+  # are applied in ROW order, so the changed-key list is deterministic — which
+  # matters for tests, diffs, and reading a Report.
+  defp call_rows(cell, spec, rows, source, fp_attr) do
+    rows
+    |> Task.async_stream(
+      fn row ->
+        key = row_key(row, source)
+        write_row(cell, spec, key, row, fingerprint(spec.fingerprint, row), fp_attr)
+        key
+      end,
+      max_concurrency: spec.max_concurrency,
+      timeout: spec.timeout || :infinity,
+      # a row that dies must FAIL the recompute, not vanish from it: a
+      # half-written cell that reports success is worse than a loud crash.
+      on_timeout: :exit
+    )
+    |> Enum.map(fn {:ok, key} -> key end)
   end
 
   # ── the call + write ────────────────────────────────────────────────────────

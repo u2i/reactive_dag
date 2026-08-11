@@ -609,6 +609,8 @@ defmodule ReactiveDag.Node do
       :fingerprint,
       :into,
       :fingerprint_attribute,
+      :max_concurrency,
+      :timeout,
       :__identifier__,
       :__spark_metadata__
     ]
@@ -660,6 +662,26 @@ defmodule ReactiveDag.Node do
           "how the action's result becomes this node's row: `[summary: :summary]` maps " <>
             "the result's `\"summary\"` onto this resource's `:summary` attribute. Omit " <>
             "to copy every result key whose name matches an attribute."
+      ],
+      max_concurrency: [
+        type: :pos_integer,
+        required: false,
+        doc:
+          "how many rows may be IN FLIGHT at once (default 1 — one call at a time). " <>
+            "The drain is sequential per cell by design (depth order is what makes the " <>
+            "cascade correct), so this is the only place per-row parallelism can live. " <>
+            "Rows skipped by `fingerprint:` never enter the stream, so slots are spent " <>
+            "only on real calls. Results are applied in ROW ORDER regardless, so the " <>
+            "changed-key list stays deterministic."
+      ],
+      timeout: [
+        type: :timeout,
+        required: false,
+        doc:
+          "milliseconds a single row's action may take before it is killed (default " <>
+            "`:infinity`). Only meaningful with `max_concurrency:` — a row that times " <>
+            "out FAILS the recompute rather than being silently dropped, since a " <>
+            "half-written cell is worse than a loud one."
       ]
     ]
   }

@@ -76,6 +76,46 @@ name another with `fingerprint_attribute`). A node that declares `fingerprint:`
 with nowhere to store it is a **compile error** — a silently-never-skipping node
 is exactly the expensive mistake the rung prevents.
 
+## Throughput: the drain is sequential, so parallelism lives here
+
+Worth understanding before reaching for the lever: **the drain recomputes one
+cell at a time, and that is not an oversight.** Depth ordering is what makes the
+cascade correct — a cell may not run until everything it reads has settled — so
+cells cannot be parallelised without giving that up. A long LLM cell therefore
+dominates the drain's wall-clock.
+
+Which means per-row parallelism has to live *inside* a recompute, and `per_key`
+is where it goes:
+
+```elixir
+per_key :summarise,
+  args: [text: :body],
+  fingerprint: [:body],
+  max_concurrency: 8,      # 8 rows in flight; default 1
+  timeout: 60_000,         # per row; default :infinity
+  into: [summary: :summary]
+```
+
+Two properties worth relying on:
+
+- **Skipped rows never enter the stream.** Fingerprints are evaluated first, so
+  slots are spent only on rows that genuinely need the call. A whole-cell claim
+  over mostly-unchanged rows costs almost nothing, whatever the bound.
+- **Results are applied in row order.** The changed-key list stays
+  deterministic, so tests, diffs and Reports do not shuffle between runs.
+
+A row that times out **fails the recompute** rather than being dropped — a
+half-written cell that reports success is worse than a loud crash.
+
+> **Careful with `Ash.DataLayer.Ets` and `private?: true`.** A private ETS table
+> is owned by the process that created it, and each row is written from a task
+> process — so writes would silently vanish. AshPostgres hosts are unaffected;
+> this only bites in-memory test fixtures.
+
+Batching (N rows per prompt) is the *other* throughput lever and is not
+implemented: it changes the action's contract from one row to many, and the
+result mapping from one map to results keyed by row. Tracked separately.
+
 ## When to drop to `run` instead
 
 `per_key` maps one input row to one output row. Anything else — many rows per
@@ -128,9 +168,9 @@ shape above:
 - ~~No input fingerprinting.~~ **Solved** by `per_key … fingerprint:` above.
   (A `run` node still re-bills on a whole-cell claim — the library cannot see
   its inputs. That is the trade for `run`'s opacity.)
-- **One call per key, serially.** The drain is synchronous per cell, so a long
-  LLM cell dominates wall-clock. Batching (N rows per prompt) and bounded
-  concurrency inside the action are the levers; both live in your action for now.
+- ~~One call per key, serially.~~ **Bounded concurrency solved** by
+  `max_concurrency:` above. Batching (N rows per prompt) remains open — it is a
+  different action contract, not a tuning knob.
 - ~~No token/cost telemetry.~~ **Solved.** A recompute may return
   `{:ok, changed, meta}`, and the map rides on the drain's `%Report{}` step:
 
