@@ -83,6 +83,26 @@ defmodule ReactiveDag.VerdictNodeTest do
     assert puts["s3"] == "present"
   end
 
+  # a writer that reports the boolean CHANGED signal: s2's verdict flipped,
+  # s1/s3 re-put the same status.
+  defmodule FlipReportingWriter do
+    @behaviour ReactiveDag.CoordinationWriter
+    @impl true
+    def put(_cell_id, key, _opts), do: key == "s2"
+    @impl true
+    def delete(_cell_id, _keys), do: :ok
+  end
+
+  test "a change-reporting writer scopes verdict propagation to real flips" do
+    # regression: the verdict branch used to return EVERY key as changed,
+    # re-dirtying all parents on every recompute regardless of the writer.
+    Application.put_env(:reactive_dag, :coordination_writer, FlipReportingWriter)
+    cell = ReactiveDag.Node.to_cell(StoreEncrypted)
+
+    {:ok, changed} = Recompute.recompute(cell, ["*"])
+    assert changed == ["s2"]
+  end
+
   test "a verdict node needs NO resource, NO upsert, NO attributes — it doesn't raise" do
     cell = ReactiveDag.Node.to_cell(StoreEncrypted)
     # the reduce has no upsert: and the node has no backing resource; without

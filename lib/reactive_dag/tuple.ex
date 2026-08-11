@@ -85,6 +85,32 @@ defmodule ReactiveDag.Tuple do
     :ok
   end
 
+  @doc """
+  `put/3`, but returning whether the row's VERDICT actually changed: `true` for
+  a new `(cell_id, key)` or a `status` flip, `false` for a re-put of the same
+  status (freshness columns still update either way). This is the boolean
+  CHANGED signal the `ReactiveDag.CoordinationWriter` contract lets a writer
+  report, which ops use to propagate only real changes. Read-compare-then-upsert
+  (same shape as the payload loop's change detection) — per-cell writes are
+  serialized by the drain, which is what makes the two steps safe.
+  """
+  @spec put_changed(String.t(), key(), keyword()) :: boolean()
+  def put_changed(cell_id, key, opts \\ []) do
+    status = Keyword.get(opts, :status, "present")
+
+    %{rows: rows} =
+      query!("SELECT status FROM #{table()} WHERE cell_id = $1 AND key = $2", [cell_id, key])
+
+    changed? =
+      case rows do
+        [[^status]] -> false
+        _ -> true
+      end
+
+    put(cell_id, key, opts)
+    changed?
+  end
+
   @doc "Delete the tuples for `(cell_id, keys)`. No-op on an empty key list."
   @spec delete(String.t(), [key()]) :: :ok
   def delete(_cell_id, []), do: :ok

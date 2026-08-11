@@ -60,10 +60,11 @@ host policy, so the write is a seam:
 Ops write through `ReactiveDag.Op.put/3`, which routes here. Two things worth
 exploiting:
 
-- **The changed signal.** A writer that guards its upsert with
-  `… IS DISTINCT FROM …` can return a boolean — *did the row actually flip?* —
-  which ops use as their changed-key signal. The spine-only default returns
-  `:ok`, which callers treat as "assume changed": correct, just less scoped.
+- **The changed signal.** A writer's `put` may return a boolean — *did the
+  row's verdict actually flip?* — which ops use as their changed-key signal.
+  The spine-only default reports it (`ReactiveDag.Tuple.put_changed/3`: `true`
+  for a new row or a status flip). A writer that returns bare `:ok` is treated
+  as "assume changed": correct, just less scoped.
 - **Opts are the extension channel.** Machinery above the seam passes host
   fields in opts (`strength:`, `source_ref:`, …); the default writer takes
   only spine keys and drops the rest, a host writer stamps what it knows. This

@@ -6,6 +6,10 @@ defmodule ReactiveDag.Tuple.Writer do
   `source_ref`/`tombstoned_at`, the portal's `strength`) configures its own
   writer that does the spine + extension write in one atomic upsert.
 
+  `put/3` returns the boolean CHANGED signal (`ReactiveDag.Tuple.put_changed/3`):
+  `true` for a new row or a status flip, `false` for a re-put of the same
+  status — so ops using the default writer propagate only real changes.
+
   `tombstone/2` here has no retain policy, so it falls back to `delete/2` (a
   spine with no `tombstoned_at` column can't retain).
   """
@@ -13,7 +17,11 @@ defmodule ReactiveDag.Tuple.Writer do
 
   @impl true
   def put(cell_id, key, opts) do
-    ReactiveDag.Tuple.put(cell_id, key, Keyword.take(opts, [:status, :stale_after, :observed_at]))
+    ReactiveDag.Tuple.put_changed(
+      cell_id,
+      key,
+      Keyword.take(opts, [:status, :stale_after, :observed_at])
+    )
   end
 
   @impl true

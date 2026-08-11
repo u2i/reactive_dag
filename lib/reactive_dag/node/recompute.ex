@@ -146,10 +146,16 @@ defmodule ReactiveDag.Node.Recompute do
   #   * host `upsert:` callback (override) — `(key, row) -> changed?`.
   #   * the LIB closing the loop into the node's OWN resource (`meta.resource`).
   defp materialize(%Cell{meta: %{verdict: true}} = cell, pairs, _upsert) do
-    # a verdict-only node: the computed row lives in the tuple, not a payload table.
-    Enum.map(pairs, fn {key, row} ->
-      ReactiveDag.Op.put(cell, key, verdict_opts(row))
-      key
+    # a verdict-only node: the computed row lives in the tuple, not a payload
+    # table — so the tuple write IS the change detection. A writer reporting
+    # the boolean CHANGED signal (the default Tuple.Writer does) scopes
+    # propagation to real flips; a bare-:ok writer propagates everything
+    # (correct, just less scoped).
+    Enum.flat_map(pairs, fn {key, row} ->
+      case ReactiveDag.Op.put(cell, key, verdict_opts(row)) do
+        false -> []
+        _ok_or_true -> [key]
+      end
     end)
   end
 
