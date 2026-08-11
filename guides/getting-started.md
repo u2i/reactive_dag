@@ -134,18 +134,19 @@ defmodule MyApp.BudgetRollups do
   reactive do
     op :fold
     key_rule :all
+    # Ash-first: the library reads :fiscal_lines itself (dirty-key scoped),
+    # groups by the attribute, folds each group, derives the key ("gf"), and
+    # writes the row into THIS resource with change detection. No fns.
     reduce over: :fiscal_lines,
-           read: fn :fiscal_lines -> MyApp.Fiscal.lines!() end,
-           group_by: fn line -> line.fund end,
-           key: fn fund -> fund end,
-           into: fn fund, lines -> %{key: fund, fund: fund, total: sum(lines)} end
+           group_by: :fund,
+           into: [sum: [amount: :total]]
   end
 end
 ```
 
-The resource **is** the node *and* its payload table: `reduce`'s `into` returns
-a row, and the library writes it into this resource with change detection — no
-write plumbing to author. See [Authoring nodes](authoring-nodes.md) for every
+The resource **is** the node *and* its payload table — and the computation is
+declared, not coded: no read plumbing, no write plumbing, no key derivation to
+author. When a shape outgrows attributes, each slot has an escape hatch. See [Authoring nodes](authoring-nodes.md) for every
 node shape.
 
 ## Assemble and run

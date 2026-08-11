@@ -39,14 +39,27 @@ defmodule ReactiveDag.Node.Recompute do
   # `keys` is the claimed dirty set, or `nil` for a whole-cell recompute (`"*"`).
   def recompute(%Cell{meta: %{reduce: %{} = r}} = cell, keys) do
     group_by = Declarative.group_fn(r.group_by)
-    into = Declarative.into_fn(r.into, r.group_by)
+    key_fn = Declarative.key_fn(r.key, r.key_prefix)
+
+    # which slot emits a group's [{key, row}] pairs — the verifier guarantees
+    # exactly the right one is declared for the node's shape.
+    emit =
+      cond do
+        is_function(r.status, 2) ->
+          fn group, items -> [{key_fn.(group), status_row(r.status.(group, items))}] end
+
+        is_function(r.expand, 2) ->
+          fn group, items -> expand_pairs(r.expand.(group, items), cell.id) end
+
+        true ->
+          into = Declarative.into_fn(r.into, r.group_by)
+          fn group, items -> into_pair(into.(group, items), key_fn, group) end
+      end
 
     pairs =
-      Read.items(r.read, r.over, cell.meta[:over_source], scope(keys))
+      Read.items(cell.meta[:over_source], r.over, r.query, scope(keys))
       |> Enum.group_by(group_by)
-      |> Enum.flat_map(fn {group, items} ->
-        group |> into.(items) |> rows_with_keys(r, group)
-      end)
+      |> Enum.flat_map(fn {group, items} -> emit.(group, items) end)
 
     {:ok, materialize(cell, pairs, r.upsert)}
   end
@@ -58,22 +71,26 @@ defmodule ReactiveDag.Node.Recompute do
   # reconcile shape, where an undeclared right-side member is a finding.
   # `read` may be arity-2 for dirty-key scoping (see `reduce` above).
   def recompute(%Cell{meta: %{join: %{} = j}} = cell, keys) do
-    items = Read.items(j.read, j.over, cell.meta[:over_source], scope(keys))
+    items = Read.items(cell.meta[:over_source], j.over, j.query, scope(keys))
     left = index(items, Declarative.side_fn(j.left))
     right = index(items, Declarative.side_fn(j.right))
-    into = Declarative.join_into_fn(j.into)
+    key_fn = Declarative.key_fn(j.key, j.key_prefix)
+
+    emit =
+      if is_function(j.status, 3) do
+        fn jk, l, r -> [{key_fn.(jk), status_row(j.status.(jk, l, r))}] end
+      else
+        into = Declarative.join_into_fn(j.into)
+        fn jk, l, r -> into_pair(into.(jk, l, r), key_fn, jk) end
+      end
 
     left_pairs =
-      Enum.flat_map(left, fn {jk, litem} ->
-        into.(jk, litem, Map.get(right, jk)) |> rows_with_keys(j, jk)
-      end)
+      Enum.flat_map(left, fn {jk, litem} -> emit.(jk, litem, Map.get(right, jk)) end)
 
     right_only_pairs =
       if Map.get(j, :outer, false) do
         Enum.flat_map(right, fn {jk, ritem} ->
-          if Map.has_key?(left, jk),
-            do: [],
-            else: into.(jk, nil, ritem) |> rows_with_keys(j, jk)
+          if Map.has_key?(left, jk), do: [], else: emit.(jk, nil, ritem)
         end)
       else
         []
@@ -152,26 +169,38 @@ defmodule ReactiveDag.Node.Recompute do
     end
   end
 
-  # normalize an `into` result (one row or a list) into `[{key, row}]`. Key
-  # resolution: a row that carries its own `:key` field SELF-IDENTIFIES (expand
-  # rows must, since one group → many keys); otherwise the spec's `key` fn — or
-  # the declarative default (group values joined with "|", `key_prefix`-aware) —
-  # is applied to the group term (the fold case, one row per group). Row-key
-  # wins so the `length == 1` ambiguity (a group that expands to exactly one
-  # row) is moot.
-  defp rows_with_keys(row_or_rows, spec, group_term) do
-    key_fn = Declarative.key_fn(Map.get(spec, :key), Map.get(spec, :key_prefix))
+  # a `status:` result → the verdict row (`{status, strength}` when the host's
+  # tuple carries strength).
+  defp status_row({status, strength}), do: %{status: status, strength: strength}
+  defp status_row(status), do: %{status: status}
 
-    row_or_rows
-    |> List.wrap()
-    |> Enum.map(fn row ->
-      key =
-        if is_map(row) and is_map_key(row, :key),
-          do: row.key,
-          else: key_fn.(group_term)
+  # an `into:` result is ONE row: its own `:key` wins (a self-identified row),
+  # else the key derives from the group term / join key. A list here is the
+  # old expand overload — point at the `expand:` slot.
+  defp into_pair(rows, _key_fn, _term) when is_list(rows) do
+    raise "reactive_dag: `into:` returns ONE row per group — the group → many-rows " <>
+            "shape is the `expand:` slot (each row carrying its own :key)"
+  end
 
-      {key, row}
+  defp into_pair(row, key_fn, term) when is_map(row) do
+    key = if is_map_key(row, :key), do: row.key, else: key_fn.(term)
+    [{key, row}]
+  end
+
+  # `expand:` rows fan one group out to many keys, so each row must self-key.
+  defp expand_pairs(rows, cell_id) when is_list(rows) do
+    Enum.map(rows, fn
+      %{key: key} = row ->
+        {key, row}
+
+      row ->
+        raise "reactive_dag: #{cell_id}: an `expand:` row must carry its own :key " <>
+                "(one group fans out to many keys) — got #{inspect(row)}"
     end)
+  end
+
+  defp expand_pairs(other, cell_id) do
+    raise "reactive_dag: #{cell_id}: `expand:` must return a LIST of rows, got #{inspect(other)}"
   end
 
   # write each {key, row}, Op.put the changed keys, return them. Shared by

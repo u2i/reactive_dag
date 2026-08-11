@@ -59,6 +59,7 @@ defmodule ReactiveDag.Node.Verifiers.VerifyReactive do
 
   defp verify_entity(dsl, %Reduce{} = r) do
     with :ok <- verify_key_prefix(dsl, r.key, r.key_prefix),
+         :ok <- verify_result_slots(dsl, :reduce, r.status, into: r.into, expand: r.expand),
          :ok <- verify_reduce_into(dsl, r) do
       :ok
     end
@@ -68,10 +69,12 @@ defmodule ReactiveDag.Node.Verifiers.VerifyReactive do
     with :ok <- verify_key_prefix(dsl, j.key, j.key_prefix),
          :ok <- verify_side(dsl, :left, j.left),
          :ok <- verify_side(dsl, :right, j.right),
+         :ok <- verify_result_slots(dsl, :join, j.status, into: j.into),
          :ok <- verify_join_into(dsl, j.into) do
       :ok
     end
   end
+
 
   defp verify_entity(dsl, %Run{action: action}) do
     case Ash.Resource.Info.action(dsl, action) do
@@ -99,6 +102,51 @@ defmodule ReactiveDag.Node.Verifiers.VerifyReactive do
 
   defp verify_entity(_dsl, _other), do: :ok
 
+  # the node-shape × result-slot matrix: a VERDICT node's result IS its status
+  # (`status:` required, row slots forbidden); a payload node emits rows
+  # (exactly one of `into:`/`expand:`, `status:` forbidden).
+  defp verify_result_slots(dsl, kind, status, row_slots) do
+    verdict? = Verifier.get_option(dsl, [:reactive], :verdict?)
+    declared = for {name, v} <- row_slots, not is_nil(v), do: name
+
+    cond do
+      verdict? and declared != [] ->
+        error(
+          dsl,
+          "a verdict node has no payload row — drop #{inspect(declared)}; its result is " <>
+            "`status:` (`(… -> status | {status, strength})`), written straight into the " <>
+            "coordination tuple"
+        )
+
+      verdict? and is_nil(status) ->
+        error(
+          dsl,
+          "a verdict node's #{kind} declares `status:` — its result IS the coordination " <>
+            "row, so there is no `into:` row to build"
+        )
+
+      not verdict? and not is_nil(status) ->
+        error(
+          dsl,
+          "`status:` is the VERDICT node's slot — mark the node `verdict? true`, or emit " <>
+            "payload rows with `into:`"
+        )
+
+      not verdict? and declared == [] ->
+        error(
+          dsl,
+          "a payload #{kind} needs `into:`" <>
+            if(kind == :reduce, do: " (or `expand:` for the group → many-rows shape)", else: "")
+        )
+
+      not verdict? and length(declared) > 1 ->
+        error(dsl, "declare ONE of #{inspect(declared)} — a node emits rows one way")
+
+      true ->
+        :ok
+    end
+  end
+
   defp verify_key_prefix(dsl, key_fn, prefix) do
     if is_function(key_fn) and not is_nil(prefix) do
       error(
@@ -111,12 +159,12 @@ defmodule ReactiveDag.Node.Verifiers.VerifyReactive do
     end
   end
 
-  defp verify_reduce_into(_dsl, %Reduce{into: into}) when is_function(into), do: :ok
+  defp verify_reduce_into(_dsl, %Reduce{into: into}) when is_function(into) or is_nil(into),
+    do: :ok
 
   defp verify_reduce_into(dsl, %Reduce{into: folds} = r) when is_list(folds) do
     with :ok <- verify_fold_shapes(dsl, folds),
-         :ok <- require_declarative_group(dsl, r.group_by),
-         :ok <- forbid_verdict(dsl) do
+         :ok <- require_declarative_group(dsl, r.group_by) do
       verify_dests(dsl, r, folds)
     end
   end
@@ -134,17 +182,6 @@ defmodule ReactiveDag.Node.Verifiers.VerifyReactive do
     end
   end
 
-  defp forbid_verdict(dsl) do
-    if Verifier.get_option(dsl, [:reactive], :verdict?) do
-      error(
-        dsl,
-        "a verdict node's rows carry `:status`, which a declarative `into:` fold cannot " <>
-          "produce — use the `into:` fn form (`fn group, items -> %{key: …, status: …} end`)"
-      )
-    else
-      :ok
-    end
-  end
 
   defp declarative_group?(g), do: is_atom(g) or (is_list(g) and Enum.all?(g, &is_atom/1))
 
@@ -235,7 +272,7 @@ defmodule ReactiveDag.Node.Verifiers.VerifyReactive do
     end
   end
 
-  defp verify_join_into(_dsl, into) when is_function(into), do: :ok
+  defp verify_join_into(_dsl, into) when is_function(into) or is_nil(into), do: :ok
 
   defp verify_join_into(dsl, picks) when is_list(picks) do
     case Keyword.keys(picks) -- [:left, :right] do

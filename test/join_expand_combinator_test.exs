@@ -1,189 +1,189 @@
 defmodule ReactiveDag.JoinExpandCombinatorTest do
   @moduledoc """
-  The `join` (two-input left join) and `expand` (group → many rows, via reduce's
-  list-returning `into`) combinators — the shapes the plain `reduce` fold couldn't
-  express (budget_vs_actual = join; cost_allocation = expand).
+  The `join` combinator's fn escape hatches (computed side keys, fn key with a
+  prefix, fn into, upsert override) and the `expand:` slot — the group →
+  many-rows shape, each row self-keyed.
   """
   use ExUnit.Case, async: false
 
   alias ReactiveDag.Node.Recompute
 
-  defmodule Writer do
-    @behaviour ReactiveDag.CoordinationWriter
-    @impl true
-    def put(cell_id, key, _opts), do: send(self(), {:put, cell_id, key})
-    @impl true
-    def delete(cell_id, keys), do: send(self(), {:delete, cell_id, keys})
-  end
-
   defmodule Domain do
     use Ash.Domain, validate_config_inclusion?: false
+
     resources do
       allow_unregistered?(true)
     end
   end
 
-  # JOIN: budget×actual → variance, keyed by account (left join; actual may be absent).
+  defmodule Fiscal do
+    use Ash.Resource,
+      domain: Domain,
+      data_layer: Ash.DataLayer.Ets,
+      extensions: [ReactiveDag.Node]
+
+    ets do
+      private?(true)
+    end
+
+    attributes do
+      attribute :k, :string, primary_key?: true, allow_nil?: false, public?: true
+      attribute :kind, :string, public?: true
+      attribute :acct, :string, public?: true
+      attribute :amount, :float, public?: true
+      attribute :fy, :integer, public?: true
+    end
+
+    actions do
+      defaults [:read, :destroy]
+
+      create :create do
+        accept([:k, :kind, :acct, :amount, :fy])
+      end
+    end
+
+    reactive do
+      id(:fiscal)
+      op(:source)
+      leaf?(true)
+      payload_key(:k)
+    end
+  end
+
+  # fn everything: computed side keys (the `&&` discriminator idiom), a fn key
+  # with a literal prefix, a computed-columns into, an upsert capture.
   defmodule Variance do
-    use Ash.Resource, domain: Domain, data_layer: Ash.DataLayer.Simple, extensions: [ReactiveDag.Node]
+    use Ash.Resource,
+      domain: Domain,
+      data_layer: Ash.DataLayer.Simple,
+      extensions: [ReactiveDag.Node]
 
     reactive do
-      id :variance
-      op :join
-      key_rule :all
+      id(:variance)
+      op(:reconcile)
+      key_rule(:all)
 
       join over: :fiscal,
-           read: fn :fiscal -> Process.get(:fiscal, []) end,
-           left: fn %{kind: k, acct: a} -> k == :budget && a end,
-           right: fn %{kind: k, acct: a} -> k == :actual && a end,
+           left: fn %{kind: k, acct: a} -> k == "budget" && a end,
+           right: fn %{kind: k, acct: a} -> k == "actual" && a end,
            key: fn acct -> "va|#{acct}" end,
-           into: fn acct, b, a ->
-             %{acct: acct, budget: b.amount, actual: a && a.amount,
-               variance: a && a.amount - b.amount}
+           into: fn _acct, budget, actual ->
+             %{
+               budget: budget.amount,
+               actual: actual && actual.amount,
+               variance: budget.amount - ((actual && actual.amount) || 0.0)
+             }
            end,
            upsert: fn key, row ->
-             send(self(), {:upsert, key, row})
+             send(ReactiveDag.JoinExpandCombinatorTest, {:upsert, key, row})
              true
            end
     end
   end
 
-  # OUTER JOIN: the reconcile shape — a right-only (actual-without-budget) key
-  # is a FINDING to emit, not a row to drop.
-  defmodule Reconcile do
-    use Ash.Resource, domain: Domain, data_layer: Ash.DataLayer.Simple, extensions: [ReactiveDag.Node]
+  # EXPAND: one group (a fiscal year) fans out to one row per bucket — each
+  # row self-keyed, because one group → many keys.
+  defmodule YearBuckets do
+    use Ash.Resource,
+      domain: Domain,
+      data_layer: Ash.DataLayer.Simple,
+      extensions: [ReactiveDag.Node]
 
     reactive do
-      id :reconcile
-      op :join
-      key_rule :all
+      id(:year_buckets)
+      op(:expand)
+      key_rule(:all)
 
-      join over: :fiscal,
-           read: fn :fiscal -> Process.get(:fiscal, []) end,
-           left: fn %{kind: k, acct: a} -> k == :budget && a end,
-           right: fn %{kind: k, acct: a} -> k == :actual && a end,
-           key: fn acct -> "rc|#{acct}" end,
-           outer: true,
-           into: fn acct, b, a ->
-             %{acct: acct, status: (b && a && "covered") || "failing"}
-           end,
-           upsert: fn key, row ->
-             send(self(), {:upsert, key, row})
-             true
-           end
-    end
-  end
-
-  # EXPAND: group budget lines by fy, then FAN OUT one row per bucket in the fy.
-  defmodule Allocations do
-    use Ash.Resource, domain: Domain, data_layer: Ash.DataLayer.Simple, extensions: [ReactiveDag.Node]
-
-    reactive do
-      id :allocations
-      op :fold
-      key_rule :all
-
-      reduce over: :lines,
-             read: fn :lines -> Process.get(:lines, []) end,
-             group_by: fn l -> l.fy end,
-             key: fn _fy -> :unused end,
-             # into returns a LIST → expand: one row per bucket in the fy.
-             into: fn fy, lines ->
+      reduce over: :fiscal,
+             group_by: :fy,
+             expand: fn fy, lines ->
                lines
-               |> Enum.group_by(& &1.bucket)
-               |> Enum.map(fn {bucket, ls} ->
-                 %{key: "#{fy}|#{bucket}", fy: fy, bucket: bucket,
-                   total: ls |> Enum.map(& &1.value) |> Enum.sum()}
+               |> Enum.group_by(& &1.kind)
+               |> Enum.map(fn {kind, ls} ->
+                 %{key: "#{fy}|#{kind}", n: length(ls)}
                end)
              end,
              upsert: fn key, row ->
-               send(self(), {:upsert, key, row})
+               send(ReactiveDag.JoinExpandCombinatorTest, {:expanded, key, row})
                true
              end
     end
   end
 
+  defmodule NullWriter do
+    @behaviour ReactiveDag.CoordinationWriter
+    @impl true
+    def put(_cell_id, _key, _opts), do: :ok
+    @impl true
+    def delete(_cell_id, _keys), do: :ok
+  end
+
   setup do
+    Process.register(self(), ReactiveDag.JoinExpandCombinatorTest)
     prev = Application.get_env(:reactive_dag, :coordination_writer)
-    Application.put_env(:reactive_dag, :coordination_writer, Writer)
+    Application.put_env(:reactive_dag, :coordination_writer, NullWriter)
     on_exit(fn -> Application.put_env(:reactive_dag, :coordination_writer, prev) end)
+
+    for {k, kind, acct, amount, fy} <- [
+          {"b1", "budget", "A1010", 100.0, 2025},
+          {"b2", "budget", "A2020", 50.0, 2025},
+          {"a1", "actual", "A1010", 90.0, 2025},
+          {"a2", "actual", "A9090", 5.0, 2026}
+        ] do
+      Fiscal
+      |> Ash.Changeset.for_create(:create, %{k: k, kind: kind, acct: acct, amount: amount, fy: fy})
+      |> Ash.create!()
+    end
+
     :ok
   end
 
-  describe "join" do
-    test "left-joins budget to actual, emitting a row per left (budget) key" do
-      Process.put(:fiscal, [
-        %{kind: :budget, acct: "A", amount: 100},
-        %{kind: :budget, acct: "B", amount: 50},
-        %{kind: :actual, acct: "A", amount: 90}
-        # B has no actual → variance nil (left join keeps it)
-      ])
+  test "fn sides split one input; left join; computed columns; prefixed fn keys" do
+    plan = ReactiveDag.Node.graph([Fiscal, Variance])
+    {:ok, changed} = Recompute.recompute(plan.cells["variance"], ["*"])
 
-      cell = ReactiveDag.Node.to_cell(Variance)
-      assert cell.op == :join
-      assert cell.inputs == ["fiscal"]
+    assert Enum.sort(changed) == ["va|A1010", "va|A2020"]
 
-      {:ok, changed} = Recompute.recompute(cell, ["*"])
-      assert Enum.sort(changed) == ["va|A", "va|B"]
-
-      upserts = drain_upserts()
-      # variance = actual - budget = 90 - 100 = -10
-      assert upserts["va|A"].variance == -10
-      assert upserts["va|A"].actual == 90
-      assert upserts["va|B"].variance == nil
-      assert upserts["va|B"].actual == nil
-    end
-
-    test "outer: true emits right-only keys too — the full-outer reconcile" do
-      Process.put(:fiscal, [
-        %{kind: :budget, acct: "A", amount: 100},
-        %{kind: :budget, acct: "B", amount: 50},
-        %{kind: :actual, acct: "A", amount: 90},
-        # C has an actual but NO budget — outer join must surface it.
-        %{kind: :actual, acct: "C", amount: 7}
-      ])
-
-      cell = ReactiveDag.Node.to_cell(Reconcile)
-      {:ok, changed} = Recompute.recompute(cell, ["*"])
-      assert Enum.sort(changed) == ["rc|A", "rc|B", "rc|C"]
-
-      upserts = drain_upserts()
-      assert upserts["rc|A"].status == "covered"
-      # left-only: declared but unobserved.
-      assert upserts["rc|B"].status == "failing"
-      # right-only: observed but undeclared — present ONLY because outer: true.
-      assert upserts["rc|C"].status == "failing"
-    end
+    assert_received {:upsert, "va|A1010", %{budget: 100.0, actual: 90.0, variance: 10.0}}
+    # a missing right is a gap, not an error
+    assert_received {:upsert, "va|A2020", %{budget: 50.0, actual: nil, variance: 50.0}}
+    # right-only accounts don't emit on a left join
+    refute_received {:upsert, "va|A9090", _}
   end
 
-  # collect all {:upsert, key, row} messages → %{key => row} (order-independent).
-  defp drain_upserts(acc \\ %{}) do
-    receive do
-      {:upsert, key, row} -> drain_upserts(Map.put(acc, key, row))
-      {:put, _, _} -> drain_upserts(acc)
-    after
-      0 -> acc
-    end
+  test "expand: one group → many self-keyed rows" do
+    plan = ReactiveDag.Node.graph([Fiscal, YearBuckets])
+    {:ok, changed} = Recompute.recompute(plan.cells["year_buckets"], ["*"])
+
+    assert Enum.sort(changed) == ["2025|actual", "2025|budget", "2026|actual"]
+    assert_received {:expanded, "2025|budget", %{n: 2}}
+    assert_received {:expanded, "2025|actual", %{n: 1}}
+    assert_received {:expanded, "2026|actual", %{n: 1}}
   end
 
-  describe "expand" do
-    test "a group fans out to MANY rows (list-returning into), each self-keyed" do
-      Process.put(:lines, [
-        %{fy: "25", bucket: "police", value: 10},
-        %{fy: "25", bucket: "police", value: 5},
-        %{fy: "25", bucket: "fire", value: 20},
-        %{fy: "26", bucket: "police", value: 7}
-      ])
+  test "an expand: row WITHOUT its own :key raises instructively" do
+    defmodule KeylessExpand do
+      use Ash.Resource,
+        domain: ReactiveDag.JoinExpandCombinatorTest.Domain,
+        data_layer: Ash.DataLayer.Simple,
+        extensions: [ReactiveDag.Node]
 
-      cell = ReactiveDag.Node.to_cell(Allocations)
-      {:ok, changed} = Recompute.recompute(cell, ["*"])
+      reactive do
+        id(:keyless_expand)
+        op(:expand)
+        key_rule(:all)
 
-      # fy 25 → {police:15, fire:20}; fy 26 → {police:7}. 3 rows from 2 groups.
-      assert Enum.sort(changed) == ["25|fire", "25|police", "26|police"]
-      upserts = drain_upserts()
-      assert upserts["25|police"].total == 15
-      assert upserts["25|fire"].total == 20
-      assert upserts["26|police"].total == 7
+        reduce over: :fiscal,
+               group_by: :fy,
+               expand: fn _fy, lines -> [%{n: length(lines)}] end,
+               upsert: fn _, _ -> true end
+      end
+    end
+
+    plan = ReactiveDag.Node.graph([Fiscal, KeylessExpand])
+
+    assert_raise RuntimeError, ~r/must carry its own :key/s, fn ->
+      Recompute.recompute(plan.cells["keyless_expand"], ["*"])
     end
   end
 end

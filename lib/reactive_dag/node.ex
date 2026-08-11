@@ -54,7 +54,7 @@ defmodule ReactiveDag.Node do
   | group + `avg`/`sum`/`count` a relationship | `aggregate` | **none** (datastore GROUP BY) | attribute atoms |
   | fold one input's rows into per-group summaries | `reduce` | the scoped slice of `over` | `group_by:` attrs + an `into:` fold |
   | reconcile one input's two sides by key | `join` | the scoped slice of `over` | side attrs/`[key:, where:]` + picks |
-  | a slot the attributes can't express | the slot's `fn` form | same | one fn (computed group, `:status` row, expand, custom read) |
+  | a slot the attributes can't express | the slot's escape | same | `query:` (shape the Ash read), fn group/key/into, `expand:`, `status:` |
   | arbitrary recompute, kept Ash-native | `run :action` | up to the action | a generic action on THIS resource |
   | recompute beyond Ash (LLM, fetch, bespoke) | `compute Mod` | up to the module | a `ReactiveDag.Op` |
 
@@ -228,7 +228,10 @@ defmodule ReactiveDag.Node do
       :key,
       :key_prefix,
       :into,
+      :expand,
+      :status,
       :read,
+      :query,
       :upsert,
       :__identifier__,
       :__spark_metadata__
@@ -250,14 +253,23 @@ defmodule ReactiveDag.Node do
         doc: "the input node id whose payload is read + grouped"
       ],
       read: [
-        type: {:or, [{:fun, 2}, {:fun, 1}, :atom]},
+        type: :atom,
         required: false,
         doc:
-          "OMIT for the Ash-first default: the library reads the OVER node's resource " <>
-            "(primary read action), automatically scoped to the claimed dirty keys by " <>
-            "filtering its payload key. An atom names a `:read` ACTION on the over " <>
-            "resource (same auto-scoping). The fn escape hatches: `(over_id -> [item])`, " <>
-            "or `(over_id, dirty_keys -> [item])` to scope by hand (`nil` = whole-cell)."
+          "OMIT for the default: the library reads the OVER node's resource via its " <>
+            "primary read action, automatically scoped to the claimed dirty keys by " <>
+            "filtering its payload key. An atom names a different `:read` ACTION on the " <>
+            "over resource (same auto-scoping). Combinator reads are ALWAYS Ash reads — " <>
+            "shape them with `query:`; a non-Ash read belongs on the `run`/`compute` rungs."
+      ],
+      query: [
+        type: {:fun, 2},
+        required: false,
+        doc:
+          "`(Ash.Query.t(), dirty_keys | nil -> Ash.Query.t())` — SHAPE the read (filter, " <>
+            "sort, load) without leaving Ash's pipeline; the library still executes it and " <>
+            "applies the dirty-key scope afterwards (scoping stays library-owned). " <>
+            "`dirty_keys` is nil for a whole-cell recompute."
       ],
       group_by: [
         type: {:or, [{:fun, 1}, :atom, {:list, :atom}]},
@@ -283,14 +295,32 @@ defmodule ReactiveDag.Node do
       ],
       into: [
         type: {:or, [{:fun, 2}, :keyword_list]},
-        required: true,
+        required: false,
         doc:
-          "a declarative FOLD over each group — `[count: :n, sum: [amount: :total], " <>
-            "avg: [flow: :avg_flow], min: …, max: …, first: …]` (bare atom = same-named " <>
-            "dest; nil sources excluded from numeric folds); the row is the group's " <>
-            "attributes + the fold results. Requires a declarative `group_by`. The fn " <>
-            "escape hatch `(group_term, [item] -> row)` covers everything else — a row " <>
-            "carrying `:status` (verdict nodes) or a LIST of self-keyed rows (expand)."
+          "how a PAYLOAD node reduces a group to its ONE row: a declarative FOLD — " <>
+            "`[count: :n, sum: [amount: :total], avg: [flow: :avg_flow], min: …, max: …, " <>
+            "first: …]` (bare atom = same-named dest; nil sources excluded from numeric " <>
+            "folds; the row is the group's attributes + the fold results; requires a " <>
+            "declarative `group_by`) — or the fn escape hatch `(group_term, [item] -> row)`. " <>
+            "Exactly one of `into`/`expand` on a payload node; a VERDICT node declares " <>
+            "`status:` instead."
+      ],
+      expand: [
+        type: {:fun, 2},
+        required: false,
+        doc:
+          "the group → MANY-rows shape: `(group_term, [item] -> [row])`, each returned " <>
+            "row carrying its own `:key` (one group fans out to many keys, so keys cannot " <>
+            "derive). Mutually exclusive with `into`/`status`."
+      ],
+      status: [
+        type: {:fun, 2},
+        required: false,
+        doc:
+          "a VERDICT node's result: `(group_term, [item] -> status)` — a status string, " <>
+            "or `{status, strength}` where the host's tuple carries strength. The key " <>
+            "derives exactly as a payload row's (`key:`/`key_prefix:`/the `\"|\"` default). " <>
+            "Required on `verdict? true` nodes; forbidden elsewhere."
       ],
       upsert: [
         type: {:fun, 2},
@@ -317,11 +347,13 @@ defmodule ReactiveDag.Node do
     defstruct [
       :over,
       :read,
+      :query,
       :left,
       :right,
       :key,
       :key_prefix,
       :into,
+      :status,
       :upsert,
       outer: false,
       __identifier__: nil,
@@ -343,11 +375,18 @@ defmodule ReactiveDag.Node do
         doc: "the input node id whose payload is read + indexed"
       ],
       read: [
-        type: {:or, [{:fun, 2}, {:fun, 1}, :atom]},
+        type: :atom,
         required: false,
         doc:
-          "OMIT for the Ash-first default (read the over node's resource, dirty-key " <>
-            "scoped); an atom names a `:read` action on it; fn forms as `reduce`."
+          "OMIT for the default (the over node's primary read, dirty-key scoped); an " <>
+            "atom names a different `:read` action on it. Always an Ash read — see `query:`."
+      ],
+      query: [
+        type: {:fun, 2},
+        required: false,
+        doc:
+          "`(Ash.Query.t(), dirty_keys | nil -> Ash.Query.t())` — shape the read inside " <>
+            "Ash's pipeline (see `reduce`); the library executes and scopes it."
       ],
       left: [
         type: {:or, [{:fun, 1}, :atom, :keyword_list]},
@@ -378,14 +417,22 @@ defmodule ReactiveDag.Node do
       ],
       into: [
         type: {:or, [{:fun, 3}, :keyword_list]},
-        required: true,
+        required: false,
         doc:
-          "declarative COLUMN PICKS per side — `[left: [amount: :budget], right: " <>
-            "[amount: :actual]]` (bare atom = same-named dest; an absent side yields " <>
-            "nils, so gap semantics fall out) — or the fn escape hatch " <>
-            "`(join_key, left_item_or_nil, right_item_or_nil -> row)` for computed " <>
-            "columns (variance = a − b) or `:status` rows. left is nil only for " <>
-            "`outer: true` right-only keys."
+          "how a PAYLOAD node emits its ONE row per join key: declarative COLUMN PICKS " <>
+            "per side — `[left: [amount: :budget], right: [amount: :actual]]` (bare atom " <>
+            "= same-named dest; an absent side yields nils, so gap semantics fall out) — " <>
+            "or the fn escape hatch `(join_key, left_item_or_nil, right_item_or_nil -> " <>
+            "row)` for computed columns (variance = a − b). left is nil only for " <>
+            "`outer: true` right-only keys. A VERDICT node declares `status:` instead."
+      ],
+      status: [
+        type: {:fun, 3},
+        required: false,
+        doc:
+          "a VERDICT node's result: `(join_key, left_or_nil, right_or_nil -> status)` — " <>
+            "a status string or `{status, strength}`. Required on `verdict? true` nodes; " <>
+            "forbidden elsewhere."
       ],
       outer: [
         type: :boolean,
@@ -674,7 +721,7 @@ defmodule ReactiveDag.Node do
         type: :boolean,
         default: false,
         doc:
-          "VERDICT-ONLY node (named `verdict?` to match `leaf?`): its computed result lives entirely in the coordination tuple (`status`/`strength`), with NO payload table of its own. A `reduce`/`join` on a verdict node writes each row's `:status`/`:strength` straight into the tuple via `Op.put` — no resource, no `upsert:`, no attributes needed. Use for nodes whose output fits the tuple's fixed schema (e.g. a compliance verdict), as opposed to nodes that materialize typed rows. (Distinct from `ReactiveDag.Verdict`, the read-side status rollup.)"
+          "VERDICT-ONLY node (named `verdict?` to match `leaf?`): its computed result lives entirely in the coordination tuple (`status`/`strength`), with NO payload table of its own. Its `reduce`/`join` declares `status:` — the verdict IS the result, written straight into the tuple via `Op.put`; keys derive as a payload row's would. No resource table, no `into:`, no `upsert:`, no attributes. Use for nodes whose output fits the tuple's fixed schema (e.g. a compliance verdict), as opposed to nodes that materialize typed rows. (Distinct from `ReactiveDag.Verdict`, the read-side status rollup.)"
       ],
       source: [
         type: :atom,
@@ -791,7 +838,7 @@ defmodule ReactiveDag.Node do
     spec = cell.meta[:reduce] || cell.meta[:join]
 
     case spec do
-      %{read: read} when not is_function(read) ->
+      %{read: read} ->
         over_id = to_string(spec.over)
         over = by_id[over_id]
         resource = over && over.meta[:resource]
@@ -799,23 +846,25 @@ defmodule ReactiveDag.Node do
         cond do
           is_nil(resource) ->
             raise ArgumentError,
-                  "reactive_dag: #{cell.id} has a declarative read over #{inspect(spec.over)}, " <>
+                  "reactive_dag: #{cell.id} reads over #{inspect(spec.over)}, " <>
                     "but that cell has no backing resource to read" <>
                     if(is_nil(over), do: " (no such cell in this graph)", else: "") <>
-                    " — point `over:` at a resource-backed node, or supply a `read:` fn"
+                    " — a combinator read is an Ash read of the over node's resource. " <>
+                    "Point `over:` at a resource-backed node, or use `run`/`compute` " <>
+                    "for a non-Ash read."
 
           over.meta[:verdict] ->
             raise ArgumentError,
-                  "reactive_dag: #{cell.id} has a declarative read over #{inspect(spec.over)}, " <>
-                    "a VERDICT node — its result lives in the coordination tuple, not a " <>
-                    "payload table, so there are no rows to read. Supply a `read:` fn " <>
-                    "(e.g. over ReactiveDag.Tuple) or point `over:` at a payload node."
+                  "reactive_dag: #{cell.id} reads over #{inspect(spec.over)}, a VERDICT " <>
+                    "node — its result lives in the coordination tuple, not a payload " <>
+                    "table, so there are no rows to read. Point `over:` at a payload " <>
+                    "node, or use `run`/`compute` to read the tuple."
 
           Ash.Resource.Info.attributes(resource) == [] ->
             raise ArgumentError,
-                  "reactive_dag: #{cell.id} has a declarative read over #{inspect(spec.over)}, " <>
-                    "whose resource #{inspect(resource)} declares no attributes — nothing " <>
-                    "to read. Supply a `read:` fn or give the node payload attributes."
+                  "reactive_dag: #{cell.id} reads over #{inspect(spec.over)}, whose " <>
+                    "resource #{inspect(resource)} declares no attributes — nothing to " <>
+                    "read. Give the over node payload attributes, or use `run`/`compute`."
 
           true ->
             :ok

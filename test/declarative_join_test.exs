@@ -237,12 +237,12 @@ defmodule ReactiveDag.DeclarativeJoinTest do
 
       reactive do
         id(:bad_picks)
-        verdict?(true)
 
         join over: :entries,
              left: :acct,
              right: :acct,
-             into: [left: [amount: :a], middle: [amount: :b]]
+             into: [left: [amount: :a], middle: [amount: :b]],
+             upsert: fn _, _ -> true end
       end
     end
 

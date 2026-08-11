@@ -270,8 +270,9 @@ defmodule ReactiveDag.DeclarativeReduceTest do
     assert length(Ash.read!(LineMarks)) == 5
   end
 
-  test "fn into over a declarative group_by pattern-matches the group TUPLE" do
-    # mixed form: declarative read + group, fn fold — the tuple contract holds.
+  test "a fn status: over a declarative group_by pattern-matches the group TUPLE" do
+    # mixed form: declarative read + group, fn verdict — the tuple contract
+    # holds, and the key derives exactly as a payload row's would.
     defmodule MixedRollup do
       use Ash.Resource,
         domain: ReactiveDag.DeclarativeReduceTest.Domain,
@@ -286,11 +287,8 @@ defmodule ReactiveDag.DeclarativeReduceTest do
 
         reduce over: :fiscal_lines,
                group_by: [:fund, :fy],
-               into: fn {fund, fy}, lines ->
-                 %{
-                   key: "#{fund}|#{fy}",
-                   status: if(length(lines) > 1, do: "present", else: "thin")
-                 }
+               status: fn {_fund, _fy}, lines ->
+                 if length(lines) > 1, do: "present", else: "thin"
                end
       end
     end
@@ -316,7 +314,7 @@ defmodule ReactiveDag.DeclarativeReduceTest do
 
           reduce over: :fiscal_lines,
                  group_by: :key,
-                 into: fn k, _ -> %{key: k, status: "present"} end
+                 status: fn _k, _ -> "present" end
         end
       end
 
@@ -334,7 +332,7 @@ defmodule ReactiveDag.DeclarativeReduceTest do
 
           reduce over: :some_verdict,
                  group_by: :key,
-                 into: fn k, _ -> %{key: k, status: "present"} end
+                 status: fn _k, _ -> "present" end
         end
       end
 
@@ -359,7 +357,7 @@ defmodule ReactiveDag.DeclarativeReduceTest do
           reduce over: :fiscal_lines,
                  read: :no_such_action,
                  group_by: :key,
-                 into: fn k, _ -> %{key: k, status: "present"} end
+                 status: fn _k, _ -> "present" end
         end
       end
 
@@ -383,7 +381,7 @@ defmodule ReactiveDag.DeclarativeReduceTest do
 
           reduce over: :fiscal_lines,
                  group_by: :no_such_attr,
-                 into: fn k, _ -> %{key: k, status: "present"} end
+                 status: fn _k, _ -> "present" end
         end
       end
 
@@ -416,8 +414,10 @@ defmodule ReactiveDag.DeclarativeReduceTest do
 
         reactive do
           id(:into_needs_group)
-          verdict?(true)
-          reduce over: :fiscal_lines, group_by: &Function.identity/1, into: [count: :n]
+          reduce over: :fiscal_lines,
+                 group_by: &Function.identity/1,
+                 into: [count: :n],
+                 upsert: fn _, _ -> true end
         end
       end
 
@@ -427,7 +427,7 @@ defmodule ReactiveDag.DeclarativeReduceTest do
       assert msg =~ "declarative `group_by:`"
     end
 
-    test "a verdict node cannot use a declarative into (no :status)" do
+    test "a verdict node declares status:, not into: — both directions checked" do
       defmodule VerdictDeclarativeInto do
         use Ash.Resource,
           domain: ReactiveDag.DeclarativeReduceTest.Domain,
@@ -444,7 +444,24 @@ defmodule ReactiveDag.DeclarativeReduceTest do
       assert {:error, %Spark.Error.DslError{message: msg}} =
                VerifyReactive.verify(VerdictDeclarativeInto.spark_dsl_config())
 
-      assert msg =~ "verdict"
+      assert msg =~ "status:"
+
+      defmodule StatusOnPayload do
+        use Ash.Resource,
+          domain: ReactiveDag.DeclarativeReduceTest.Domain,
+          data_layer: Ash.DataLayer.Simple,
+          extensions: [ReactiveDag.Node]
+
+        reactive do
+          id(:status_on_payload)
+          reduce over: :fiscal_lines, group_by: :fund, status: fn _, _ -> "present" end
+        end
+      end
+
+      assert {:error, %Spark.Error.DslError{message: msg}} =
+               VerifyReactive.verify(StatusOnPayload.spark_dsl_config())
+
+      assert msg =~ "verdict? true"
     end
 
     test "an unknown fold kind is rejected, naming the supported set" do
@@ -456,8 +473,10 @@ defmodule ReactiveDag.DeclarativeReduceTest do
 
         reactive do
           id(:bad_kind)
-          verdict?(true)
-          reduce over: :fiscal_lines, group_by: :fund, into: [median: :m]
+          reduce over: :fiscal_lines,
+                 group_by: :fund,
+                 into: [median: :m],
+                 upsert: fn _, _ -> true end
         end
       end
 
@@ -509,13 +528,13 @@ defmodule ReactiveDag.DeclarativeReduceTest do
 
         reactive do
           id(:prefix_and_fn)
-          verdict?(true)
 
           reduce over: :fiscal_lines,
                  group_by: :fund,
                  key: &to_string/1,
                  key_prefix: "x",
-                 into: fn f, _ -> %{key: f, status: "present"} end
+                 into: fn f, _ -> %{key: f} end,
+                 upsert: fn _, _ -> true end
         end
       end
 

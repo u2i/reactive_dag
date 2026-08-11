@@ -10,7 +10,7 @@ guide covers every shape that block can take.
 | shape | data_layer | attributes | `reactive` block | result lives in |
 |---|---|---|---|---|
 | **payload** | AshPostgres/Ets | the payload columns + an `:upsert` action | a combinator, no `upsert:` | the resource itself |
-| **verdict** (`verdict? true`) | `Ash.DataLayer.Simple` | none | a combinator; rows carry `:status` | the coordination tuple |
+| **verdict** (`verdict? true`) | `Ash.DataLayer.Simple` | none | a combinator with `status:` | the coordination tuple |
 | **write-elsewhere** | Simple | none | a combinator + a custom `upsert:` | wherever `upsert:` writes |
 | **escape hatch** | Simple | none | `compute MyOp` | up to the op |
 
@@ -31,7 +31,7 @@ real change.
 |---|---|---|
 | `aggregate` | attribute atoms only | the fold is a datastore aggregate over a relationship |
 | declarative `reduce`/`join` | attributes + fold keywords | grouping/joining by attributes; the library reads Ash for you |
-| per-slot `fn` escapes | a fn for the one slot that outgrew attributes | computed groups, `:status` rows, expand, custom reads |
+| per-slot escapes | a fn for the one slot that outgrew attributes | `query:`, computed groups/keys/rows, `expand:`, `status:` |
 | `run :action` | a generic Ash action on this resource | arbitrary recompute that should stay a first-class action |
 | `compute Module` | a `ReactiveDag.Op` | recompute that outgrows Ash entirely |
 
@@ -65,22 +65,30 @@ the group's attributes plus the fold results (`count`/`sum`/`avg`/`min`/`max`/
 payload loop. `read: :recent` names a `:read` action on the over resource
 instead of its primary — same auto-scoping.
 
-Each slot has a **fn escape hatch** when the shape outgrows attributes:
+A combinator read is **always an Ash read** — to shape it, stay in the query:
 
 ```elixir
 reduce over: :fiscal_lines,
-       read: fn :fiscal_lines, dirty -> MyApp.Fiscal.lines!(dirty) end,  # custom read/scoping
+       query: fn q, _dirty -> Ash.Query.filter(q, posted == true) end,
        group_by: fn line -> {line.fund, line.fy} end,                    # computed group
        key: fn {fund, fy} -> "#{fund}|#{fy}" end,
-       into: fn {fund, _fy}, lines -> %{key: ..., fund: fund, total: sum(lines)} end
+       into: fn {fund, _fy}, lines -> %{fund: fund, total: sum(lines)} end
 ```
 
-Slots resolve independently — a declarative `group_by` with an `into:` fn is
-fine (the fn receives the group tuple exactly as the fn idiom always has). Two
-shapes *require* the `into:` fn: a **verdict** row (it must carry `:status`)
-and **expand** (`into` returns a **list** of self-`:key`ed rows — one group →
-many outputs; there is no separate `expand` entity). An arity-2 `read:` fn
-receives the claimed dirty keys (`nil` = whole-cell) for hand-rolled scoping.
+`query:` receives the base query and the claimed dirty keys (`nil` =
+whole-cell) and returns a query — filter, sort, load, without leaving Ash's
+pipeline (policies still apply); the library executes it and applies the
+dirty-key scope afterwards, so scoping stays the substrate's job. The other
+slots resolve independently — a declarative `group_by` with an `into:` fn is
+fine (the fn receives the group tuple exactly as the fn idiom always has). A
+read that isn't Ash at all belongs on the `run`/`compute` rungs.
+
+Two shapes have their own slots instead of `into:`:
+
+- **verdict** (`verdict? true`) — declare `status:` (`(group, items -> status
+  | {status, strength})`); the verdict IS the result, keys derive as usual.
+- **expand** — declare `expand:` (`(group, items -> [row])`, each row carrying
+  its own `:key`, since one group fans out to many keys).
 
 ### `join` — a left join (one input, two sides), declared
 
@@ -98,7 +106,9 @@ attribute is the two-column case (`left: :declared_id` — a nil value means
 discriminator field. `outer: true` also emits right-only keys (an undeclared
 member is a finding). The fn escapes: `left: fn item -> ... end` for computed
 side keys, `into: fn jk, l, r -> ... end` for computed columns
-(variance = budget − actual) or `:status` rows.
+(variance = budget − actual); a verdict join declares `status:`
+(`(jk, l, r -> status | {status, strength})`) instead of `into:`. `query:`
+shapes the read exactly as on `reduce`.
 
 ### `run` — a generic Ash action as the recompute
 
