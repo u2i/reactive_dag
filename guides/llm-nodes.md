@@ -12,7 +12,7 @@ it themselves; everything below is composition, not integration.
 ## The shape
 
 ```elixir
-defmodule MyApp.Events do
+defmodule MyApp.Summaries do
   use Ash.Resource, data_layer: AshPostgres.DataLayer,
     extensions: [ReactiveDag.Node]
 
@@ -21,15 +21,11 @@ defmodule MyApp.Events do
   attributes do
     attribute :key, :string, primary_key?: true
     attribute :summary, :string
+    attribute :fingerprint, :string        # where the input hash lives
   end
 
   actions do
-    create :upsert do upsert?(true); accept([:key, :summary]) end
-
-    action :extract_events, {:array, :string} do
-      argument :keys, {:array, :string}, allow_nil?: true   # nil = whole cell
-      run &MyApp.Events.extract/2                            # calls the prompt per key
-    end
+    create :upsert do upsert?(true); accept([:key, :summary, :fingerprint]) end
 
     action :summarise, :map do
       argument :text, :string, allow_nil?: false
@@ -39,22 +35,52 @@ defmodule MyApp.Events do
   end
 
   reactive do
-    id :events
-    run :extract_events
-    ref :transcripts        # a change here re-runs the model
-    context :people         # read as settled context; never re-triggers
+    recompute_by :key, to: :transcripts, from: :key
+
+    per_key :summarise,
+      args: [text: :body],           # the row's :body becomes the `text` argument
+      fingerprint: [:body],          # skip the call when :body is unchanged
+      into: [summary: :summary]      # the result's "summary" → this :summary
+
+    context :people                  # settled context; never re-triggers
   end
 end
 ```
 
-Two edges, two meanings — and for LLM nodes the distinction is a **billing**
-decision, not just a semantic one:
+The library drives the loop — scope to the claimed keys, read the rows, call
+the action once per row, write the structured output through the payload loop.
+What you write is the *action* and the mapping.
 
-- **`ref`** — a change propagates and the model runs again.
-- **`context`** — read at recompute, never a trigger. Exactly right for the
-  people/positions/policy table a prompt consults: you want the *current* values
-  in the prompt, but you do not want every edit to that table re-billing every
-  key. This is the canonical reason the `context` edge exists.
+## Fingerprinting: not paying twice for the same answer
+
+`fingerprint:` names the input fields the result depends on. Their hash is
+stored on the output row; a recompute whose hash matches **does not call the
+action at all**:
+
+```
+whole-cell claim, nothing changed  →  %{called: 0, skipped: 2}
+one transcript's :body edited      →  %{called: 1, skipped: 1}
+a field NOT in the fingerprint     →  %{called: 0, skipped: 2}
+```
+
+That counts map rides on the drain's `%Report{}` step, so the saving is
+visible rather than assumed (`Report.total(report, :skipped)`).
+
+This is why `per_key` exists as a rung rather than a guide section. A `run`
+action is **opaque by design** — the library passes keys and gets keys back, so
+nothing outside it can know whether the work is worth doing. Only by driving the
+loop does the library see the inputs, and only then can it decline to pay.
+
+The fingerprint needs somewhere to live: declare a `:fingerprint` attribute (or
+name another with `fingerprint_attribute`). A node that declares `fingerprint:`
+with nowhere to store it is a **compile error** — a silently-never-skipping node
+is exactly the expensive mistake the rung prevents.
+
+## When to drop to `run` instead
+
+`per_key` maps one input row to one output row. Anything else — many rows per
+call, a batch prompt, a bespoke multi-input recompute — is the `run` rung, where
+you own the loop.
 
 ## Cost discipline: dirty-key scoping
 
@@ -99,10 +125,9 @@ These are the reasons a first-class `llm` rung is still open
 ([#30](https://github.com/u2i/reactive_dag/issues/30)); none of them block the
 shape above:
 
-- **No input fingerprinting.** A whole-cell claim re-bills every key, even where
-  the inputs are byte-identical. The idiom is to hash the rendered prompt inputs
-  into a column and skip the call when it is unchanged — today you write that
-  yourself, inside the action.
+- ~~No input fingerprinting.~~ **Solved** by `per_key … fingerprint:` above.
+  (A `run` node still re-bills on a whole-cell claim — the library cannot see
+  its inputs. That is the trade for `run`'s opacity.)
 - **One call per key, serially.** The drain is synchronous per cell, so a long
   LLM cell dominates wall-clock. Batching (N rows per prompt) and bounded
   concurrency inside the action are the levers; both live in your action for now.

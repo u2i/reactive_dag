@@ -573,6 +573,97 @@ defmodule ReactiveDag.Node do
     ]
   }
 
+  defmodule PerKey do
+    @moduledoc """
+    The PER-ENTRY MAP: for each claimed row of the input, call a generic action
+    with that row and write its structured output into this node's attributes.
+
+        recompute_by :key, to: :transcripts, from: :key
+
+        per_key :summarise,
+          args: [text: :body],
+          fingerprint: [:body],
+          into: [summary: :summary]
+
+    The loop every per-row node hand-writes — scope to the claimed keys, read
+    the rows, call something once per row, write the result — with the library
+    driving it. That matters beyond ergonomics: because the library now SEES
+    the input rows, it can fingerprint them and **skip the call** when nothing
+    that feeds it has changed. A `run` action is opaque by design (the library
+    passes keys and gets keys back), so no amount of declaration outside it
+    could do that.
+
+    `fingerprint:` names the input fields the result depends on. Their hash is
+    stored on the output row; when a recompute finds it unchanged, the action is
+    NOT called and the key is not reported changed. For an expensive or
+    non-deterministic action — an LLM call above all — that is the difference
+    between a whole-cell claim costing one call and costing all of them.
+
+    The action is an ordinary generic Ash action taking the row's fields as
+    arguments and returning a map. That it might be `AshAi.Actions.prompt/2` is
+    the library's business not at all.
+    """
+    defstruct [
+      :action,
+      :args,
+      :fingerprint,
+      :into,
+      :fingerprint_attribute,
+      :__identifier__,
+      :__spark_metadata__
+    ]
+  end
+
+  @per_key %Spark.Dsl.Entity{
+    name: :per_key,
+    target: PerKey,
+    args: [:action],
+    describe:
+      "Per-entry map: call a generic action once per claimed input row and write its " <>
+        "structured output into this node's attributes. `fingerprint:` skips the call " <>
+        "when the named input fields are unchanged — the point of the rung for " <>
+        "expensive or non-deterministic work.",
+    schema: [
+      action: [
+        type: :atom,
+        required: true,
+        doc:
+          "a GENERIC action on THIS resource, taking the row's fields as arguments and " <>
+            "returning a map (`:map`, or a typed struct — whatever `into:` can read)."
+      ],
+      args: [
+        type: :keyword_list,
+        required: false,
+        doc:
+          "how the input row becomes the action's arguments: `[text: :body]` passes the " <>
+            "row's `:body` as the `text` argument. Omit to pass every action argument " <>
+            "whose name matches an input field."
+      ],
+      fingerprint: [
+        type: {:list, :atom},
+        required: false,
+        doc:
+          "input fields the result depends on. Their hash is stored on the output row " <>
+            "(`fingerprint_attribute`, default `:fingerprint`); a recompute whose hash " <>
+            "matches SKIPS the action entirely and reports the key unchanged. Omit to " <>
+            "call every time."
+      ],
+      fingerprint_attribute: [
+        type: :atom,
+        required: false,
+        doc: "the attribute the fingerprint is stored in (default `:fingerprint`)."
+      ],
+      into: [
+        type: :keyword_list,
+        required: false,
+        doc:
+          "how the action's result becomes this node's row: `[summary: :summary]` maps " <>
+            "the result's `\"summary\"` onto this resource's `:summary` attribute. Omit " <>
+            "to copy every result key whose name matches an attribute."
+      ]
+    ]
+  }
+
   defmodule Compute do
     @moduledoc """
     The ESCAPE HATCH: declare an arbitrary recompute MODULE (a `ReactiveDag.Op`)
@@ -808,6 +899,7 @@ defmodule ReactiveDag.Node do
       @compose,
       @reduce,
       @join,
+      @per_key,
       @aggregate,
       @compute,
       @run,
@@ -972,7 +1064,7 @@ defmodule ReactiveDag.Node do
   end
 
   defp resolve_read_cell(cell, by_id) do
-    spec = cell.meta[:reduce] || cell.meta[:join]
+    spec = cell.meta[:reduce] || cell.meta[:join] || per_key_read_spec(cell)
 
     case spec do
       %{read: read} ->
@@ -1032,6 +1124,15 @@ defmodule ReactiveDag.Node do
         cell
     end
   end
+
+  # a `per_key` node reads its input exactly as a combinator does — it just has
+  # no `read:`/`query:` of its own, so it borrows the shape resolve_read_cell/2
+  # already understands. (`over` comes from `recompute_by to:`, which lowering
+  # has already stamped as the cell's single input.)
+  defp per_key_read_spec(%{meta: %{per_key: %PerKey{}}, inputs: [over]}),
+    do: %{read: nil, over: String.to_atom(over)}
+
+  defp per_key_read_spec(_cell), do: nil
 
   # the ONE cross-node fact behind every `:group` capability — an ordered plan
   # of what each group entry IS on the over resource:
@@ -1428,7 +1529,7 @@ defmodule ReactiveDag.Node do
           []
 
         c ->
-          case c.over || (recompute_by(resource) || %{to: nil}).to do
+          case Map.get(c, :over) || (recompute_by(resource) || %{to: nil}).to do
             nil ->
               raise ArgumentError,
                     "reactive_dag: the combinator on #{inspect(resource)} names no input — " <>
@@ -1583,7 +1684,7 @@ defmodule ReactiveDag.Node do
   # relationship on this resource, not another cell, so it adds no edge.
   defp combinator(resource) do
     Ext.get_entities(resource, [:reactive])
-    |> Enum.find(&(match?(%Reduce{}, &1) or match?(%Join{}, &1)))
+    |> Enum.find(&(match?(%Reduce{}, &1) or match?(%Join{}, &1) or match?(%PerKey{}, &1)))
   end
 
   # the node's Aggregate entity (a relationship aggregate), or nil.
@@ -1654,6 +1755,7 @@ defmodule ReactiveDag.Node do
     combinator_meta =
       case combinator(resource) do
         %Reduce{} = r -> %{reduce: lower_recompute_by(r, resource)}
+        %PerKey{} = pk -> %{per_key: pk}
         %Join{} = j -> %{join: j}
         nil -> %{}
       end
