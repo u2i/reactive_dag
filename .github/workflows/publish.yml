@@ -1,14 +1,26 @@
 name: publish
 
-# release-please cuts the GitHub Release; publishing that release pushes the
-# package (and its hexdocs) to hex.pm. NOTE: a release event runs the workflow
-# file AT THE RELEASE TAG, so this only fires for tags that contain this file.
-# workflow_dispatch is the manual escape hatch (publishes the checked-out ref).
+# MANUAL publishing only — the automatic path lives in release-please.yml,
+# which publishes in the same run that cuts the release.
+#
+# This workflow used to trigger on `release: [published]`. That never fired:
+# release-please creates the release with GITHUB_TOKEN, and GitHub raises no
+# workflow-triggering events for actions taken with that token (a recursion
+# guard). The trigger looked correct and silently did nothing — v0.17.0-rc was
+# tagged and released with hex left on 0.16.0. It is gone rather than fixed
+# with a PAT, so there is one publishing path instead of two.
+#
+# Use this for: republishing within hex's 1-hour replace window, publishing a
+# tag whose release predates the automation, or recovering from a failed run.
+# It publishes THE CHECKED-OUT REF, so pick the tag deliberately — the default
+# branch's mix.exs carries the *last released* version, not the next one.
 on:
-  release:
-    types: [published]
   workflow_dispatch:
     inputs:
+      ref:
+        description: "Tag or ref to publish (e.g. v0.17.0-rc). Defaults to the branch you dispatch from."
+        type: string
+        required: false
       replace:
         description: "Replace an existing release (hex allows this within 1h of publish)"
         type: boolean
@@ -22,11 +34,15 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref || github.ref }}
       - uses: erlef/setup-beam@v1
         with:
           version-file: .tool-versions
           version-type: strict
       - run: mix deps.get
+      - name: show what is about to be published
+        run: mix run -e 'IO.puts("publishing #{Mix.Project.config()[:app]} #{Mix.Project.config()[:version]}")'
       - run: mix hex.publish --yes ${{ inputs.replace == true && '--replace' || '' }}
         env:
           HEX_API_KEY: ${{ secrets.HEX_API_KEY }}
