@@ -424,4 +424,139 @@ defmodule ReactiveDag.PerKeyTest do
       assert msg =~ "GENERIC"
     end
   end
+  describe "bounded concurrency" do
+    # records max simultaneous in-flight calls, so the tests assert on actual
+    # parallelism rather than on the option merely being accepted
+    defmodule Gauge do
+      def start_link, do: Agent.start_link(fn -> %{now: 0, peak: 0} end, name: __MODULE__)
+
+      def enter do
+        Agent.update(__MODULE__, fn s ->
+          now = s.now + 1
+          %{now: now, peak: max(s.peak, now)}
+        end)
+      end
+
+      def leave, do: Agent.update(__MODULE__, &%{&1 | now: &1.now - 1})
+      def peak, do: Agent.get(__MODULE__, & &1.peak)
+    end
+
+    defmodule Concurrent do
+      use Ash.Resource,
+        domain: ReactiveDag.PerKeyTest.Domain,
+        data_layer: Ash.DataLayer.Ets,
+        extensions: [ReactiveDag.Node]
+
+      # NB: NOT `private?(true)`. A private ETS table is owned by the process
+      # that created it, and `max_concurrency:` writes each row from a task
+      # process — so a private table would silently drop the writes. Real hosts
+      # on AshPostgres are unaffected; this is the fixture matching reality.
+      ets do
+      end
+
+      attributes do
+        attribute :key, :string, primary_key?: true, allow_nil?: false, public?: true
+        attribute :summary, :string, public?: true
+        attribute :fingerprint, :string, public?: true
+      end
+
+      identities do
+        identity :by_key, [:key], pre_check_with: ReactiveDag.PerKeyTest.Domain
+      end
+
+      actions do
+        defaults [:read, :destroy]
+
+        create :upsert do
+          upsert?(true)
+          upsert_identity(:by_key)
+          accept([:key, :summary, :fingerprint])
+        end
+
+        action :summarise, :map do
+          argument :text, :string, allow_nil?: false
+
+          run fn input, _ctx ->
+            ReactiveDag.PerKeyTest.Gauge.enter()
+            # long enough that serial execution could never overlap
+            Process.sleep(40)
+            ReactiveDag.PerKeyTest.Gauge.leave()
+            ReactiveDag.PerKeyTest.Calls.record(input.arguments.text)
+            {:ok, %{"summary" => "s:#{input.arguments.text}"}}
+          end
+        end
+      end
+
+      reactive do
+        id(:concurrent)
+        recompute_by :key, to: :transcripts, from: :key
+
+        per_key :summarise,
+          args: [text: :body],
+          fingerprint: [:body],
+          max_concurrency: 4,
+          into: [summary: :summary]
+      end
+    end
+
+    setup do
+      start_supervised!(%{id: Gauge, start: {Gauge, :start_link, []}})
+
+      # the shared (non-private) ETS table outlives a test, so start each one
+      # from a known-empty state
+      Concurrent |> Ash.read!() |> Enum.each(&Ash.destroy!/1)
+
+      # enough rows that 4-way concurrency is observable
+      for i <- 3..8 do
+        Transcripts
+        |> Ash.Changeset.for_create(:create, %{key: "t#{i}", body: "body #{i}", note: "n"})
+        |> Ash.create!()
+      end
+
+      :ok
+    end
+
+    defp concurrent_cell,
+      do: ReactiveDag.Node.graph([Transcripts, Concurrent]).cells["concurrent"]
+
+    test "rows run in parallel, bounded by max_concurrency" do
+      {:ok, changed, meta} = Recompute.recompute(concurrent_cell(), ["*"])
+
+      assert length(changed) == 8
+      assert meta == %{called: 8, skipped: 0}
+
+      # actually concurrent...
+      assert Gauge.peak() > 1
+      # ...and never beyond the bound
+      assert Gauge.peak() <= 4
+    end
+
+    test "results are applied in ROW order — the changed list stays deterministic" do
+      {:ok, first, _} = Recompute.recompute(concurrent_cell(), ["*"])
+
+      # wipe the fingerprints so the second run calls again
+      Concurrent |> Ash.read!() |> Enum.each(&Ash.destroy!/1)
+      {:ok, second, _} = Recompute.recompute(concurrent_cell(), ["*"])
+
+      assert first == second
+      assert first == Enum.sort(first)
+    end
+
+    test "SKIPPED rows never enter the stream — slots go only to real calls" do
+      {:ok, _, _} = Recompute.recompute(concurrent_cell(), ["*"])
+      before = Calls.count()
+
+      # change exactly one row; the other 7 are fingerprint-identical
+      Transcripts
+      |> Ash.get!("t5")
+      |> Ash.Changeset.for_update(:revise, %{body: "changed"})
+      |> Ash.update!()
+
+      {:ok, changed, meta} = Recompute.recompute(concurrent_cell(), ["*"])
+
+      assert changed == ["t5"]
+      assert meta == %{called: 1, skipped: 7}
+      assert Calls.count() - before == 1
+    end
+  end
 end
