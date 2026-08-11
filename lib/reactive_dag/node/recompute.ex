@@ -159,18 +159,70 @@ defmodule ReactiveDag.Node.Recompute do
     end
   end
 
-  # the library's payload-key filter is sound only when this cell's keys ARE
-  # the over node's keys — key_rule :identity. Under :all claims arrive as "*"
-  # anyway; under a grain-changing host rule (readings → months), the claimed
-  # parent-grain keys must NOT filter the child-grain read — `query:` still
-  # receives them, so the host can scope at its own grain.
+  # the library's automatic read scope, by the cell's key-rule GRAIN:
+  #   :identity       → the claimed keys ARE the over's keys: filter payload_key.
+  #   {:bucket, kind} → the claimed keys are bucket labels: filter the over's
+  #                     date attribute to the claimed buckets' range HULL (a
+  #                     superset read is still closed over groups — extra
+  #                     buckets recompute and change-detect to nothing). Needs
+  #                     the over's group calculation to be a Calendar bucket of
+  #                     the same kind (stamped as over_source.bucket_scopes);
+  #                     otherwise no auto scope.
+  #   anything else   → no auto scope: a grain-changing host rule's claims must
+  #                     not filter the child-grain read; `query:` still receives
+  #                     them for host-grain scoping.
   defp auto_scope(%Cell{meta: meta}, keys) do
     case meta[:key_rule] do
-      :identity -> scope(keys)
-      nil -> scope(keys)
+      :identity -> keyed_scope(keys)
+      nil -> keyed_scope(keys)
+      {:bucket, kind} -> bucket_hull(meta[:over_source], kind, scope(keys))
+      :group -> group_attr_scope(meta, scope(keys))
       _ -> nil
     end
   end
+
+  # `:group` claims are group labels; when assembly proved the group is one
+  # plain string attribute with default keys (over_source.group_scope_attr),
+  # the labels ARE that attribute's values (minus any key_prefix) — filter it.
+  defp group_attr_scope(_meta, nil), do: nil
+
+  defp group_attr_scope(meta, labels) do
+    with %{group_scope_attr: attr} when not is_nil(attr) <- meta[:over_source] do
+      prefix = get_in(meta, [:reduce]) |> then(&(&1 && Map.get(&1, :key_prefix)))
+
+      values =
+        case prefix do
+          nil -> labels
+          p -> Enum.map(labels, &String.replace_prefix(&1, p <> "|", ""))
+        end
+
+      {:attr, attr, values}
+    else
+      _ -> nil
+    end
+  end
+
+  defp keyed_scope(keys) do
+    case scope(keys) do
+      nil -> nil
+      claimed -> {:keys, claimed}
+    end
+  end
+
+  defp bucket_hull(_source, _kind, nil), do: nil
+
+  defp bucket_hull(%{bucket_scopes: scopes}, kind, labels) when is_map(scopes) do
+    with attr when not is_nil(attr) <- scopes[kind],
+         ranges = Enum.map(labels, &ReactiveDag.Calendar.range(kind, &1)),
+         false <- :error in ranges do
+      {froms, tos} = Enum.unzip(ranges)
+      {:range, attr, Enum.min(froms, Date), Enum.max(tos, Date)}
+    else
+      _ -> nil
+    end
+  end
+
+  defp bucket_hull(_source, _kind, _labels), do: nil
 
   # the claimed keys as a read scope: `nil` for a whole-cell recompute (`"*"`),
   # else the specific dirty keys a scoped `read` can filter its query to.

@@ -116,14 +116,38 @@ chronologically. A Postgres host wanting pushdown declares an
 `expr(fragment("to_char(?, 'YYYY-MM')", date))` calculation instead — the
 rollup neither knows nor cares.
 
-Because a month's grain differs from a reading's, the rollup is `key_rule
-:all` — whole-cell recompute, with the payload loop's change detection keeping
-*propagation* per-month. A host that wants per-bucket **claims** brings a
-custom `ReactiveDag.KeyRule` mapping changed reading keys to their month keys
-(consulting the same calculation); the library's payload-key auto-scope stands
-down for grain-changing rules, and `query:` still receives the claimed month
-keys for host-grain scoping. `test/date_rollup_demo_test.exs` is the worked
-demo: touch one reading, watch exactly one month recompute and propagate.
+And the mid-granularity claims come declaratively too, declared ON the
+combinator so the whole granularity contract sits in one unit:
+
+```elixir
+reduce over: :expenses,
+       group_by: [:category],
+       key_rule: :group,        # a changed expense claims its CATEGORY
+       into: [sum: [amount: :total], count: :n]
+```
+
+`key_rule: :group` needs no new vocabulary at all — the field mapping is what
+`group_by` already declares. A changed child key is resolved by reading the
+changed rows and evaluating the same group fields (one scoped query per
+propagation; a key the lookup can't find — a deleted row — degrades to
+`:all`, since vanish must reprice everything it might have left). When the
+group is one plain string attribute, the library also scopes the read to the
+claimed groups (`category in claims`).
+
+The calendar variant, `key_rule {:bucket, :month}`, trades that lookup for
+PURE string work when keys carry date-shaped prefixes (`"2026-08-11|r4"`): no
+query, and deletion-safe (a vanished key still names the bucket it left).
+Bucket claims also auto-scope by date range when the group calculation is the
+matching Calendar bucket. Chained rollups (`readings → daily → monthly`) make
+every step a pure relabel of the child's key.
+
+The general soundness rule behind all of it: a scoped read must be **closed
+over group boundaries** — `:identity` is entry-closure, `:group`/`{:bucket,
+kind}` are group-closure, `:all` is the universe. `key_rule` at block level
+remains for nodes with no combinator (`run`/`compute`/leaves); declaring a
+non-default in both places is a compile error. `test/date_rollup_demo_test.exs`
+and `test/group_rule_test.exs` are the worked demos: touch one reading (or one
+expense), watch exactly one bucket (or category) recompute and propagate.
 
 ### `join` — a left join (one input, two sides), declared
 
