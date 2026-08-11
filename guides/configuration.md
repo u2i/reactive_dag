@@ -1,0 +1,151 @@
+# Configuration
+
+Every `config :reactive_dag, …` key the library reads, what it does, and when
+you would change it.
+
+Only **`:repo`** is required. Everything else has a working default, and most
+hosts never touch more than two or three.
+
+```elixir
+# config/config.exs — a typical host
+config :reactive_dag,
+  repo: MyApp.Repo,
+  coordination_writer: MyApp.ReactiveDag.Writer
+```
+
+## The keys
+
+| key | default | required? | read by |
+|---|---|---|---|
+| [`:repo`](#repo) | — | **yes** | `Frontier`, `Tuple` |
+| [`:dirty_table`](#dirty_table-tuple_table) | `"reactive_dag_dirty"` | no | `Frontier`, `Migration` |
+| [`:tuple_table`](#dirty_table-tuple_table) | `"reactive_dag_tuple"` | no | `Tuple` |
+| [`:coordination_writer`](#coordination_writer) | `ReactiveDag.Tuple.Writer` | no | `CoordinationWriter` |
+| [`:attestation_resource`](#attestation_resource-attestation_cell) | — | only with attestations | `Attestation` |
+| [`:attestation_cell`](#attestation_resource-attestation_cell) | `"attestations"` | no | `Attestation` |
+| [`:set_op_templates`](#set_op_templates) | `%{}` | only with `SetOp` | `SetOp` |
+| [`:insights_keep`](#insights_keep) | `20` | no | `Insights` |
+
+---
+
+### `:repo`
+
+Your AshPostgres repo. The library goes through it with raw SQL for the two
+tables it owns — the dirty frontier and the coordination tuple — because
+claim-as-delete (`DELETE … RETURNING`) and the coalescing upserts don't express
+cleanly as Ash actions.
+
+```elixir
+config :reactive_dag, repo: MyApp.Repo
+```
+
+**The only required key.** Omitting it raises on the *first query*, not at boot:
+
+```
+** (RuntimeError) reactive_dag: set `config :reactive_dag, repo: MyApp.Repo`
+```
+
+which may be a long way into a deploy. A boot-time check is
+[tracked separately](https://github.com/u2i/reactive_dag/issues/53).
+
+### `:dirty_table`, `:tuple_table`
+
+The physical table names.
+
+```elixir
+config :reactive_dag,
+  dirty_table: "my_existing_dirty",
+  tuple_table: "my_existing_tuples"
+```
+
+These exist so **a host adopting the library keeps its tables without a
+rename** — both current hosts grew their own frontier and tuple tables before
+the library existed. On a green-field app, leave them alone.
+
+The name is the one identifier SQL cannot parameterise, so it is validated
+against an identifier grammar at read time: a typo fails loudly rather than as
+a syntax error deep inside a query.
+
+`ReactiveDag.Migration` resolves `:dirty_table` exactly as `Frontier` does, so
+a host that sets the config gets a migration matching the table the runtime
+queries — there is no second place to keep in sync.
+
+### `:coordination_writer`
+
+How a cell's coordination tuples are written — one of the library's
+[three seams](seams.html).
+
+```elixir
+config :reactive_dag, coordination_writer: MyApp.ReactiveDag.Writer
+```
+
+The default (`ReactiveDag.Tuple.Writer`) writes the **spine only**:
+`(cell_id, key, status, freshness)`. That is enough for a host with no
+extension columns.
+
+**This is the seam most hosts eventually replace.** The spine is shared, but
+each host's write also touches its own columns in the *same atomic upsert* —
+one stamps `source_ref`/`last_seen_at` and clears `tombstoned_at`, another
+stamps `strength`. That extension write is host policy, which is why it cannot
+be a pure spine call.
+
+A writer may also report a **changed** boolean from `put/3` (true iff the row's
+verdict actually flipped), which the payload loop uses to scope propagation to
+real changes. Returning `:ok` is correct too — just less scoped.
+
+### `:attestation_resource`, `:attestation_cell`
+
+Only relevant to hosts using [attestations](attestations.html) — human sign-off
+as a first-class DAG input.
+
+```elixir
+config :reactive_dag,
+  attestation_resource: MyApp.Attestation.Record,
+  attestation_cell: "attestations"
+```
+
+`:attestation_resource` has **no default** and raises with a full example
+resource when attestation code runs without it. `:attestation_cell` names the
+store leaf the library injects into the graph; change it only if `"attestations"`
+collides with one of your own cell ids.
+
+### `:set_op_templates`
+
+A registry of `op → template` functions for hosts whose recompute is set-based
+SQL keyed by `cell.op`, rather than per-key Elixir.
+
+```elixir
+config :reactive_dag, set_op_templates: %{
+  reconcile: &MyApp.Recompute.reconcile/2,
+  relation: &MyApp.Recompute.relation/2
+}
+```
+
+Only used by `ReactiveDag.SetOp`. A host using `ReactiveDag.Node.Recompute` —
+the common case — never sets this. An op with no registered template logs a
+warning and recomputes nothing, rather than crashing the drain.
+
+### `:insights_keep`
+
+How many `%ReactiveDag.Drain.Report{}`s `ReactiveDag.Insights.record/1` retains
+in its rolling in-memory window.
+
+```elixir
+config :reactive_dag, insights_keep: 50
+```
+
+Only relevant if you call `Insights.record/1` (the drain persists nothing on its
+own — the library reports, the host records). The buffer is per-node, in
+memory, and lost on restart; it exists so a dashboard has something to show
+without the host building storage. A host wanting history stores the report
+where its runs already live.
+
+## What is *not* configured here
+
+- **Scheduling** — when to call `Drain.run/2`, and with which strategy and key
+  rule, is passed per call. See [Getting started](getting-started.html).
+- **The recompute strategy and key rule** — also per-call `Drain.run/2` options,
+  not global config.
+- **Per-node behaviour** — `payload_key`, `payload_action`, `key_rule`,
+  `recompute_by` and the rest are declared in a resource's `reactive` block, not
+  in application config. See [Authoring nodes](authoring-nodes.html).
