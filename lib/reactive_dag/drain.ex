@@ -136,7 +136,7 @@ defmodule ReactiveDag.Drain do
 
             true ->
               cell = Map.fetch!(plan.cells, cell_id)
-              {changed, us} = timed(fn -> recompute(cell, keys, opts) end)
+              {{changed, meta}, us} = timed(fn -> recompute(cell, keys, opts) end)
               # A WHOLE-CELL claim ("*") propagates :all: a whole recompute can DELETE
               # keys, and per-key propagation only carries survivors — it would strand
               # a vanished key in the parent. So escalate downstream when the claim was
@@ -148,7 +148,8 @@ defmodule ReactiveDag.Drain do
                 claimed: keys,
                 changed: changed,
                 triggered_by: Map.get(cause, cell_id),
-                duration_us: us
+                duration_us: us,
+                meta: meta
               }
 
               if f = opts[:on_step], do: f.(cell, step)
@@ -172,7 +173,7 @@ defmodule ReactiveDag.Drain do
     {result, System.monotonic_time(:microsecond) - t0}
   end
 
-  defp recompute(%Cell{leaf?: true}, keys, _opts), do: keys
+  defp recompute(%Cell{leaf?: true}, keys, _opts), do: {keys, %{}}
 
   defp recompute(cell, keys, opts) do
     case opts[:recompute] do
@@ -186,8 +187,12 @@ defmodule ReactiveDag.Drain do
                 "Drain.run was given no :recompute strategy"
 
       strategy ->
-        {:ok, changed} = strategy.recompute(cell, keys)
-        changed
+        case strategy.recompute(cell, keys) do
+          {:ok, changed} -> {changed, %{}}
+          # a strategy may report what the work cost (tokens, retries, cache
+          # hits); the library carries the map without interpreting it
+          {:ok, changed, meta} when is_map(meta) -> {changed, meta}
+        end
     end
   end
 

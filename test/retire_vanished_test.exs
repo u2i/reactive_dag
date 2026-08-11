@@ -173,8 +173,8 @@ defmodule ReactiveDag.RetireVanishedTest do
   end
 
   setup do
-    {:ok, _} = FakeRepo.start_link()
-    {:ok, _} = RecordingWriter.start_link()
+    start_supervised!(%{id: FakeRepo, start: {FakeRepo, :start_link, []}})
+    start_supervised!(%{id: RecordingWriter, start: {RecordingWriter, :start_link, []}})
     prev_repo = Application.get_env(:reactive_dag, :repo)
     prev_writer = Application.get_env(:reactive_dag, :coordination_writer)
     Application.put_env(:reactive_dag, :repo, FakeRepo)

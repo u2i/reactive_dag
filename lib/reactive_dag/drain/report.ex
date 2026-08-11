@@ -17,6 +17,11 @@ defmodule ReactiveDag.Drain.Report do
         * `:triggered_by` — the cell whose propagation dirtied this one
           (`nil` for the seeded frontier), reconstructing the causal tree
         * `:duration_us` — microseconds the recompute took
+        * `:meta` — whatever the recompute strategy reported about the work
+          (`%{}` when it reported nothing). The library never interprets it:
+          token/cost counts for an LLM node, cache hits, retries and rows
+          scanned are all just keys. A strategy opts in by returning
+          `{:ok, changed, meta}`.
     * `passes` — drain-loop iterations (≥ `length(steps)`; a pass with an
       empty claim recomputes nothing)
     * `duration_us` — wall time of the whole drain
@@ -32,7 +37,8 @@ defmodule ReactiveDag.Drain.Report do
           claimed: [String.t()],
           changed: [String.t()],
           triggered_by: String.t() | nil,
-          duration_us: non_neg_integer()
+          duration_us: non_neg_integer(),
+          meta: map()
         }
 
   @type t :: %__MODULE__{
@@ -46,6 +52,19 @@ defmodule ReactiveDag.Drain.Report do
   @doc "The distinct cells the drain recomputed, in first-touched order."
   @spec cells(t()) :: [String.t()]
   def cells(%__MODULE__{steps: steps}), do: steps |> Enum.map(& &1.cell) |> Enum.uniq()
+
+  @doc """
+  Merge one key out of every step's `meta`, summing numeric values — the
+  roll-up a cost line wants (`total(report, :tokens_in)`). Steps whose meta
+  lacks the key contribute nothing.
+  """
+  @spec total(t(), atom()) :: number()
+  def total(%__MODULE__{steps: steps}, key) do
+    steps
+    |> Enum.map(&get_in(&1, [:meta, key]))
+    |> Enum.filter(&is_number/1)
+    |> Enum.sum()
+  end
 
   @doc "Total keys reported changed across every step."
   @spec changed_total(t()) :: non_neg_integer()

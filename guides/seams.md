@@ -114,6 +114,15 @@ plan = ReactiveDag.Graph.build(cells)
 ReactiveDag.Drain.run(plan, recompute: MyStrategy, key_rule: MyKeyRule)
 ```
 
+A strategy with something worth reporting about the work returns
+`{:ok, changed, meta}` instead of `{:ok, changed}` — an arbitrary map that rides
+on the `%Report{}` step (`Report.total/2` rolls one key up across steps). The
+library never interprets it: token/cost counts, cache hits, retries and rows
+scanned are all just keys.
+
+```elixir
+```
+
 For a host with its own *nested* expression DSL, `ReactiveDag.Lowering.walk/3`
 is the shared recursion (parameterized by id grammar, ref resolution, and cell
 construction), and `ReactiveDag.Dsl.compile/2` adds structural validation plus

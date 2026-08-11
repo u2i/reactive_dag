@@ -28,6 +28,14 @@ defmodule ReactiveDag.RecomputeStrategy do
   Recompute `keys` of `cell` (or `["*"]` for a whole-cell recompute). Return
   `{:ok, changed_keys}` — the subset whose output changed. Returning all keys is
   always correct, just less efficient.
+
+  A strategy with something worth REPORTING about the work may return
+  `{:ok, changed_keys, meta}` instead: an arbitrary map that rides on the
+  drain's `%Report{}` step. The library never interprets it — token and cost
+  counts for an LLM node, cache hits, retries, rows scanned are all just keys —
+  it only carries it, so `ReactiveDag.Insights` and a dashboard can show what
+  the work actually cost.
   """
-  @callback recompute(cell :: Cell.t(), keys :: [key()]) :: {:ok, [key()]}
+  @callback recompute(cell :: Cell.t(), keys :: [key()]) ::
+              {:ok, [key()]} | {:ok, [key()], map()}
 end

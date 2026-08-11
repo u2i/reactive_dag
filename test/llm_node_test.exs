@@ -227,8 +227,8 @@ defmodule ReactiveDag.LlmNodeTest do
   end
 
   setup do
-    {:ok, _} = FakeRepo.start_link()
-    {:ok, _} = FakeLLM.start_link()
+    start_supervised!(%{id: FakeRepo, start: {FakeRepo, :start_link, []}})
+    start_supervised!(%{id: FakeLLM, start: {FakeLLM, :start_link, []}})
     prev_repo = Application.get_env(:reactive_dag, :repo)
     prev_writer = Application.get_env(:reactive_dag, :coordination_writer)
     Application.put_env(:reactive_dag, :repo, FakeRepo)
@@ -412,7 +412,7 @@ defmodule ReactiveDag.LlmNodeTest do
   end
 
   test "an ash_ai prompt/2 action drops straight in — the Step 0 claim, verified" do
-    {:ok, _} = StubReqLLM.start_link()
+    start_supervised!(%{id: StubReqLLM, start: {StubReqLLM, :start_link, []}})
 
     p = ReactiveDag.Node.graph([Transcripts, People, Sentiment])
     {:ok, changed} = ReactiveDag.Node.Recompute.recompute(p.cells["sentiment"], ["*"])
