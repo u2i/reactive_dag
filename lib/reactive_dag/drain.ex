@@ -44,6 +44,10 @@ defmodule ReactiveDag.Drain do
       step carries (minus `:cell`/`:pass`, which the report adds). The full
       trace arrives in the report either way; use `on_step` only when you need
       it before the drain finishes.
+    * `:max_passes` — runaway guard (default #{100_000}): exceeding it raises
+      `ReactiveDag.Drain.RunawayError`, whose `:report` field carries the
+      partial trace — the step list showing which cells keep re-dirtying each
+      other is exactly the diagnostic for the cycle the guard suspects.
   """
 
   require Logger
@@ -52,18 +56,46 @@ defmodule ReactiveDag.Drain do
 
   @max_passes 100_000
 
+  defmodule RunawayError do
+    @moduledoc """
+    The drain exceeded its pass budget — likely a cycle, or a recompute that
+    keeps re-dirtying its own inputs. `:report` carries the PARTIAL trace up to
+    the abort: `report.steps`' tail shows exactly which cells keep triggering
+    each other, which is the diagnostic for the loop this error suspects.
+    """
+    defexception [:message, :report]
+  end
+
   @spec run(Plan.t(), keyword()) :: {:ok, Report.t()}
   def run(%Plan{} = plan, opts \\ []) do
     t0 = System.monotonic_time(:microsecond)
     do_run(plan, opts, 0, %{}, [], t0)
   end
 
-  defp do_run(_plan, _opts, passes, _cause, _steps, _t0) when passes >= @max_passes do
-    raise "reactive_dag drain exceeded #{@max_passes} passes — likely a cycle or a " <>
-            "recompute that keeps re-dirtying its own inputs"
+  defp do_run(plan, opts, passes, cause, steps, t0) do
+    max = opts[:max_passes] || @max_passes
+
+    if passes >= max do
+      report = %Report{
+        steps: Enum.reverse(steps),
+        passes: passes,
+        duration_us: System.monotonic_time(:microsecond) - t0
+      }
+
+      recent = report.steps |> Enum.take(-10) |> Enum.map(& &1.cell) |> Enum.uniq()
+
+      raise RunawayError,
+        message:
+          "reactive_dag drain exceeded #{max} passes — likely a cycle or a recompute " <>
+            "that keeps re-dirtying its own inputs (recently: #{inspect(recent)}; " <>
+            "the exception's :report holds the full partial trace)",
+        report: report
+    else
+      drain_pass(plan, opts, passes, cause, steps, t0)
+    end
   end
 
-  defp do_run(plan, opts, passes, cause, steps, t0) do
+  defp drain_pass(plan, opts, passes, cause, steps, t0) do
     case Frontier.next_cell(plan.depths) do
       nil ->
         {:ok,

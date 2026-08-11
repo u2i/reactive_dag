@@ -73,6 +73,34 @@ defmodule ReactiveDag.DrainTest do
     assert Frontier.empty?()
   end
 
+  # a recompute that re-dirties its own input — the runaway shape
+  defmodule SelfDirtying do
+    @behaviour ReactiveDag.RecomputeStrategy
+    @impl true
+    def recompute(%{id: "b"} = _cell, keys) do
+      ReactiveDag.Frontier.mark_dirty("a", ["k1"], "loop")
+      {:ok, keys}
+    end
+
+    def recompute(_cell, keys), do: {:ok, keys}
+  end
+
+  test "the runaway guard raises RunawayError CARRYING the partial report" do
+    # regression: it used to raise a bare string, discarding the very trace
+    # that shows which cells keep re-dirtying each other.
+    Frontier.mark_dirty("a", ["k1"], "seed")
+
+    err =
+      assert_raise Drain.RunawayError, ~r/exceeded 40 passes.*"b"/s, fn ->
+        Drain.run(plan(), recompute: SelfDirtying, max_passes: 40)
+      end
+
+    assert %ReactiveDag.Drain.Report{} = err.report
+    assert err.report.passes == 40
+    # the trace shows the loop: a and b alternating
+    assert Enum.map(err.report.steps, & &1.cell) |> Enum.uniq() |> Enum.sort() == ["a", "b"]
+  end
+
   test "a stale frontier row (cell absent from the plan) is claimed, logged, and skipped" do
     # regression: this used to KeyError out of Map.fetch! AFTER the claim had
     # deleted the dirty keys — crashing the drain and destroying the work item.
