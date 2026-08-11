@@ -160,45 +160,57 @@ defmodule ReactiveDag.Node.Recompute do
   end
 
   # the library's automatic read scope, by the cell's key-rule GRAIN:
-  #   :identity       → the claimed keys ARE the over's keys: filter payload_key.
-  #   {:bucket, kind} → the claimed keys are bucket labels: filter the over's
-  #                     date attribute to the claimed buckets' range HULL (a
-  #                     superset read is still closed over groups — extra
-  #                     buckets recompute and change-detect to nothing). Needs
-  #                     the over's group calculation to be a Calendar bucket of
-  #                     the same kind (stamped as over_source.bucket_scopes);
-  #                     otherwise no auto scope.
-  #   anything else   → no auto scope: a grain-changing host rule's claims must
+  #   :identity        → the claimed keys ARE the over's keys: filter payload_key.
+  #   :group (any form) → the claimed keys are group labels: invert them through
+  #                     assembly's group_key_plan — a plain string attribute
+  #                     filters by equality; a Calendar bucket by its date-range
+  #                     HULL (a superset read is still closed over groups —
+  #                     extra groups recompute and change-detect to nothing).
+  #   anything else    → no auto scope: a grain-changing host rule's claims must
   #                     not filter the child-grain read; `query:` still receives
   #                     them for host-grain scoping.
   defp auto_scope(%Cell{meta: meta}, keys) do
     case meta[:key_rule] do
       :identity -> keyed_scope(keys)
       nil -> keyed_scope(keys)
-      {:bucket, kind} -> bucket_hull(meta[:over_source], kind, scope(keys))
-      :group -> group_attr_scope(meta, scope(keys))
+      :group -> group_scope(meta, scope(keys))
+      {:group, _opts} -> group_scope(meta, scope(keys))
       _ -> nil
     end
   end
 
-  # `:group` claims are group labels; when assembly proved the group is one
-  # plain string attribute with default keys (over_source.group_scope_attr),
-  # the labels ARE that attribute's values (minus any key_prefix) — filter it.
-  defp group_attr_scope(_meta, nil), do: nil
+  # `:group` claims are group labels; when assembly's group_key_plan proves a
+  # SINGLE-entry group, the labels invert to a data predicate: a plain string
+  # attribute's values (`attr in claims`), or a Calendar bucket's date-range
+  # HULL. Multi-entry groups and opaque calculations don't invert — the read
+  # stays whole (or `query:`-scoped) rather than guessing wrong.
+  defp group_scope(_meta, nil), do: nil
 
-  defp group_attr_scope(meta, labels) do
-    with %{group_scope_attr: attr} when not is_nil(attr) <- meta[:over_source] do
-      prefix = get_in(meta, [:reduce]) |> then(&(&1 && Map.get(&1, :key_prefix)))
+  defp group_scope(meta, labels) do
+    prefix = meta[:reduce] |> then(&(&1 && Map.get(&1, :key_prefix)))
 
-      values =
-        case prefix do
-          nil -> labels
-          p -> Enum.map(labels, &String.replace_prefix(&1, p <> "|", ""))
+    values =
+      case prefix do
+        nil -> labels
+        p -> Enum.map(labels, &String.replace_prefix(&1, p <> "|", ""))
+      end
+
+    case meta[:over_source] do
+      %{group_key_plan: [{:attr, attr, true}]} ->
+        {:attr, attr, values}
+
+      %{group_key_plan: [{:calendar, kind, attr}]} ->
+        ranges = Enum.map(values, &ReactiveDag.Calendar.range(kind, &1))
+
+        if :error in ranges do
+          nil
+        else
+          {froms, tos} = Enum.unzip(ranges)
+          {:range, attr, Enum.min(froms, Date), Enum.max(tos, Date)}
         end
 
-      {:attr, attr, values}
-    else
-      _ -> nil
+      _ ->
+        nil
     end
   end
 
@@ -208,21 +220,6 @@ defmodule ReactiveDag.Node.Recompute do
       claimed -> {:keys, claimed}
     end
   end
-
-  defp bucket_hull(_source, _kind, nil), do: nil
-
-  defp bucket_hull(%{bucket_scopes: scopes}, kind, labels) when is_map(scopes) do
-    with attr when not is_nil(attr) <- scopes[kind],
-         ranges = Enum.map(labels, &ReactiveDag.Calendar.range(kind, &1)),
-         false <- :error in ranges do
-      {froms, tos} = Enum.unzip(ranges)
-      {:range, attr, Enum.min(froms, Date), Enum.max(tos, Date)}
-    else
-      _ -> nil
-    end
-  end
-
-  defp bucket_hull(_source, _kind, _labels), do: nil
 
   # the claimed keys as a read scope: `nil` for a whole-cell recompute (`"*"`),
   # else the specific dirty keys a scoped `read` can filter its query to.

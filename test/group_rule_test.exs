@@ -190,7 +190,7 @@ defmodule ReactiveDag.GroupRuleTest do
     # the group is one plain string attribute — the read auto-scope target
     cell = plan.cells["category_totals"]
     assert cell.meta.key_rule == :group
-    assert cell.meta.over_source.group_scope_attr == :category
+    assert cell.meta.over_source.group_key_plan == [{:attr, :category, true}]
 
     Frontier.mark_dirty("expenses", ["*"], "seed")
     {:ok, _} = drain(plan)

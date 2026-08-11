@@ -302,16 +302,21 @@ defmodule ReactiveDag.Node do
           {:or,
            [
              {:one_of, [:identity, :all, :group]},
-             {:custom, ReactiveDag.Node, :validate_bucket_rule, []}
+             {:custom, ReactiveDag.Node, :validate_key_rule, []}
            ]},
         required: false,
         doc:
-          "this node's claim grain, declared WITH the computation it must agree with: " <>
-            "`:group` — a changed child row claims its GROUP (resolved by reading the " <>
-            "changed rows and evaluating the same `group_by`/side fields; a key the " <>
-            "lookup can't find — a deleted row — degrades to `:all`); or `:identity` / " <>
-            "`:all` / `{:bucket, kind}` as at block level. Overrides the block-level " <>
-            "`key_rule` (declaring a non-default in both places is a compile error)."
+          "this node's claim grain, declared WITH the computation it must agree with. " <>
+            "`:group` — a changed child row claims its GROUP; the mapping is what " <>
+            "`group_by` (or the join sides) already declares. Resolution: by default " <>
+            "the changed rows are READ and the group fields evaluated (one scoped " <>
+            "query; a key the lookup can't find — a deleted row — degrades to `:all`); " <>
+            "`{:group, from: :key}` resolves PURELY instead — the key's leading " <>
+            "`|`-segments carry the group's input fields in `group_by` order (a plain " <>
+            "attribute's value; a Calendar calculation's raw date), so no query and " <>
+            "deletion-safe, at the price of the key-grammar contract (reduce with a " <>
+            "declarative group and default keys only). Overrides the block-level " <>
+            "`key_rule` (a non-default in both places is a compile error)."
       ],
       into: [
         type: {:or, [{:fun, 2}, :keyword_list]},
@@ -441,16 +446,21 @@ defmodule ReactiveDag.Node do
           {:or,
            [
              {:one_of, [:identity, :all, :group]},
-             {:custom, ReactiveDag.Node, :validate_bucket_rule, []}
+             {:custom, ReactiveDag.Node, :validate_key_rule, []}
            ]},
         required: false,
         doc:
-          "this node's claim grain, declared WITH the computation it must agree with: " <>
-            "`:group` — a changed child row claims its GROUP (resolved by reading the " <>
-            "changed rows and evaluating the same `group_by`/side fields; a key the " <>
-            "lookup can't find — a deleted row — degrades to `:all`); or `:identity` / " <>
-            "`:all` / `{:bucket, kind}` as at block level. Overrides the block-level " <>
-            "`key_rule` (declaring a non-default in both places is a compile error)."
+          "this node's claim grain, declared WITH the computation it must agree with. " <>
+            "`:group` — a changed child row claims its GROUP; the mapping is what " <>
+            "`group_by` (or the join sides) already declares. Resolution: by default " <>
+            "the changed rows are READ and the group fields evaluated (one scoped " <>
+            "query; a key the lookup can't find — a deleted row — degrades to `:all`); " <>
+            "`{:group, from: :key}` resolves PURELY instead — the key's leading " <>
+            "`|`-segments carry the group's input fields in `group_by` order (a plain " <>
+            "attribute's value; a Calendar calculation's raw date), so no query and " <>
+            "deletion-safe, at the price of the key-grammar contract (reduce with a " <>
+            "declarative group and default keys only). Overrides the block-level " <>
+            "`key_rule` (a non-default in both places is a compile error)."
       ],
       into: [
         type: {:or, [{:fun, 3}, :keyword_list]},
@@ -733,19 +743,13 @@ defmodule ReactiveDag.Node do
           "OPTIONAL free-atom label. Recompute dispatches on the `reduce`/`join`/`aggregate`/`compute` entity + `meta` shape, NOT on `op` — so `op` is documentation here, load-bearing only for a `RecomputeStrategy` that dispatches on it (e.g. `ReactiveDag.SetOp`). See `ReactiveDag.Cell`."
       ],
       key_rule: [
-        type:
-          {:or,
-           [
-             {:one_of, [:identity, :all]},
-             {:custom, ReactiveDag.Node, :validate_bucket_rule, []}
-           ]},
+        type: {:one_of, [:identity, :all]},
         default: :identity,
         doc:
           "how a child key maps to this cell's key on propagation: `:identity` (same " <>
-            "key), `:all` (whole-cell), or `{:bucket, kind}` — the CALENDAR ladder: a " <>
-            "changed child key claims its `kind` bucket by pure string work (the key's " <>
-            "leading segment parses as a date or finer bucket label; " <>
-            "`ReactiveDag.Calendar.bucket_of_key/2`). Unparseable keys degrade to `:all`."
+            "key) or `:all` (whole-cell). Group-grain claims (`:group`, " <>
+            "`{:group, from: :key}`) are declared ON the combinator — the claim grain " <>
+            "and the computation it must agree with belong in one unit."
       ],
       leaf?: [type: :boolean, default: false, doc: "true for a source-fed leaf (no compute)"],
       payload_key: [
@@ -837,19 +841,27 @@ defmodule ReactiveDag.Node do
   alias Spark.Dsl.Extension, as: Ext
 
   @doc false
-  # the DSL schema's custom validator for `key_rule {:bucket, kind}`.
-  def validate_bucket_rule({:bucket, kind}) do
-    if kind in ReactiveDag.Calendar.buckets() do
-      {:ok, {:bucket, kind}}
-    else
-      {:error,
-       "key_rule {:bucket, kind} takes one of #{inspect(ReactiveDag.Calendar.buckets())}, " <>
-         "got #{inspect(kind)}"}
+  # the DSL schema's custom validator for the tuple key_rule forms.
+  def validate_key_rule({:group, opts}) when is_list(opts) do
+    case Keyword.get(opts, :from, :lookup) do
+      # :lookup is the default resolution — normalize to the bare atom
+      :lookup -> {:ok, :group}
+      :key -> {:ok, {:group, from: :key}}
+      other -> {:error, "key_rule {:group, from: ...} takes :lookup or :key, got #{inspect(other)}"}
     end
   end
 
-  def validate_bucket_rule(other),
-    do: {:error, "key_rule must be :identity, :all, or {:bucket, kind} — got #{inspect(other)}"}
+  def validate_key_rule({:bucket, _kind}) do
+    {:error,
+     "key_rule {:bucket, kind} was unified into the :group rule — declare the Calendar " <>
+       "calculation in `group_by` (it already carries the bucket) and use " <>
+       "`key_rule: {:group, from: :key}` for the pure key-prefix resolution"}
+  end
+
+  def validate_key_rule(other),
+    do:
+      {:error,
+       "key_rule must be :identity, :all, :group, or {:group, from: :key} — got #{inspect(other)}"}
 
   @doc "The cell id for a node resource (explicit `id`, else the module's snake short-name)."
   @spec cell_id(module()) :: atom()
@@ -946,8 +958,7 @@ defmodule ReactiveDag.Node do
           payload_key: over.meta[:payload_key] || :key,
           read_action: read,
           load: loads,
-          bucket_scopes: bucket_scopes(resource, loads),
-          group_scope_attr: group_scope_attr(spec, resource, loads)
+          group_key_plan: group_key_plan(spec, resource)
         }
 
         %{cell | meta: Map.put(cell.meta, :over_source, source)}
@@ -957,43 +968,35 @@ defmodule ReactiveDag.Node do
     end
   end
 
-  # the attribute a `key_rule: :group` claim can auto-scope the read by:
-  # a reduce grouped by ONE plain STRING attribute with the default key
-  # derivation — the claimed labels ARE that attribute's values, so
-  # `attr in claims` is the exact group closure. Anything richer (multi-attr
-  # groups, calculations, custom keys, joins, non-string types) returns nil:
-  # the read stays whole (or `query:`-scoped) rather than guessing wrong.
-  defp group_scope_attr(%Reduce{group_by: g, key: nil} = _spec, resource, loads) do
-    attr =
-      case g do
-        a when is_atom(a) -> a
-        [a] when is_atom(a) -> a
-        _ -> nil
+  # the ONE cross-node fact behind every `:group` capability — an ordered plan
+  # of what each group entry IS on the over resource:
+  #   {:attr, name, string?}       — a plain attribute (string? gates equality scoping)
+  #   {:calendar, kind, of_attr}   — a ReactiveDag.Calendar calculation (pure
+  #                                  key resolution + date-range scoping)
+  #   {:calc, name}                — an opaque calculation (lookup-resolvable only)
+  # Only for a reduce with a declarative group and DEFAULT key derivation —
+  # anything richer resolves by lookup and reads whole (or `query:`-scoped).
+  defp group_key_plan(%Reduce{group_by: g, key: nil}, resource) when is_atom(g) or is_list(g) do
+    g
+    |> List.wrap()
+    |> Enum.map(fn name ->
+      cond do
+        attr = Ash.Resource.Info.attribute(resource, name) ->
+          {:attr, name, attr.type == Ash.Type.String}
+
+        calc = Ash.Resource.Info.calculation(resource, name) ->
+          case calc.calculation do
+            {ReactiveDag.Calendar, opts} -> {:calendar, opts[:bucket], opts[:of]}
+            _ -> {:calc, name}
+          end
+
+        true ->
+          {:calc, name}
       end
-
-    with true <- is_atom(attr) and not is_nil(attr),
-         false <- attr in loads,
-         %{type: Ash.Type.String} <- Ash.Resource.Info.attribute(resource, attr) do
-      attr
-    else
-      _ -> nil
-    end
+    end)
   end
 
-  defp group_scope_attr(_spec, _resource, _loads), do: nil
-
-  # which of the loaded calculations are ReactiveDag.Calendar buckets, as
-  # %{bucket_kind => date_attribute} — what lets a `{:bucket, kind}` key rule's
-  # claims scope the read to the claimed buckets' date range automatically.
-  defp bucket_scopes(resource, calc_names) do
-    for name <- calc_names,
-        calc = Ash.Resource.Info.calculation(resource, name),
-        match?({ReactiveDag.Calendar, _}, calc.calculation),
-        {ReactiveDag.Calendar, opts} = calc.calculation,
-        into: %{} do
-      {opts[:bucket], opts[:of]}
-    end
-  end
+  defp group_key_plan(_spec, _resource), do: nil
 
   defp read_action(resource, name) do
     case Ash.Resource.Info.action(resource, name) do

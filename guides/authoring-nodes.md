@@ -134,20 +134,25 @@ propagation; a key the lookup can't find — a deleted row — degrades to
 group is one plain string attribute, the library also scopes the read to the
 claimed groups (`category in claims`).
 
-The calendar variant, `key_rule {:bucket, :month}`, trades that lookup for
-PURE string work when keys carry date-shaped prefixes (`"2026-08-11|r4"`): no
-query, and deletion-safe (a vanished key still names the bucket it left).
-Bucket claims also auto-scope by date range when the group calculation is the
-matching Calendar bucket. Chained rollups (`readings → daily → monthly`) make
-every step a pure relabel of the child's key.
+`{:group, from: :key}` trades that lookup for PURE resolution when keys carry
+their group's input fields as leading `|`-segments (`"2026-08-11|r4"` — a
+plain attribute's value, or a Calendar calculation's raw date, relabeled
+through the same calculation `group_by` names): no query, and deletion-safe (a
+vanished key still names the group it left). One rule, two resolutions —
+there is no separate calendar rule, because the calendar already lives in
+exactly one place: the `group_by` calculation, which grouping, scoping, and
+claiming all read. Chained rollups (`readings → daily → monthly`) make every
+step a pure relabel of the child's key.
 
 The general soundness rule behind all of it: a scoped read must be **closed
-over group boundaries** — `:identity` is entry-closure, `:group`/`{:bucket,
-kind}` are group-closure, `:all` is the universe. `key_rule` at block level
+over group boundaries** — `:identity` is entry-closure, `:group` (either
+resolution) is group-closure, `:all` is the universe. The read auto-scope
+inverts claims through the same group plan: a plain string attribute filters
+by equality, a Calendar bucket by its date range. `key_rule` at block level
 remains for nodes with no combinator (`run`/`compute`/leaves); declaring a
 non-default in both places is a compile error. `test/date_rollup_demo_test.exs`
 and `test/group_rule_test.exs` are the worked demos: touch one reading (or one
-expense), watch exactly one bucket (or category) recompute and propagate.
+expense), watch exactly one month (or category) recompute and propagate.
 
 ### `join` — a left join (one input, two sides), declared
 
