@@ -53,15 +53,24 @@ defmodule ReactiveDag.Frontier do
     :ok
   end
 
+  @doc """
+  Every cell with dirty keys waiting — what the next drain would work on.
+
+  A READ: unlike `claim/1` it consumes nothing, so it is safe to call for
+  reporting (`ReactiveDag.Insights.pending/1`) while a drain is running.
+  """
+  @spec dirty_cells() :: [String.t()]
+  def dirty_cells do
+    %{rows: rows} = query!("SELECT DISTINCT cell_id FROM #{dirty()}", [])
+    Enum.map(rows, fn [id] -> id end)
+  end
+
   @doc "The dirty cell with the smallest depth, or nil if the frontier is empty."
   @spec next_cell(%{String.t() => non_neg_integer()}) :: String.t() | nil
   def next_cell(depths) do
-    %{rows: rows} = query!("SELECT DISTINCT cell_id FROM #{dirty()}", [])
-    ids = Enum.map(rows, fn [id] -> id end)
-
-    case ids do
+    case dirty_cells() do
       [] -> nil
-      _ -> Enum.min_by(ids, &Map.get(depths, &1, 1_000_000))
+      ids -> Enum.min_by(ids, &Map.get(depths, &1, 1_000_000))
     end
   end
 
