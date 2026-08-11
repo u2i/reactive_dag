@@ -20,15 +20,14 @@ defmodule ReactiveDag.Node.KeyRule do
   @impl true
   def rule(%Cell{meta: %{key_rule: :all}}, _child, _changed), do: :all
 
-  # `{:bucket, kind}` — the calendar ladder: each changed child key claims its
-  # bucket by PURE string work (the key's leading segment parses as a date or a
-  # finer bucket label; see ReactiveDag.Calendar.bucket_of_key/2). Deletion-safe
-  # (a vanished key still names the bucket it left); a key that doesn't parse
-  # degrades the whole propagation to :all — correctness over precision.
-  def rule(%Cell{meta: %{key_rule: {:bucket, kind}}}, _child, changed) do
-    labels = Enum.map(changed, &ReactiveDag.Calendar.bucket_of_key(kind, &1))
-
-    if :error in labels, do: :all, else: {:keys, Enum.uniq(labels)}
+  # `{:group, from: :key}` — pure resolution: the key's leading `|`-segments
+  # carry the group's INPUT fields in group_by order (a plain attribute's
+  # value; a Calendar calculation's raw date, relabeled through the calc's own
+  # bucket). No query, and deletion-safe: a vanished key still names the group
+  # it left. A key that violates the grammar degrades the propagation to :all
+  # — correctness over precision.
+  def rule(%Cell{meta: %{key_rule: {:group, _opts}} = meta}, _child, changed) do
+    pure_group_claims(meta, changed)
   end
 
   # `:group` — a changed child ROW claims its group: the mapping is the very
@@ -44,6 +43,9 @@ defmodule ReactiveDag.Node.KeyRule do
 
   defp group_claims(nil, _source, _changed), do: :all
   defp group_claims(_spec, nil, _changed), do: :all
+
+  # an identity-keyed over has no key column to look changed keys up by
+  defp group_claims(_spec, %{payload_key: nil}, _changed), do: :all
 
   defp group_claims(spec, source, changed) do
     alias ReactiveDag.Node.Recompute.Declarative
@@ -81,4 +83,62 @@ defmodule ReactiveDag.Node.KeyRule do
 
   defp load_calcs(query, []), do: query
   defp load_calcs(query, loads), do: Ash.Query.load(query, loads)
+
+  defp pure_group_claims(meta, changed) do
+    alias ReactiveDag.Node.Recompute.Declarative
+
+    with %{} = spec <- meta[:reduce],
+         %{group_key_plan: plan} when is_list(plan) <- meta[:over_source] do
+      prefix = Map.get(spec, :key_prefix)
+
+      # how reconstructed group values become THIS node's key: an
+      # identity-keyed parent serializes its identity fields in primary-key
+      # order (values arrive dest-named); else the default group-order join.
+      to_key =
+        case meta[:identity_fields] do
+          fields when is_list(fields) ->
+            dests = Declarative.group_dests(spec.group_by)
+            id_key = Declarative.identity_key_fn(fields, prefix)
+            fn values -> id_key.(Map.new(Enum.zip(dests, values))) end
+
+          _ ->
+            key_fn = Declarative.key_fn(nil, prefix)
+            fn values -> key_fn.(List.to_tuple(values)) end
+        end
+
+      labels = Enum.map(changed, &key_from_segments(plan, &1, to_key))
+
+      if :error in labels, do: :all, else: {:keys, Enum.uniq(labels)}
+    else
+      _ -> :all
+    end
+  end
+
+  defp key_from_segments(plan, key, to_key) do
+    segs = String.split(key, "|")
+
+    if length(segs) < length(plan) do
+      :error
+    else
+      values =
+        plan
+        |> Enum.zip(segs)
+        |> Enum.map(fn
+          {{:attr, _name, _string?}, seg} ->
+            seg
+
+          {{:calendar, kind, _of}, seg} ->
+            case ReactiveDag.Calendar.parse(seg) do
+              {_child_kind, first} -> ReactiveDag.Calendar.label(kind, first)
+              :error -> :error
+            end
+
+          {{:calc, _name}, _seg} ->
+            # an opaque calculation can't be evaluated from a segment
+            :error
+        end)
+
+      if :error in values, do: :error, else: to_key.(values)
+    end
+  end
 end

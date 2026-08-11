@@ -30,6 +30,7 @@ real change.
 | rung | you write | when |
 |---|---|---|
 | `aggregate` | attribute atoms only | the fold is a datastore aggregate over a relationship |
+| `recompute_by` + `reduce` | the unit a change invalidates, then the fold | you know what a change should re-do (the common case) |
 | declarative `reduce`/`join` | attributes + fold keywords | grouping/joining by attributes; the library reads Ash for you |
 | per-slot escapes | a fn for the one slot that outgrew attributes | `query:`, computed groups/keys/rows, `expand:`, `status:` |
 | `run :action` | a generic Ash action on this resource | arbitrary recompute that should stay a first-class action |
@@ -48,6 +49,22 @@ Postgres does the `GROUP BY`; **no rows cross into the BEAM**. Only expressible
 as a relationship aggregate (the group must be a resource with a relationship
 to the input) — for anything else, step down to `reduce`.
 
+**Same vocabulary as the in-BEAM fold.** `aggregate` and `reduce into:` take
+the same kinds (`count`/`sum`/`avg`/`min`/`max`/`first`), the same
+`[src: dest]` spelling, the same SQL nil semantics, and the same key rules
+(a composite primary key makes either node identity-keyed). One list backs
+both, so they cannot drift — moving a fold between the datastore and the BEAM
+does not change the answer, only who computes it:
+
+| | who aggregates | rows into BEAM | recompute unit |
+|---|---|---|---|
+| `aggregate` | **Postgres**, in one query | none | whole cell, always |
+| `reduce into:` | the BEAM | the scoped slice | whatever `recompute_by` says |
+
+The trade is real in both directions: `aggregate` reads nothing into the BEAM
+but reprices every group; `reduce` + a tight `recompute_by` reads only the
+claimed slice, which often wins for a big table with fine-grained changes.
+
 ### `reduce` — an in-BEAM fold, declared
 
 ```elixir
@@ -64,6 +81,83 @@ the group's attributes plus the fold results (`count`/`sum`/`avg`/`min`/`max`/
 `first`, nil sources excluded, SQL-style), written into this resource by the
 payload loop. `read: :recent` names a `:read` action on the over resource
 instead of its primary — same auto-scoping.
+
+**Keys are Ash keys.** A single-attribute primary key is the payload key,
+derived — `payload_key` exists only for non-PK key columns. Better: declare a
+**composite primary key** (`fund` + `fy`) and drop the key column entirely —
+the row IS its identity, the upsert conflicts on the primary key, and the cell
+key is the identity's serialization in primary-key order. The verifier checks
+every identity field is produced by the row (group columns ∪ fold dests). And
+the DAG edge reads as a **relational join**: a `group_by` entry may be the
+pair `parent_column: :child_field` (`group_by: [fund: :fund_code, fy: :fy]` —
+"this node's `fund` = the child's `fund_code`").
+
+### The recompute unit: `recompute_by`
+
+The declaration the engine actually cares about is **what unit a change
+invalidates**. Everything else — `group_by`, `into`, key derivation — is
+mapping data into shape once you already know what to recompute.
+
+```elixir
+reactive do
+  recompute_by :category, to: :expenses, from: :expense_cat
+
+  reduce into: [sum: [amount: :total], count: :n]
+end
+```
+
+Read it as a sentence: *recompute by category, from the input's
+`expense_cat`.* A change to a row's `expense_cat` invalidates my `category`
+unit, so redo it whole. That one fact supplies the **input edge**, the
+**grouping**, the **claim resolution** and the **read scope** — which is why it
+replaces `key_rule` entirely. The same unit used to be stated twice, once as
+the grouping and once as the claim rule, and the two had to agree.
+
+Four answers to the one question:
+
+| declaration | the unit a change invalidates |
+|---|---|
+| *(omitted)* | key-for-key — a changed input key maps to the same output key |
+| `recompute_by :cat, from: :field` | per unit, resolved by **reading** the changed rows; a key the lookup can't find (a deleted row) degrades to whole-cell |
+| `recompute_by [fund: :fund_code, fy: :fy]` | a **composite** unit — the grain IS the grouping, so `group_by:` is not restated |
+| `recompute_by :month, from_key: true` | per unit, resolved **purely** from the changed key's `\|`-segments — no query, deletion-safe, at the price of the key-grammar contract |
+| `recompute_by :cell` | the whole cell — any change re-does everything |
+
+### Composite grain
+
+A unit can be several columns. State the pairs once and the grouping follows:
+
+```elixir
+recompute_by [fund: :fund_code, fy: :fy], to: :lines
+reduce into: [sum: [amount: :total], count: :n]
+```
+
+Reads as `rollups.fund = lines.fund_code AND rollups.fy = lines.fy`. The cell
+key serializes the columns in order (`"gf|2025"`), and with a composite primary
+key the row is identity-keyed — no key column at all.
+
+The read is **scoped per column**: a claim of `"gf|2025"` becomes
+`fund_code IN ("gf") AND fy IN ("2025")`. For several claims that admits a
+cross-product superset (`"gf|2025"` + `"water|2026"` also matches `"gf|2026"`)
+— still sound, since a superset read stays closed over unit boundaries, and far
+tighter than reading the whole table. Columns that aren't plain strings don't
+invert; the fold sorts them out.
+
+**It is the recompute unit, not the output's grain.** They coincide for a plain
+rollup and diverge the moment one unit emits many rows: percentile
+distributions `recompute_by :day` (touch one reading and the whole day is
+re-derived) while the rows themselves are keyed day+percentile via `expand:`.
+
+```elixir
+recompute_by :day, to: :readings, from: :date
+reduce expand: fn day, rows -> percentiles(day, rows) end
+```
+
+The unit is consumed at **compile time** — it lowers to `over:` + `group_by:` +
+the claim rule, and nothing traverses it at recompute. One declaration per
+node, so a combinator reads exactly one input: one unit, one claim translation.
+A node reads its input, materializes rows, and downstream consumers query
+*those rows* rather than re-deriving them back up the chain.
 
 A combinator read is **always an Ash read** — to shape it, stay in the query:
 
@@ -116,38 +210,40 @@ chronologically. A Postgres host wanting pushdown declares an
 `expr(fragment("to_char(?, 'YYYY-MM')", date))` calculation instead — the
 rollup neither knows nor cares.
 
-And the mid-granularity claims come declaratively too, declared ON the
-combinator so the whole granularity contract sits in one unit:
+And the mid-granularity claims come from the same declaration — the unit:
 
 ```elixir
-reduce over: :expenses,
-       group_by: [:category],
-       key_rule: :group,        # a changed expense claims its CATEGORY
-       into: [sum: [amount: :total], count: :n]
+recompute_by :category, to: :expenses, from: :category
+reduce into: [sum: [amount: :total], count: :n]
 ```
 
-`key_rule: :group` needs no new vocabulary at all — the field mapping is what
-`group_by` already declares. A changed child key is resolved by reading the
-changed rows and evaluating the same group fields (one scoped query per
-propagation; a key the lookup can't find — a deleted row — degrades to
-`:all`, since vanish must reprice everything it might have left). When the
-group is one plain string attribute, the library also scopes the read to the
-claimed groups (`category in claims`).
+A changed child key is resolved by **reading** the changed rows and evaluating
+the unit's `from:` field (one scoped query per propagation; a key the lookup
+can't find — a deleted row — degrades to whole-cell, since vanish must reprice
+everything it might have left). When the unit is one plain string attribute,
+the library also scopes the read to the claimed units (`category in claims`).
 
-The calendar variant, `key_rule {:bucket, :month}`, trades that lookup for
-PURE string work when keys carry date-shaped prefixes (`"2026-08-11|r4"`): no
-query, and deletion-safe (a vanished key still names the bucket it left).
-Bucket claims also auto-scope by date range when the group calculation is the
-matching Calendar bucket. Chained rollups (`readings → daily → monthly`) make
-every step a pure relabel of the child's key.
+`from_key: true` trades that lookup for PURE resolution when keys carry the
+unit's input fields as leading `|`-segments (`"2026-08-11|r4"` — a plain
+attribute's value, or a Calendar calculation's raw date, relabeled through the
+same calculation `group_by` names): no query, and deletion-safe (a vanished key
+still names the unit it left). One declaration, two resolutions — there is no
+separate calendar rule, because the calendar already lives in exactly one
+place: the `group_by` calculation, which grouping, scoping, and claiming all
+read. Chained rollups (`readings → daily → monthly`) make every step a pure
+relabel of the child's key.
 
 The general soundness rule behind all of it: a scoped read must be **closed
-over group boundaries** — `:identity` is entry-closure, `:group`/`{:bucket,
-kind}` are group-closure, `:all` is the universe. `key_rule` at block level
-remains for nodes with no combinator (`run`/`compute`/leaves); declaring a
-non-default in both places is a compile error. `test/date_rollup_demo_test.exs`
-and `test/group_rule_test.exs` are the worked demos: touch one reading (or one
-expense), watch exactly one bucket (or category) recompute and propagate.
+over unit boundaries** — the omitted (identity) case is entry-closure,
+`recompute_by :cat` (either resolution) is unit-closure, `:cell` is the
+universe. The read auto-scope inverts claims through the same group plan: a
+plain string attribute filters by equality, a Calendar bucket by its date
+range. `key_rule` at block level remains for nodes with **no** combinator
+(`run`/`compute`/leaves); declaring it alongside `recompute_by` is a compile
+error, since they are the same fact.
+`test/date_rollup_demo_test.exs` and `test/group_rule_test.exs` are the worked
+demos: touch one reading (or one expense), watch exactly one month (or
+category) recompute and propagate.
 
 ### `join` — a left join (one input, two sides), declared
 
@@ -214,6 +310,7 @@ ref :transcripts                  # recompute edge: a change dirties this node
 context :people                   # read-as-context: consulted, never triggers
 depends_on [:a, :b]               # flat sugar — one ref per id
 reduce over: :x, ...              # a combinator's `over:` implies a ref
+recompute_by :x, to: :xs, ...     # ...as does `recompute_by to:`
 ref :machines, gate: :ownership   # gated: consume through the attested view
 ```
 
@@ -276,7 +373,11 @@ id mismatch.
 
 ## Key rules
 
-`key_rule` declares how a child's changed keys map onto this node's recompute:
+A combinator node declares its recompute unit with
+[`recompute_by`](#the-recompute-unit-recompute_by), which subsumes this. For a
+node with **no** combinator (`run`/`compute`/leaves), the block-level
+`key_rule` still declares how a child's changed keys map onto this node's
+recompute:
 
 - `:identity` (default) — child key `k` changed → recompute my key `k`. For
   same-grain pipelines.

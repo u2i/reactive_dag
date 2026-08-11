@@ -9,7 +9,7 @@ defmodule ReactiveDag.Node.Verifiers.VerifyReactive do
   use Spark.Dsl.Verifier
 
   alias ReactiveDag.Node.Recompute.Declarative
-  alias ReactiveDag.Node.{Compose, Compute, Context, Join, Reduce, Ref, Run}
+  alias ReactiveDag.Node.{Compose, Compute, Context, Join, RecomputeBy, Reduce, Ref, Run}
   alias Spark.Dsl.Verifier
 
   @impl true
@@ -18,7 +18,7 @@ defmodule ReactiveDag.Node.Verifiers.VerifyReactive do
       Verifier.get_entities(dsl, [:reactive])
       |> Enum.reject(
         &(match?(%Ref{}, &1) or match?(%Context{}, &1) or match?(%Compose{}, &1) or
-            match?(%ReactiveDag.Attestation.Requirement{}, &1))
+            match?(%RecomputeBy{}, &1) or match?(%ReactiveDag.Attestation.Requirement{}, &1))
       )
 
     # NOT Attested: `attested` + an explicit `compute` is a documented pair
@@ -58,10 +58,16 @@ defmodule ReactiveDag.Node.Verifiers.VerifyReactive do
   end
 
   defp verify_entity(dsl, %Reduce{} = r) do
-    with :ok <- verify_key_rule_home(dsl, r.key_rule),
+    # check what LOWERING will produce: the unit's pair becomes the combinator's
+    # group_by, so the row-column checks below must see it.
+    effective = %{r | group_by: r.group_by || block_group_by(dsl)}
+
+    with :ok <- verify_over(dsl, r),
+         :ok <- verify_unit_vs_key_rule(dsl),
+         :ok <- verify_key_rule_home(dsl, r.key_rule),
          :ok <- verify_key_prefix(dsl, r.key, r.key_prefix),
          :ok <- verify_result_slots(dsl, :reduce, r.status, into: r.into, expand: r.expand),
-         :ok <- verify_reduce_into(dsl, r) do
+         :ok <- verify_reduce_into(dsl, effective) do
       :ok
     end
   end
@@ -102,7 +108,166 @@ defmodule ReactiveDag.Node.Verifiers.VerifyReactive do
     end
   end
 
+  # `aggregate` speaks the SAME fold vocabulary as `reduce into:`, so its dest
+  # attributes get the same check: every column the row would carry must exist
+  # on this resource. (The aggregate's groups are its own rows, so there are no
+  # group columns to add — the identity is already the row's.)
+  defp verify_entity(dsl, %ReactiveDag.Node.Aggregate{} = a) do
+    folds =
+      for kind <- Declarative.fold_kinds(),
+          spec = Map.get(a, kind),
+          not is_nil(spec),
+          do: {kind, spec}
+
+    cond do
+      folds == [] ->
+        error(
+          dsl,
+          "an `aggregate` declares no aggregates — give it at least one of " <>
+            "#{inspect(Declarative.fold_kinds())} (e.g. `count: :n`, " <>
+            "`avg: [flow: :avg_flow]`)"
+        )
+
+      true ->
+        verify_agg_dests(dsl, fold_dests(folds))
+    end
+  end
+
   defp verify_entity(_dsl, _other), do: :ok
+
+  defp verify_agg_dests(dsl, dests) do
+    payload_attrs =
+      dsl |> Ash.Resource.Info.attributes() |> Enum.map(& &1.name) |> MapSet.new()
+
+    if MapSet.size(payload_attrs) == 0 do
+      :ok
+    else
+      case Enum.reject(dests, &MapSet.member?(payload_attrs, &1)) do
+        [] ->
+          :ok
+
+        missing ->
+          error(
+            dsl,
+            "the `aggregate` would write #{inspect(missing)}, but this resource has no " <>
+              "such attribute(s) — each aggregate maps onto one of the node's own " <>
+              "attributes. Declared: #{inspect(MapSet.to_list(payload_attrs))}"
+          )
+      end
+    end
+  end
+
+  # the `recompute_by` unit, as the group_by it lowers to.
+  defp block_group_by(dsl) do
+    case unit(dsl) do
+      %RecomputeBy{unit: u, from: f} when not is_nil(f) -> [{u, f}]
+      _ -> nil
+    end
+  end
+
+  defp unit(dsl) do
+    Verifier.get_entities(dsl, [:reactive]) |> Enum.find(&match?(%RecomputeBy{}, &1))
+  end
+
+  # the input is named ONCE (`recompute_by to:` or the combinator's `over:`),
+  # and the grouping comes from the unit's `from:` or an explicit `group_by:`.
+  defp verify_over(dsl, %Reduce{} = r) do
+    u = unit(dsl)
+
+    cond do
+      is_nil(r.over) and (is_nil(u) or is_nil(u.to)) ->
+        error(
+          dsl,
+          "a `reduce` names no input — declare the unit with its edge " <>
+            "(`recompute_by :category, to: :expenses, from: :expense_cat`), or name it " <>
+            "on the combinator (`over: :expenses, group_by: [...]`)."
+        )
+
+      not is_nil(r.over) and not is_nil(u) and not is_nil(u.to) ->
+        error(
+          dsl,
+          "the input is named TWICE — `recompute_by to: #{inspect(u.to)}` and " <>
+            "`reduce over: #{inspect(r.over)}`. Declare it once."
+        )
+
+      # `:cell` recomputes whole, so it names no grouping — the combinator must
+      not is_nil(u) and u.unit == :cell and is_nil(r.group_by) ->
+        error(
+          dsl,
+          "`recompute_by :cell` redoes the whole cell, so it names no grouping — the " <>
+            "`reduce` still needs `group_by:` to say how rows are folded."
+        )
+
+      # the composite form carries `from:` per entry — a top-level `from:` too
+      # is two answers to one question
+      not is_nil(u) and is_list(u.unit) and not is_nil(u.from) ->
+        error(
+          dsl,
+          "`recompute_by #{inspect(u.unit)}` is a COMPOSITE unit — each entry already " <>
+            "carries the input field it comes from, so the top-level " <>
+            "`from: #{inspect(u.from)}` is a second answer. Drop it."
+        )
+
+      # a composite unit's entries must all be `this_column: :input_field` pairs
+      not is_nil(u) and is_list(u.unit) and
+          not Enum.all?(u.unit, &match?({a, b} when is_atom(a) and is_atom(b), &1)) ->
+        error(
+          dsl,
+          "a COMPOSITE `recompute_by` takes `[this_column: :input_field, …]` pairs — " <>
+            "got #{inspect(u.unit)}"
+        )
+
+      not is_nil(u) and is_list(u.unit) and u.unit == [] ->
+        error(dsl, "a COMPOSITE `recompute_by` names no columns — got `[]`")
+
+      # a single-column unit with no `from:` can't supply the grouping
+      not is_nil(u) and u.unit != :cell and not is_list(u.unit) and is_nil(u.from) and
+          is_nil(r.group_by) ->
+        error(
+          dsl,
+          "`recompute_by #{inspect(u.unit)}` declares no `from:` (the input field the " <>
+            "unit is computed from) and the `reduce` declares no `group_by:` — one of " <>
+            "them must say how the input's rows group."
+        )
+
+      is_nil(u) and is_nil(r.group_by) ->
+        error(
+          dsl,
+          "a `reduce over:` must declare `group_by:` — the grouping is only implicit " <>
+            "when `recompute_by` names the unit and the field it comes from."
+        )
+
+      # `from_key:` resolves from the key's segments, so it needs the key grammar
+      not is_nil(u) and u.from_key == true and u.unit == :cell ->
+        error(
+          dsl,
+          "`recompute_by :cell` redoes everything, so there is no unit to resolve from " <>
+            "the key — drop `from_key:`."
+        )
+
+      true ->
+        :ok
+    end
+  end
+
+  defp verify_over(_dsl, _r), do: :ok
+
+  # `recompute_by` sets the claim rule, so a block-level `key_rule` alongside it
+  # is the same fact stated twice — and they can disagree.
+  defp verify_unit_vs_key_rule(dsl) do
+    case {unit(dsl), Verifier.get_option(dsl, [:reactive], :key_rule)} do
+      {%RecomputeBy{} = u, rule} when rule not in [nil, :identity] ->
+        error(
+          dsl,
+          "`recompute_by #{inspect(u.unit)}` already declares the claim unit, but this " <>
+            "block also sets `key_rule #{inspect(rule)}` — the same fact twice. Drop the " <>
+            "`key_rule` (`recompute_by :cell` is the whole-cell unit)."
+        )
+
+      _ ->
+        :ok
+    end
+  end
 
   # the node-shape × result-slot matrix: a VERDICT node's result IS its status
   # (`status:` required, row slots forbidden); a payload node emits rows
@@ -205,7 +370,15 @@ defmodule ReactiveDag.Node.Verifiers.VerifyReactive do
   end
 
 
-  defp declarative_group?(g), do: is_atom(g) or (is_list(g) and Enum.all?(g, &is_atom/1))
+  defp declarative_group?(g) do
+    is_atom(g) or
+      (is_list(g) and
+         Enum.all?(g, fn
+           a when is_atom(a) -> true
+           {parent, child} when is_atom(parent) and is_atom(child) -> true
+           _ -> false
+         end))
+  end
 
   defp verify_fold_shapes(dsl, folds) do
     Enum.reduce_while(folds, :ok, fn
@@ -248,24 +421,41 @@ defmodule ReactiveDag.Node.Verifiers.VerifyReactive do
     if MapSet.size(payload_attrs) == 0 do
       :ok
     else
-      dests = List.wrap(group_by) ++ fold_dests(folds)
+      dests = Declarative.group_dests(group_by) ++ fold_dests(folds)
 
-      case Enum.reject(dests, &MapSet.member?(payload_attrs, &1)) do
-        [] ->
-          :ok
-
-        missing ->
+      cond do
+        (missing = Enum.reject(dests, &MapSet.member?(payload_attrs, &1))) != [] ->
           error(
             dsl,
             "the declarative `into:` row would carry #{inspect(missing)}, but this " <>
               "resource has no such attribute(s) — the payload loop writes row columns " <>
               "into the node's own attributes. Declared: #{inspect(MapSet.to_list(payload_attrs))}"
           )
+
+        (uncovered = identity_uncovered(dsl, dests)) != [] ->
+          error(
+            dsl,
+            "an IDENTITY-KEYED node's row must produce every primary-key field — " <>
+              "#{inspect(uncovered)} never appear(s) in the group columns or fold " <>
+              "destinations, so the upsert could not identify its row"
+          )
+
+        true ->
+          :ok
       end
     end
   end
 
   defp verify_dests(_dsl, _reduce_with_upsert, _folds), do: :ok
+
+  # for a composite primary key, the row IS its identity: every pk field must
+  # be produced by the declarative row (group dests ∪ fold dests).
+  defp identity_uncovered(dsl, dests) do
+    case Ash.Resource.Info.primary_key(dsl) do
+      pk when is_list(pk) and length(pk) > 1 -> pk -- dests
+      _ -> []
+    end
+  end
 
   defp fold_dests(folds) do
     Enum.flat_map(folds, fn

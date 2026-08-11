@@ -54,6 +54,10 @@ defmodule ReactiveDag.Node.Recompute.Read do
 
   defp scope_query(query, _pk, nil), do: query
 
+  # an IDENTITY-KEYED over (composite PK) has no key column to filter — the
+  # keyed scope stands down and the read stays whole (or `query:`-scoped).
+  defp scope_query(query, nil, {:keys, _keys}), do: query
+
   defp scope_query(query, pk, {:keys, keys}),
     do: Ash.Query.do_filter(query, [{pk, [in: keys]}])
 
@@ -62,4 +66,11 @@ defmodule ReactiveDag.Node.Recompute.Read do
 
   defp scope_query(query, _pk, {:attr, attr, values}),
     do: Ash.Query.do_filter(query, [{attr, [in: values]}])
+
+  # a COMPOSITE unit's scope: every column filtered by the values seen at its
+  # position, ANDed. For several claims this admits a cross-product superset of
+  # the claimed units — sound (still closed over unit boundaries) and far
+  # tighter than reading whole.
+  defp scope_query(query, pk, {:all_of, clauses}),
+    do: Enum.reduce(clauses, query, &scope_query(&2, pk, &1))
 end

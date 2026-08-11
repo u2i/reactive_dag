@@ -1,6 +1,6 @@
 defmodule ReactiveDag.GroupRuleTest do
   @moduledoc """
-  `key_rule: :group`, declared ON the combinator: a changed child row claims
+  `recompute_by`, the unit a change invalidates: a changed child row claims
   its GROUP — the mapping is the `group_by` fields the reduce already
   declares, evaluated by reading the changed rows. No key grammar, no host
   KeyRule module, no misleading block-level `:all`. The expense-category
@@ -90,12 +90,12 @@ defmodule ReactiveDag.GroupRuleTest do
       id(:category_totals)
       op(:fold)
 
-      # the whole granularity contract in ONE unit: grain = the child's
-      # :category field, claims resolved through it, read scoped by it.
-      reduce over: :expenses,
-             group_by: [:category],
-             key_rule: :group,
-             into: [sum: [amount: :total], count: :n]
+      # the whole granularity contract in ONE declaration: a change to an
+      # expense's :category invalidates that category unit — claims resolved
+      # through it, read scoped by it, rows grouped by it.
+      recompute_by :category, to: :expenses, from: :category
+
+      reduce into: [sum: [amount: :total], count: :n]
     end
   end
 
@@ -190,7 +190,7 @@ defmodule ReactiveDag.GroupRuleTest do
     # the group is one plain string attribute — the read auto-scope target
     cell = plan.cells["category_totals"]
     assert cell.meta.key_rule == :group
-    assert cell.meta.over_source.group_scope_attr == :category
+    assert cell.meta.over_source.group_key_plan == [{:attr, :category, true}]
 
     Frontier.mark_dirty("expenses", ["*"], "seed")
     {:ok, _} = drain(plan)
@@ -235,7 +235,7 @@ defmodule ReactiveDag.GroupRuleTest do
     assert steps["category_totals"].claimed == ["*"]
   end
 
-  test "key_rule in BOTH places is a compile-time error" do
+  test "recompute_by alongside a block-level key_rule is a compile-time error" do
     alias ReactiveDag.Node.Verifiers.VerifyReactive
 
     defmodule BothPlaces do
@@ -248,10 +248,11 @@ defmodule ReactiveDag.GroupRuleTest do
         id(:both_places)
         key_rule(:all)
 
-        reduce over: :expenses,
-               group_by: [:category],
-               key_rule: :group,
-               into: fn _c, _rows -> %{} end,
+        # the unit already says what a change invalidates — `key_rule` is the
+        # same fact stated twice, and the two can disagree
+        recompute_by :category, to: :expenses, from: :category
+
+        reduce into: fn _c, _rows -> %{} end,
                upsert: fn _, _ -> true end
       end
     end
@@ -259,6 +260,6 @@ defmodule ReactiveDag.GroupRuleTest do
     assert {:error, %Spark.Error.DslError{message: msg}} =
              VerifyReactive.verify(BothPlaces.spark_dsl_config())
 
-    assert msg =~ "BOTH"
+    assert msg =~ "already declares the claim unit"
   end
 end

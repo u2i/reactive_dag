@@ -35,7 +35,6 @@ defmodule ReactiveDag.PayloadLoopTest do
       id :dmr_rows
       op :source
       leaf? true
-      payload_key :id
     end
   end
 

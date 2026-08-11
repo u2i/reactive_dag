@@ -11,26 +11,26 @@ defmodule ReactiveDag.Node do
           data_layer: AshPostgres.DataLayer,     # the node's OWN payload table
           extensions: [ReactiveDag.Node]
 
-        attributes do                             # the payload columns
-          attribute :key, :string, primary_key?: true
-          attribute :plant, :string
-          attribute :avg_flow, :float
+        attributes do                             # the payload columns; the row
+          attribute :plant, :string, primary_key?: true   # IS its identity — the
+          attribute :month, :string, primary_key?: true   # cell key "north|2024-01"
+          attribute :avg_flow, :float                     # is its serialization
         end
 
         actions do
-          create :upsert do upsert?(true); upsert_identity(:key); accept([:key, :plant, :avg_flow]) end
+          create :upsert do upsert?(true); accept([:plant, :month, :avg_flow]) end
         end
 
         reactive do
           op :fold
-          key_rule :all
-          # ASH-FIRST: the library reads :dmr_rows (dirty-key scoped), groups
-          # by the attributes, folds each group, and writes the row into THIS
-          # resource (keyed by :key) with the coordination Op.put. No `read:`,
-          # no `key:`, no `upsert:` — each slot has a fn escape hatch when the
-          # shape outgrows attributes.
-          reduce over: :dmr_rows,
-                 group_by: [:plant, :month],
+          # ASH-FIRST: `recompute_by` names the UNIT a change invalidates (and
+          # supplies the edge + the claim rule); the library reads :dmr_rows,
+          # folds each group, and upserts the row by its Ash IDENTITY with the
+          # coordination Op.put. No `read:`, no `key:`, no key column, no
+          # `upsert:` — each slot has an escape hatch when the shape outgrows
+          # attributes.
+          recompute_by :plant, to: :dmr_rows, from: :plant
+          reduce group_by: [:plant, :month],
                  into: [avg: [flow: :avg_flow]]
         end
       end
@@ -40,9 +40,12 @@ defmodule ReactiveDag.Node do
   (`ReactiveDag.Node.Payload`) with change-detection. Writing into a *different*
   resource is the explicit deviation — supply a custom `upsert:` for that.
 
-  The cell key maps to the resource's `payload_key` attribute (default `:key`) via
-  the `payload_action` upsert (default `:upsert`); set those in the `reactive`
-  block if they're named otherwise.
+  Keys work like Ash keys. A SINGLE-attribute primary key is the payload key
+  (derived — declare `payload_key` only for a non-PK key column); a COMPOSITE
+  primary key means the row IS its identity: no key column at all, the upsert
+  conflicts on the primary key, and the cell key is the identity's
+  serialization in primary-key order (`"gf|2025"`). The `payload_action`
+  upsert defaults to `:upsert`.
 
   ## Which computation? (the Ash-first ladder)
 
@@ -52,6 +55,7 @@ defmodule ReactiveDag.Node do
   | you want to… | use | rows into BEAM? | you write |
   |---|---|---|---|
   | group + `avg`/`sum`/`count` a relationship | `aggregate` | **none** (datastore GROUP BY) | attribute atoms |
+  | fold, with the recompute UNIT declared | `recompute_by` + `reduce` | the scoped slice | the unit + the field it comes from + an `into:` fold |
   | fold one input's rows into per-group summaries | `reduce` | the scoped slice of `over` | `group_by:` attrs + an `into:` fold |
   | reconcile one input's two sides by key | `join` | the scoped slice of `over` | side attrs/`[key:, where:]` + picks |
   | a slot the attributes can't express | the slot's escape | same | `query:` (shape the Ash read), fn group/key/into, `expand:`, `status:` |
@@ -185,6 +189,112 @@ defmodule ReactiveDag.Node do
     ]
   }
 
+  defmodule RecomputeBy do
+    @moduledoc """
+    THE declaration the engine cares about: **what unit does a change
+    invalidate?** Everything else a combinator declares — `group_by`, `into`,
+    key derivation — is mapping data into shape once you already know what to
+    recompute.
+
+        recompute_by :category, from: :expense_cat
+
+    Read: "recompute by category, from the input's `expense_cat`" — a change to
+    a row's `expense_cat` invalidates my `category` unit, so redo it whole.
+    That one fact supplies the input edge, the grouping, the claim resolution
+    and the read scope, so it replaces the `key_rule` vocabulary entirely.
+
+    Four answers to the one question:
+
+      * `recompute_by :cell`                        — the whole cell; any change
+        re-does everything (a fold whose every output depends on every input).
+      * `recompute_by :cat, from: :child_field`     — per unit, resolved by
+        READING the changed rows and evaluating the field. A key the lookup
+        can't find (a deleted row) degrades to whole-cell: vanish must reprice
+        everything it might have left.
+      * `recompute_by :month, from_key: true`       — per unit, resolved PURELY
+        from the changed key's leading `|`-segments. No query and deletion-safe,
+        at the price of the key-grammar contract.
+      * (omitted)                                   — key-for-key: a changed
+        input key maps to the same output key.
+
+    NOTE this is the RECOMPUTE unit, not the output's grain. They coincide for a
+    plain rollup, and diverge the moment one unit emits many rows: percentiles
+    per day `recompute_by :day` (touch one reading, redo that day) while the
+    rows are keyed day+percentile via `expand:`.
+
+    The unit is consumed at COMPILE time — it lowers to the combinator's `over:`
+    + `group_by:` pair and is never traversed at recompute. One declaration per
+    node, so a combinator reads exactly one input: one unit, one claim
+    translation.
+    """
+    defstruct [
+      :unit,
+      :to,
+      :from,
+      :from_key,
+      :read,
+      :__identifier__,
+      :__spark_metadata__
+    ]
+  end
+
+  @recompute_by %Spark.Dsl.Entity{
+    name: :recompute_by,
+    target: RecomputeBy,
+    args: [:unit],
+    describe:
+      "The unit a change invalidates — `recompute_by :category, from: :expense_cat` " <>
+        "(per category, by looking the changed rows up), the COMPOSITE form " <>
+        "`recompute_by [fund: :fund_code, fy: :fy]` (a multi-column unit, stated once), " <>
+        "`from_key: true` (resolved purely from the key's segments), or `:cell` (redo " <>
+        "everything). Omit it for key-for-key. Subsumes `key_rule` AND the grouping.",
+    schema: [
+      unit: [
+        type: {:or, [:atom, :keyword_list]},
+        required: true,
+        doc:
+          "THIS node's column naming the unit (`:category`, `:month`), the reserved " <>
+            "`:cell` (the whole cell, for a computation whose every output depends on " <>
+            "every input), or the COMPOSITE grain as `[this_column: :input_field, …]` " <>
+            "(`[fund: :fund_code, fy: :fy]` — the unit IS the grouping, so `group_by:` " <>
+            "is not restated; the cell key serializes the columns in order). With the " <>
+            "composite form, `from:` is carried per entry and must not also be given."
+      ],
+      to: [
+        type: :atom,
+        required: false,
+        doc:
+          "the input node id, when it isn't already named by the combinator's `over:`. " <>
+            "Declared on one or the other, never both."
+      ],
+      from: [
+        type: :atom,
+        required: false,
+        doc:
+          "the INPUT's field the unit is computed from (`:expense_cat`) — what is read " <>
+            "and grouped, and what a claim traverses back through. Resolution READS the " <>
+            "changed rows; a key it can't find (a deleted row) degrades to whole-cell. " <>
+            "For a COMPOSITE unit the pairs carry this instead, so `from:` is omitted."
+      ],
+      from_key: [
+        type: :boolean,
+        required: false,
+        doc:
+          "resolve the unit PURELY from the changed key's leading `|`-segments instead " <>
+            "of reading rows — no query and deletion-safe, at the price of the " <>
+            "key-grammar contract (a declarative group with default keys only). A key " <>
+            "that violates the grammar degrades to whole-cell."
+      ],
+      read: [
+        type: :atom,
+        required: false,
+        doc:
+          "OMIT for the input's primary read; an atom names a different `:read` action " <>
+            "on it (same auto-scoping). Equivalent to the combinator's `read:`."
+      ]
+    ]
+  }
+
   @compose_base %Spark.Dsl.Entity{
     name: :compose,
     target: Compose,
@@ -243,15 +353,20 @@ defmodule ReactiveDag.Node do
     name: :reduce,
     target: Reduce,
     describe:
-      "Declarative fold: read `over`, group by `group_by`, reduce each group with `into`. " <>
-        "Ash-first: omit `read:` (the library reads the over node's resource, dirty-key " <>
-        "scoped), name attributes in `group_by:`, and declare the fold in `into:` — " <>
-        "each slot has a fn escape hatch when the shape outgrows attributes.",
+      "Declarative fold: read the input, group it, reduce each group with `into`. " <>
+        "Ash-first: declare `recompute_by` (the unit a change invalidates — it supplies " <>
+        "the edge, the grouping and the claim rule), or name `over:` a node id with an " <>
+        "explicit `group_by:`; omit `read:` (the library reads the over node's resource, " <>
+        "dirty-key scoped) and declare the fold in `into:` — each slot has a fn escape " <>
+        "hatch when the shape outgrows attributes.",
     schema: [
       over: [
         type: :atom,
-        required: true,
-        doc: "the input node id whose payload is read + grouped"
+        required: false,
+        doc:
+          "the input node id whose payload is read + grouped, with `group_by:` declared " <>
+            "here. Omit it when `recompute_by` names the input with `to:`, which declares " <>
+            "the unit and its edge together."
       ],
       read: [
         type: :atom,
@@ -273,14 +388,18 @@ defmodule ReactiveDag.Node do
             "`dirty_keys` is nil for a whole-cell recompute."
       ],
       group_by: [
-        type: {:or, [{:fun, 1}, :atom, {:list, :atom}]},
-        required: true,
+        type: {:or, [{:fun, 1}, :atom, {:list, :any}]},
+        required: false,
         doc:
-          "an attribute or CALCULATION on the over resource (`:fund`, or `:month` where " <>
+          "REQUIRED with `over:`; implied by a `recompute_by` that declares `from:`. " <>
+            "An attribute or CALCULATION on the over resource (`:fund`, or `:month` where " <>
             "the over declares `calculate :month, :string, {ReactiveDag.Calendar, " <>
             "bucket: :month, of: :date}` — derived grouping values are Ash calculations, " <>
             "declared where the data lives; the library loads them). A list groups by " <>
-            "the TUPLE of values. The fn escape hatch: `(item -> group_term)`."
+            "the TUPLE of values; an entry may be the RELATIONAL-JOIN pair " <>
+            "`parent_column: :child_field` (`[category: :expense_cat]` — group by the " <>
+            "child's field, carry it as this node's column: Ash's source/destination " <>
+            "attributes, for the DAG edge). The fn escape hatch: `(item -> group_term)`."
       ],
       key: [
         type: {:fun, 1},
@@ -296,22 +415,6 @@ defmodule ReactiveDag.Node do
         doc:
           "prepend `\"<prefix>|\"` to the DEFAULT key — the `\"va|\" <> acct` namespacing " <>
             "idiom, declaratively. Not combinable with an explicit `key:` fn."
-      ],
-      key_rule: [
-        type:
-          {:or,
-           [
-             {:one_of, [:identity, :all, :group]},
-             {:custom, ReactiveDag.Node, :validate_bucket_rule, []}
-           ]},
-        required: false,
-        doc:
-          "this node's claim grain, declared WITH the computation it must agree with: " <>
-            "`:group` — a changed child row claims its GROUP (resolved by reading the " <>
-            "changed rows and evaluating the same `group_by`/side fields; a key the " <>
-            "lookup can't find — a deleted row — degrades to `:all`); or `:identity` / " <>
-            "`:all` / `{:bucket, kind}` as at block level. Overrides the block-level " <>
-            "`key_rule` (declaring a non-default in both places is a compile error)."
       ],
       into: [
         type: {:or, [{:fun, 2}, :keyword_list]},
@@ -435,22 +538,6 @@ defmodule ReactiveDag.Node do
         required: false,
         doc:
           "prepend `\"<prefix>|\"` to the DEFAULT key. Not combinable with an explicit `key:` fn."
-      ],
-      key_rule: [
-        type:
-          {:or,
-           [
-             {:one_of, [:identity, :all, :group]},
-             {:custom, ReactiveDag.Node, :validate_bucket_rule, []}
-           ]},
-        required: false,
-        doc:
-          "this node's claim grain, declared WITH the computation it must agree with: " <>
-            "`:group` — a changed child row claims its GROUP (resolved by reading the " <>
-            "changed rows and evaluating the same `group_by`/side fields; a key the " <>
-            "lookup can't find — a deleted row — degrades to `:all`); or `:identity` / " <>
-            "`:all` / `{:bucket, kind}` as at block level. Overrides the block-level " <>
-            "`key_rule` (declaring a non-default in both places is a compile error)."
       ],
       into: [
         type: {:or, [{:fun, 3}, :keyword_list]},
@@ -670,7 +757,11 @@ defmodule ReactiveDag.Node do
     ]
   end
 
-  @agg_kinds [:count, :sum, :avg, :min, :max, :first]
+  # ONE list, shared with the in-BEAM fold: `aggregate` and `reduce into:` speak
+  # the SAME vocabulary (same kinds, same `[src: dest]` spelling, same SQL nil
+  # semantics), so moving a fold between the datastore and the BEAM cannot
+  # change the answer. Declared once so the two can never drift.
+  @agg_kinds ReactiveDag.Node.Recompute.Declarative.fold_kinds()
 
   @aggregate %Spark.Dsl.Entity{
     name: :aggregate,
@@ -713,6 +804,7 @@ defmodule ReactiveDag.Node do
     entities: [
       @ref,
       @context,
+      @recompute_by,
       @compose,
       @reduce,
       @join,
@@ -733,26 +825,24 @@ defmodule ReactiveDag.Node do
           "OPTIONAL free-atom label. Recompute dispatches on the `reduce`/`join`/`aggregate`/`compute` entity + `meta` shape, NOT on `op` — so `op` is documentation here, load-bearing only for a `RecomputeStrategy` that dispatches on it (e.g. `ReactiveDag.SetOp`). See `ReactiveDag.Cell`."
       ],
       key_rule: [
-        type:
-          {:or,
-           [
-             {:one_of, [:identity, :all]},
-             {:custom, ReactiveDag.Node, :validate_bucket_rule, []}
-           ]},
+        type: {:one_of, [:identity, :all]},
         default: :identity,
         doc:
           "how a child key maps to this cell's key on propagation: `:identity` (same " <>
-            "key), `:all` (whole-cell), or `{:bucket, kind}` — the CALENDAR ladder: a " <>
-            "changed child key claims its `kind` bucket by pure string work (the key's " <>
-            "leading segment parses as a date or finer bucket label; " <>
-            "`ReactiveDag.Calendar.bucket_of_key/2`). Unparseable keys degrade to `:all`."
+            "key) or `:all` (whole-cell). Group-grain claims (`:group`, " <>
+            "`{:group, from: :key}`) are declared ON the combinator — the claim grain " <>
+            "and the computation it must agree with belong in one unit."
       ],
       leaf?: [type: :boolean, default: false, doc: "true for a source-fed leaf (no compute)"],
       payload_key: [
         type: :atom,
-        default: :key,
         doc:
-          "the resource attribute the cell key writes to when the library closes the payload loop (a `reduce`/`join` with no `upsert:`). Defaults to `:key`."
+          "the resource attribute the cell key writes to when the library closes the " <>
+            "payload loop. DERIVED like Ash derives keys: defaults to the resource's " <>
+            "single-attribute primary key (else `:key`) — declare it only for a " <>
+            "non-primary key column. A COMPOSITE primary key needs no payload_key at " <>
+            "all: the row is upserted by its identity and the cell key is the " <>
+            "identity's serialization."
       ],
       payload_action: [
         type: :atom,
@@ -835,21 +925,6 @@ defmodule ReactiveDag.Node do
   # ── introspection + graph assembly ────────────────────────────────────────
 
   alias Spark.Dsl.Extension, as: Ext
-
-  @doc false
-  # the DSL schema's custom validator for `key_rule {:bucket, kind}`.
-  def validate_bucket_rule({:bucket, kind}) do
-    if kind in ReactiveDag.Calendar.buckets() do
-      {:ok, {:bucket, kind}}
-    else
-      {:error,
-       "key_rule {:bucket, kind} takes one of #{inspect(ReactiveDag.Calendar.buckets())}, " <>
-         "got #{inspect(kind)}"}
-    end
-  end
-
-  def validate_bucket_rule(other),
-    do: {:error, "key_rule must be :identity, :all, or {:bucket, kind} — got #{inspect(other)}"}
 
   @doc "The cell id for a node resource (explicit `id`, else the module's snake short-name)."
   @spec cell_id(module()) :: atom()
@@ -943,11 +1018,12 @@ defmodule ReactiveDag.Node do
 
         source = %{
           resource: resource,
-          payload_key: over.meta[:payload_key] || :key,
+          # nil for an IDENTITY-KEYED over (composite PK): its cell keys are
+          # serialized identities, not a column — key scoping then stands down.
+          payload_key: over.meta[:payload_key],
           read_action: read,
           load: loads,
-          bucket_scopes: bucket_scopes(resource, loads),
-          group_scope_attr: group_scope_attr(spec, resource, loads)
+          group_key_plan: group_key_plan(spec, resource)
         }
 
         %{cell | meta: Map.put(cell.meta, :over_source, source)}
@@ -957,43 +1033,35 @@ defmodule ReactiveDag.Node do
     end
   end
 
-  # the attribute a `key_rule: :group` claim can auto-scope the read by:
-  # a reduce grouped by ONE plain STRING attribute with the default key
-  # derivation — the claimed labels ARE that attribute's values, so
-  # `attr in claims` is the exact group closure. Anything richer (multi-attr
-  # groups, calculations, custom keys, joins, non-string types) returns nil:
-  # the read stays whole (or `query:`-scoped) rather than guessing wrong.
-  defp group_scope_attr(%Reduce{group_by: g, key: nil} = _spec, resource, loads) do
-    attr =
-      case g do
-        a when is_atom(a) -> a
-        [a] when is_atom(a) -> a
-        _ -> nil
+  # the ONE cross-node fact behind every `:group` capability — an ordered plan
+  # of what each group entry IS on the over resource:
+  #   {:attr, name, string?}       — a plain attribute (string? gates equality scoping)
+  #   {:calendar, kind, of_attr}   — a ReactiveDag.Calendar calculation (pure
+  #                                  key resolution + date-range scoping)
+  #   {:calc, name}                — an opaque calculation (lookup-resolvable only)
+  # Only for a reduce with a declarative group and DEFAULT key derivation —
+  # anything richer resolves by lookup and reads whole (or `query:`-scoped).
+  defp group_key_plan(%Reduce{group_by: g, key: nil}, resource) when is_atom(g) or is_list(g) do
+    g
+    |> ReactiveDag.Node.Recompute.Declarative.group_children()
+    |> Enum.map(fn name ->
+      cond do
+        attr = Ash.Resource.Info.attribute(resource, name) ->
+          {:attr, name, attr.type == Ash.Type.String}
+
+        calc = Ash.Resource.Info.calculation(resource, name) ->
+          case calc.calculation do
+            {ReactiveDag.Calendar, opts} -> {:calendar, opts[:bucket], opts[:of]}
+            _ -> {:calc, name}
+          end
+
+        true ->
+          {:calc, name}
       end
-
-    with true <- is_atom(attr) and not is_nil(attr),
-         false <- attr in loads,
-         %{type: Ash.Type.String} <- Ash.Resource.Info.attribute(resource, attr) do
-      attr
-    else
-      _ -> nil
-    end
+    end)
   end
 
-  defp group_scope_attr(_spec, _resource, _loads), do: nil
-
-  # which of the loaded calculations are ReactiveDag.Calendar buckets, as
-  # %{bucket_kind => date_attribute} — what lets a `{:bucket, kind}` key rule's
-  # claims scope the read to the claimed buckets' date range automatically.
-  defp bucket_scopes(resource, calc_names) do
-    for name <- calc_names,
-        calc = Ash.Resource.Info.calculation(resource, name),
-        match?({ReactiveDag.Calendar, _}, calc.calculation),
-        {ReactiveDag.Calendar, opts} = calc.calculation,
-        into: %{} do
-      {opts[:bucket], opts[:of]}
-    end
-  end
+  defp group_key_plan(_spec, _resource), do: nil
 
   defp read_action(resource, name) do
     case Ash.Resource.Info.action(resource, name) do
@@ -1014,10 +1082,14 @@ defmodule ReactiveDag.Node do
   defp declarative_loads!(cell, spec, resource) do
     names =
       case spec do
-        %Reduce{group_by: g} when is_atom(g) -> [g]
-        %Reduce{group_by: g} when is_list(g) -> g
-        %Join{} = j -> side_attrs(j.left) ++ side_attrs(j.right)
-        _ -> []
+        %Reduce{group_by: g} when is_atom(g) or is_list(g) ->
+          ReactiveDag.Node.Recompute.Declarative.group_children(g)
+
+        %Join{} = j ->
+          side_attrs(j.left) ++ side_attrs(j.right)
+
+        _ ->
+          []
       end
 
     Enum.reduce(names, [], fn name, loads ->
@@ -1348,11 +1420,24 @@ defmodule ReactiveDag.Node do
       |> Enum.map(&normalize_dep(&1, resource))
 
     # a `reduce`/`join over: :x` implies an input edge to :x (the node it reads);
-    # so does `attested over: :x` (the raw cell the view attests).
+    # so does `attested over: :x` (the raw cell the view attests). The `over`
+    # BLOCK names the same edge — one input either way.
     combinator_refs =
       case combinator(resource) do
-        nil -> []
-        c -> [%Ref{to: c.over}]
+        nil ->
+          []
+
+        c ->
+          case c.over || (recompute_by(resource) || %{to: nil}).to do
+            nil ->
+              raise ArgumentError,
+                    "reactive_dag: the combinator on #{inspect(resource)} names no input — " <>
+                      "declare `recompute_by :unit, to: :node, from: :field`, or `over: :node` on " <>
+                      "the combinator itself."
+
+            over ->
+              [%Ref{to: over}]
+          end
       end
 
     attested_refs =
@@ -1373,14 +1458,95 @@ defmodule ReactiveDag.Node do
   # with) wins over the block-level one; the block level remains for nodes with
   # no combinator (run/compute/leaves).
   defp effective_key_rule(resource) do
-    case combinator(resource) do
-      %{key_rule: kr} when not is_nil(kr) -> kr
-      _ -> Ext.get_opt(resource, [:reactive], :key_rule, :identity)
+    cond do
+      # `recompute_by` IS the claim rule — the unit a change invalidates.
+      u = recompute_by(resource) ->
+        unit_key_rule(u)
+
+      match?(%{key_rule: kr} when not is_nil(kr), combinator(resource)) ->
+        combinator(resource).key_rule
+
+      true ->
+        Ext.get_opt(resource, [:reactive], :key_rule, :identity)
     end
   end
 
   # a flat depends_on entry: `:id`, or `{:id, gate: :requirement}` (plus an
   # optional `mode: :require | :annotate`).
+  # ── `recompute_by` — the unit a change invalidates ──────────────────────────
+  #
+  # THE declaration the engine cares about. `recompute_by :category, from:
+  # :expense_cat` states: a change to the input's `expense_cat` invalidates my
+  # `category` unit. From that ONE fact come the input edge, the grouping, the
+  # claim rule and the read scope — which is why it replaces `key_rule`
+  # (the same unit, previously stated twice and required to agree).
+  #
+  # It is the RECOMPUTE unit, not the output's grain: they coincide for a plain
+  # rollup and diverge when one unit emits many rows (percentiles per day).
+  # Consumed at COMPILE time — lowered to `over:` + `group_by:` + `key_rule`,
+  # and never traversed at recompute.
+
+  @doc false
+  # the node's `recompute_by` declaration, or nil.
+  def recompute_by(resource) do
+    Ext.get_entities(resource, [:reactive]) |> Enum.find(&match?(%RecomputeBy{}, &1))
+  end
+
+  # SUGAR → CORE: fold `recompute_by` into the combinator, so exactly one shape
+  # reaches assembly, recompute, the key rules and the verifiers. The unit
+  # supplies the edge, the grouping AND the key_rule — nothing downstream knows
+  # the declaration existed.
+  defp lower_recompute_by(%Reduce{} = r, resource) do
+    case recompute_by(resource) do
+      nil ->
+        r
+
+      %RecomputeBy{} = u ->
+        over = edge!(u, r, resource)
+
+        %{
+          r
+          | over: over,
+            group_by: r.group_by || unit_group_by(u),
+            key_rule: r.key_rule || unit_key_rule(u),
+            read: r.read || u.read
+        }
+    end
+  end
+
+  # the input node: named by `recompute_by to:` or by the combinator's `over:`,
+  # never both.
+  defp edge!(%RecomputeBy{to: nil}, %{over: nil}, resource) do
+    raise ArgumentError,
+          "reactive_dag: #{inspect(resource)} names no input — give `recompute_by` a " <>
+            "`to:` (the input node id), or the combinator an `over:`."
+  end
+
+  defp edge!(%RecomputeBy{to: to}, %{over: over}, resource) when not is_nil(to) and not is_nil(over) do
+    raise ArgumentError,
+          "reactive_dag: #{inspect(resource)} names the input TWICE — " <>
+            "`recompute_by to: #{inspect(to)}` and `over: #{inspect(over)}`. Declare it once."
+  end
+
+  defp edge!(%RecomputeBy{to: to}, %{over: over}, _resource), do: to || over
+
+  # the unit as a `group_by` entry: `[unit: :from]` — this node's column on the
+  # left, the input's field on the right. `:cell` groups nothing (the whole cell
+  # is one unit); a unit with no `from:` leaves grouping to the combinator.
+  defp unit_group_by(%RecomputeBy{unit: :cell}), do: nil
+
+  # the COMPOSITE form IS the grouping: `[fund: :fund_code, fy: :fy]` is already
+  # the `group_by` pair list, so it passes straight through.
+  defp unit_group_by(%RecomputeBy{unit: pairs}) when is_list(pairs), do: pairs
+
+  defp unit_group_by(%RecomputeBy{from: nil}), do: nil
+  defp unit_group_by(%RecomputeBy{unit: u, from: f}), do: [{u, f}]
+
+  # the unit as the claim rule it replaces.
+  defp unit_key_rule(%RecomputeBy{unit: :cell}), do: :all
+  defp unit_key_rule(%RecomputeBy{from_key: true}), do: {:group, from: :key}
+  defp unit_key_rule(%RecomputeBy{}), do: :group
+
   defp normalize_dep(id, _resource) when is_atom(id), do: %Ref{to: id}
 
   defp normalize_dep({id, opts}, _resource) when is_atom(id) and is_list(opts),
@@ -1450,6 +1616,27 @@ defmodule ReactiveDag.Node do
     end
   end
 
+  # a COMPOSITE primary key means the node is IDENTITY-KEYED: rows upsert by
+  # identity, and the cell key is the serialization of these fields in order.
+  defp identity_fields(resource) do
+    case Ash.Resource.Info.primary_key(resource) do
+      pk when is_list(pk) and length(pk) > 1 -> pk
+      _ -> nil
+    end
+  end
+
+  # ASH-DERIVED payload key: the resource's single-attribute primary key (the
+  # resource already declares its identity — restating it was duplication).
+  # Composite primary keys return nil: those nodes are IDENTITY-KEYED (the row
+  # upserts by its identity; the cell key is the identity's serialization, in
+  # primary-key order).
+  defp derived_payload_key(resource) do
+    case Ash.Resource.Info.primary_key(resource) do
+      [single] -> single
+      _ -> nil
+    end
+  end
+
   # public, non-primary-key attributes — the payload columns a verdict node must not have.
   defp payload_attributes(resource) do
     resource
@@ -1466,7 +1653,7 @@ defmodule ReactiveDag.Node do
   defp extra_meta(resource, all_refs) do
     combinator_meta =
       case combinator(resource) do
-        %Reduce{} = r -> %{reduce: r}
+        %Reduce{} = r -> %{reduce: lower_recompute_by(r, resource)}
         %Join{} = j -> %{join: j}
         nil -> %{}
       end
@@ -1511,9 +1698,10 @@ defmodule ReactiveDag.Node do
         source: Ext.get_opt(resource, [:reactive], :source, nil),
         driver: Ext.get_opt(resource, [:reactive], :driver, nil),
         over: Ext.get_opt(resource, [:reactive], :over, nil),
-        payload_key: Ext.get_opt(resource, [:reactive], :payload_key, nil),
+        payload_key: Ext.get_opt(resource, [:reactive], :payload_key, nil) || derived_payload_key(resource),
         payload_action: Ext.get_opt(resource, [:reactive], :payload_action, nil),
         coordination_opts: Ext.get_opt(resource, [:reactive], :coordination_opts, nil),
+        identity_fields: identity_fields(resource),
         verdict: verdict_flag(resource),
         context_inputs: context_inputs(resource)
       }

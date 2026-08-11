@@ -64,24 +64,23 @@ defmodule MyApp.BudgetRollups do
     extensions: [ReactiveDag.Node]
 
   attributes do
-    attribute :key, :string, primary_key?: true          # the payload columns
-    attribute :fund, :string
-    attribute :fy, :integer
-    attribute :total, :float
+    attribute :fund, :string, primary_key?: true         # the row IS its identity —
+    attribute :fy, :integer, primary_key?: true          # no :key column; the cell
+    attribute :total, :float                             # key is "gf|2025", derived
   end
   actions do
-    create :upsert do upsert?(true); upsert_identity(:key); accept([:key, :fund, :fy, :total]) end
+    create :upsert do upsert?(true); accept([:fund, :fy, :total]) end
   end
 
   reactive do
     op :fold
-    key_rule :all
-    # ASH-FIRST: the library reads :fiscal_lines (dirty-key scoped), groups by
-    # the attributes, folds each group, writes the row into THIS resource, and
-    # Op.puts only the changed keys. Keys derive as "gf|2025". Every slot has a
-    # fn escape hatch when the shape outgrows attributes.
-    reduce over: :fiscal_lines,
-           group_by: [:fund, :fy],
+    # ASH-FIRST: the library reads :fiscal_lines, groups by the attributes,
+    # folds each group, upserts the row by its Ash IDENTITY, and Op.puts only
+    # the changed keys. `recompute_by` names the UNIT a change invalidates —
+    # it supplies the edge, the grouping and the claim rule. Every slot has an
+    # escape hatch when the shape outgrows attributes.
+    recompute_by :fund, to: :fiscal_lines, from: :fund
+    reduce group_by: [:fund, :fy],
            into: [sum: [amount: :total]]
   end
 end
@@ -102,6 +101,16 @@ changed keys:
   node's resource is the group's resource; `over` is its `has_many`. Only for
   relationship aggregates (Ash has no arbitrary `GROUP BY … → rows`).
   Example: `aggregate over: :readings, avg: [flow: :avg_flow], count: :day_count`.
+- **`recompute_by`** — THE declaration the engine cares about: *what unit does
+  a change invalidate?* `recompute_by :category, to: :expenses, from:
+  :expense_cat` supplies the input edge, the grouping, the claim resolution and
+  the read scope, so it **subsumes `key_rule`** on combinator nodes. Four
+  answers: omitted (key-for-key), `from:` (per unit, by lookup), `from_key:
+  true` (per unit, purely from the key's segments), `:cell` (redo everything).
+  It is the recompute unit, not the output's grain — percentiles
+  `recompute_by :day` while their rows are keyed day+percentile. Consumed at
+  compile time; never traversed at recompute, because consumers query the
+  derived rows instead.
 - **`reduce`** — an in-BEAM fold, declared: the library reads the over node's
   resource (primary or a named `:read` action), auto-scoped to the dirty keys;
   `group_by:` names attributes, `into:` declares the fold

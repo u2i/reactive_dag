@@ -46,7 +46,6 @@ defmodule ReactiveDag.VerdictNodeTest do
       id(:stores)
       op(:source)
       leaf?(true)
-      payload_key(:store)
     end
   end
 

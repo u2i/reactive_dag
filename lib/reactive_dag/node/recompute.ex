@@ -40,6 +40,7 @@ defmodule ReactiveDag.Node.Recompute do
   def recompute(%Cell{meta: %{reduce: %{} = r}} = cell, keys) do
     group_by = Declarative.group_fn(r.group_by)
     key_fn = Declarative.key_fn(r.key, r.key_prefix)
+    keyer = row_keyer(cell, r, key_fn)
 
     # which slot emits a group's [{key, row}] pairs — the verifier guarantees
     # exactly the right one is declared for the node's shape.
@@ -53,7 +54,7 @@ defmodule ReactiveDag.Node.Recompute do
 
         true ->
           into = Declarative.into_fn(r.into, r.group_by)
-          fn group, items -> into_pair(into.(group, items), key_fn, group) end
+          fn group, items -> into_pair(into.(group, items), keyer, group) end
       end
 
     pairs =
@@ -75,13 +76,14 @@ defmodule ReactiveDag.Node.Recompute do
     left = index(items, Declarative.side_fn(j.left))
     right = index(items, Declarative.side_fn(j.right))
     key_fn = Declarative.key_fn(j.key, j.key_prefix)
+    keyer = row_keyer(cell, j, key_fn)
 
     emit =
       if is_function(j.status, 3) do
         fn jk, l, r -> [{key_fn.(jk), status_row(j.status.(jk, l, r))}] end
       else
         into = Declarative.join_into_fn(j.into)
-        fn jk, l, r -> into_pair(into.(jk, l, r), key_fn, jk) end
+        fn jk, l, r -> into_pair(into.(jk, l, r), keyer, jk) end
       end
 
     left_pairs =
@@ -160,45 +162,93 @@ defmodule ReactiveDag.Node.Recompute do
   end
 
   # the library's automatic read scope, by the cell's key-rule GRAIN:
-  #   :identity       → the claimed keys ARE the over's keys: filter payload_key.
-  #   {:bucket, kind} → the claimed keys are bucket labels: filter the over's
-  #                     date attribute to the claimed buckets' range HULL (a
-  #                     superset read is still closed over groups — extra
-  #                     buckets recompute and change-detect to nothing). Needs
-  #                     the over's group calculation to be a Calendar bucket of
-  #                     the same kind (stamped as over_source.bucket_scopes);
-  #                     otherwise no auto scope.
-  #   anything else   → no auto scope: a grain-changing host rule's claims must
+  #   :identity        → the claimed keys ARE the over's keys: filter payload_key.
+  #   :group (any form) → the claimed keys are group labels: invert them through
+  #                     assembly's group_key_plan — a plain string attribute
+  #                     filters by equality; a Calendar bucket by its date-range
+  #                     HULL (a superset read is still closed over groups —
+  #                     extra groups recompute and change-detect to nothing).
+  #   anything else    → no auto scope: a grain-changing host rule's claims must
   #                     not filter the child-grain read; `query:` still receives
   #                     them for host-grain scoping.
-  defp auto_scope(%Cell{meta: meta}, keys) do
+  @doc false
+  # public for tests: the scope the library derives from a claim set.
+  def auto_scope(%Cell{meta: meta}, keys) do
     case meta[:key_rule] do
       :identity -> keyed_scope(keys)
       nil -> keyed_scope(keys)
-      {:bucket, kind} -> bucket_hull(meta[:over_source], kind, scope(keys))
-      :group -> group_attr_scope(meta, scope(keys))
+      :group -> group_scope(meta, scope(keys))
+      {:group, _opts} -> group_scope(meta, scope(keys))
       _ -> nil
     end
   end
 
-  # `:group` claims are group labels; when assembly proved the group is one
-  # plain string attribute with default keys (over_source.group_scope_attr),
-  # the labels ARE that attribute's values (minus any key_prefix) — filter it.
-  defp group_attr_scope(_meta, nil), do: nil
+  # `:group` claims are group labels; when assembly's group_key_plan proves a
+  # SINGLE-entry group, the labels invert to a data predicate: a plain string
+  # attribute's values (`attr in claims`), or a Calendar bucket's date-range
+  # HULL. Multi-entry groups and opaque calculations don't invert — the read
+  # stays whole (or `query:`-scoped) rather than guessing wrong.
+  defp group_scope(_meta, nil), do: nil
 
-  defp group_attr_scope(meta, labels) do
-    with %{group_scope_attr: attr} when not is_nil(attr) <- meta[:over_source] do
-      prefix = get_in(meta, [:reduce]) |> then(&(&1 && Map.get(&1, :key_prefix)))
+  defp group_scope(meta, labels) do
+    prefix = meta[:reduce] |> then(&(&1 && Map.get(&1, :key_prefix)))
 
-      values =
-        case prefix do
-          nil -> labels
-          p -> Enum.map(labels, &String.replace_prefix(&1, p <> "|", ""))
+    values =
+      case prefix do
+        nil -> labels
+        p -> Enum.map(labels, &String.replace_prefix(&1, p <> "|", ""))
+      end
+
+    case meta[:over_source] do
+      %{group_key_plan: [{:attr, attr, true}]} ->
+        {:attr, attr, values}
+
+      %{group_key_plan: [{:calendar, kind, attr}]} ->
+        ranges = Enum.map(values, &ReactiveDag.Calendar.range(kind, &1))
+
+        if :error in ranges do
+          nil
+        else
+          {froms, tos} = Enum.unzip(ranges)
+          {:range, attr, Enum.min(froms, Date), Enum.max(tos, Date)}
         end
 
-      {:attr, attr, values}
+      # a COMPOSITE unit: each claim is its columns joined with "|", so split
+      # them back apart and scope each column by the values seen at its
+      # position. For SEVERAL claims this is a cross-product SUPERSET (claims
+      # "gf|2025" and "water|2026" also admit "gf|2026") — still sound, because
+      # a superset read stays closed over unit boundaries, and far tighter than
+      # reading the whole table. Only plain-string columns invert; a mixed plan
+      # scopes by the string ones it can and leaves the rest to the fold.
+      %{group_key_plan: [_, _ | _] = plan} ->
+        composite_scope(plan, values)
+
+      _ ->
+        nil
+    end
+  end
+
+  defp composite_scope(plan, labels) do
+    segments = Enum.map(labels, &String.split(&1, "|"))
+
+    if Enum.any?(segments, &(length(&1) != length(plan))) do
+      # a key that doesn't match the plan's arity isn't ours to invert
+      nil
     else
-      _ -> nil
+      plan
+      |> Enum.with_index()
+      |> Enum.flat_map(fn
+        {{:attr, attr, true}, i} ->
+          [{:attr, attr, segments |> Enum.map(&Enum.at(&1, i)) |> Enum.uniq()}]
+
+        _other ->
+          []
+      end)
+      |> case do
+        [] -> nil
+        [one] -> one
+        many -> {:all_of, many}
+      end
     end
   end
 
@@ -208,21 +258,6 @@ defmodule ReactiveDag.Node.Recompute do
       claimed -> {:keys, claimed}
     end
   end
-
-  defp bucket_hull(_source, _kind, nil), do: nil
-
-  defp bucket_hull(%{bucket_scopes: scopes}, kind, labels) when is_map(scopes) do
-    with attr when not is_nil(attr) <- scopes[kind],
-         ranges = Enum.map(labels, &ReactiveDag.Calendar.range(kind, &1)),
-         false <- :error in ranges do
-      {froms, tos} = Enum.unzip(ranges)
-      {:range, attr, Enum.min(froms, Date), Enum.max(tos, Date)}
-    else
-      _ -> nil
-    end
-  end
-
-  defp bucket_hull(_source, _kind, _labels), do: nil
 
   # the claimed keys as a read scope: `nil` for a whole-cell recompute (`"*"`),
   # else the specific dirty keys a scoped `read` can filter its query to.
@@ -240,17 +275,30 @@ defmodule ReactiveDag.Node.Recompute do
   defp status_row(status), do: %{status: status}
 
   # an `into:` result is ONE row: its own `:key` wins (a self-identified row),
-  # else the key derives from the group term / join key. A list here is the
-  # old expand overload — point at the `expand:` slot.
-  defp into_pair(rows, _key_fn, _term) when is_list(rows) do
+  # else the cell keyer derives it — from the row's IDENTITY fields for a
+  # composite-primary-key node, else from the group term / join key. A list
+  # here is the old expand overload — point at the `expand:` slot.
+  defp into_pair(rows, _keyer, _term) when is_list(rows) do
     raise "reactive_dag: `into:` returns ONE row per group — the group → many-rows " <>
             "shape is the `expand:` slot (each row carrying its own :key)"
   end
 
-  defp into_pair(row, key_fn, term) when is_map(row) do
-    key = if is_map_key(row, :key), do: row.key, else: key_fn.(term)
+  defp into_pair(row, keyer, term) when is_map(row) do
+    key = if is_map_key(row, :key), do: row.key, else: keyer.(row, term)
     [{key, row}]
   end
+
+  # how a payload row gets its cell key: an IDENTITY-KEYED node (composite
+  # primary key) serializes the row's identity fields in primary-key order —
+  # the key IS the identity, not a stored column; anything else derives from
+  # the group term / join key as ever.
+  defp row_keyer(%Cell{meta: %{identity_fields: fields}}, spec, _key_fn)
+       when is_list(fields) do
+    id_key = Declarative.identity_key_fn(fields, Map.get(spec, :key_prefix))
+    fn row, _term -> id_key.(row) end
+  end
+
+  defp row_keyer(_cell, _spec, key_fn), do: fn _row, term -> key_fn.(term) end
 
   # `expand:` rows fan one group out to many keys, so each row must self-key.
   defp expand_pairs(rows, cell_id) when is_list(rows) do
@@ -331,9 +379,21 @@ defmodule ReactiveDag.Node.Recompute do
         """
 
       resource ->
-        key_attr = meta[:payload_key] || :key
         action = meta[:payload_action] || :upsert
-        fn key, row -> ReactiveDag.Node.Payload.upsert(resource, key_attr, key, row, action) == :changed end
+
+        case meta[:identity_fields] do
+          fields when is_list(fields) ->
+            fn _key, row ->
+              ReactiveDag.Node.Payload.upsert_identity(resource, fields, row, action) == :changed
+            end
+
+          _ ->
+            key_attr = meta[:payload_key] || :key
+
+            fn key, row ->
+              ReactiveDag.Node.Payload.upsert(resource, key_attr, key, row, action) == :changed
+            end
+        end
     end
   end
 

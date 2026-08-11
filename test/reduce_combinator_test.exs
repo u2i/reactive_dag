@@ -45,7 +45,6 @@ defmodule ReactiveDag.ReduceCombinatorTest do
       id(:lines)
       op(:source)
       leaf?(true)
-      payload_key(:k)
     end
   end
 
