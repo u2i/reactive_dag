@@ -9,7 +9,7 @@ defmodule ReactiveDag.Node.Verifiers.VerifyReactive do
   use Spark.Dsl.Verifier
 
   alias ReactiveDag.Node.Recompute.Declarative
-  alias ReactiveDag.Node.{Compose, Compute, Context, Join, RecomputeBy, Reduce, Ref, Run}
+  alias ReactiveDag.Node.{Compose, Compute, Context, Join, PerKey, RecomputeBy, Reduce, Ref, Run}
   alias Spark.Dsl.Verifier
 
   @impl true
@@ -27,7 +27,8 @@ defmodule ReactiveDag.Node.Verifiers.VerifyReactive do
       Enum.filter(
         entities,
         &(match?(%Reduce{}, &1) or match?(%Join{}, &1) or match?(%Compute{}, &1) or
-            match?(%Run{}, &1) or match?(%ReactiveDag.Node.Aggregate{}, &1))
+            match?(%Run{}, &1) or match?(%PerKey{}, &1) or
+            match?(%ReactiveDag.Node.Aggregate{}, &1))
       )
 
     with :ok <- one_computation(dsl, computations),
@@ -84,34 +85,21 @@ defmodule ReactiveDag.Node.Verifiers.VerifyReactive do
   end
 
 
-  defp verify_entity(dsl, %Run{action: action}) do
-    case Ash.Resource.Info.action(dsl, action) do
-      %{type: :action} ->
-        :ok
+  defp verify_entity(dsl, %Run{action: action}),
+    do: verify_generic_action(dsl, action, "run")
 
-      %{type: other} ->
-        error(
-          dsl,
-          "`run #{inspect(action)}` names a #{inspect(other)} action — it must be a GENERIC " <>
-            "action (`action #{inspect(action)}, {:array, :string} do run … end`) returning " <>
-            "the changed keys"
-        )
-
-      nil ->
-        generic = for %{type: :action, name: n} <- Ash.Resource.Info.actions(dsl), do: n
-
-        error(
-          dsl,
-          "`run #{inspect(action)}` names an action this resource doesn't have. " <>
-            "Generic actions declared: #{inspect(generic)}"
-        )
+  # a `per_key` node's action must exist, be GENERIC, and its result must land
+  # somewhere — the same shape of check `run` gets, since both name an action.
+  defp verify_entity(dsl, %PerKey{} = pk) do
+    with :ok <- verify_generic_action(dsl, pk.action, "per_key"),
+         :ok <- verify_per_key_dests(dsl, pk) do
+      verify_fingerprint_home(dsl, pk)
     end
   end
 
   # `aggregate` speaks the SAME fold vocabulary as `reduce into:`, so its dest
   # attributes get the same check: every column the row would carry must exist
-  # on this resource. (The aggregate's groups are its own rows, so there are no
-  # group columns to add — the identity is already the row's.)
+  # on this resource.
   defp verify_entity(dsl, %ReactiveDag.Node.Aggregate{} = a) do
     folds =
       for kind <- Declarative.fold_kinds(),
@@ -119,21 +107,86 @@ defmodule ReactiveDag.Node.Verifiers.VerifyReactive do
           not is_nil(spec),
           do: {kind, spec}
 
-    cond do
-      folds == [] ->
-        error(
-          dsl,
-          "an `aggregate` declares no aggregates — give it at least one of " <>
-            "#{inspect(Declarative.fold_kinds())} (e.g. `count: :n`, " <>
-            "`avg: [flow: :avg_flow]`)"
-        )
-
-      true ->
-        verify_agg_dests(dsl, fold_dests(folds))
+    if folds == [] do
+      error(
+        dsl,
+        "an `aggregate` declares no aggregates — give it at least one of " <>
+          "#{inspect(Declarative.fold_kinds())} (e.g. `count: :n`, `avg: [flow: :avg_flow]`)"
+      )
+    else
+      verify_agg_dests(dsl, fold_dests(folds))
     end
   end
 
   defp verify_entity(_dsl, _other), do: :ok
+
+  defp verify_generic_action(dsl, action, label) do
+    case Ash.Resource.Info.action(dsl, action) do
+      %{type: :action} ->
+        :ok
+
+      %{type: other} ->
+        error(
+          dsl,
+          "`#{label} #{inspect(action)}` names a #{inspect(other)} action — it must be a " <>
+            "GENERIC action — `run` returns the changed keys " <>
+            "(`action …, {:array, :string}`), `per_key` returns one row's result " <>
+            "(`action …, :map`)"
+        )
+
+      nil ->
+        generic = for %{type: :action, name: n} <- Ash.Resource.Info.actions(dsl), do: n
+
+        error(
+          dsl,
+          "`#{label} #{inspect(action)}` names an action this resource doesn't have. " <>
+            "Generic actions declared: #{inspect(generic)}"
+        )
+    end
+  end
+
+  # every `into:` destination must be a real attribute — the payload loop writes
+  # the row into this node's own columns.
+  defp verify_per_key_dests(_dsl, %PerKey{into: nil}), do: :ok
+  defp verify_per_key_dests(_dsl, %PerKey{into: []}), do: :ok
+
+  defp verify_per_key_dests(dsl, %PerKey{into: into}) do
+    attrs = dsl |> Ash.Resource.Info.attributes() |> Enum.map(& &1.name) |> MapSet.new()
+
+    case Keyword.keys(into) |> Enum.reject(&MapSet.member?(attrs, &1)) do
+      [] ->
+        :ok
+
+      missing ->
+        error(
+          dsl,
+          "`per_key … into:` would write #{inspect(missing)}, but this resource has no " <>
+            "such attribute(s). Declared: #{inspect(MapSet.to_list(attrs))}"
+        )
+    end
+  end
+
+  # a fingerprint needs somewhere to live, or the skip can never fire — a
+  # silently-never-skipping node is exactly the expensive mistake the rung exists
+  # to prevent, so it is a compile error rather than a runtime surprise.
+  defp verify_fingerprint_home(_dsl, %PerKey{fingerprint: nil}), do: :ok
+  defp verify_fingerprint_home(_dsl, %PerKey{fingerprint: []}), do: :ok
+
+  defp verify_fingerprint_home(dsl, %PerKey{} = pk) do
+    attr = pk.fingerprint_attribute || :fingerprint
+
+    if Ash.Resource.Info.attribute(dsl, attr) do
+      :ok
+    else
+      error(
+        dsl,
+        "`per_key … fingerprint:` needs somewhere to store the hash, but this resource " <>
+          "has no #{inspect(attr)} attribute — without it the skip could never fire. " <>
+          "Add `attribute #{inspect(attr)}, :string`, or name another with " <>
+          "`fingerprint_attribute`."
+      )
+    end
+  end
 
   defp verify_agg_dests(dsl, dests) do
     payload_attrs =

@@ -101,6 +101,18 @@ defmodule ReactiveDag.Node.Recompute do
     {:ok, materialize(cell, left_pairs ++ right_only_pairs, j.upsert, scope(keys))}
   end
 
+  # a PER-KEY map — for each claimed input row, call a generic action with that
+  # row and write its structured output here. The library drives the loop, which
+  # is what lets it FINGERPRINT the inputs and skip the call when nothing the
+  # result depends on has moved (a `run` action is opaque, so nothing outside it
+  # could). Reports `%{called:, skipped:}` so the saving is visible.
+  def recompute(%Cell{meta: %{per_key: %{} = spec}} = cell, keys) do
+    {changed, meta} =
+      ReactiveDag.Node.Recompute.PerKey.recompute(cell, spec, scope(keys))
+
+    {:ok, changed, meta}
+  end
+
   # a PURE-ASH-QUERY aggregate — the datastore groups + aggregates the `over`
   # relationship. The node's resource (`meta.resource`) is the group's resource: read it
   # with the relationship aggregates loaded (ONE Ash query; Postgres does the
