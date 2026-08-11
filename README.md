@@ -115,13 +115,6 @@ changed keys:
   Ash (`fn q, dirty -> … end`); fn `group_by`/`key`/`into` for computed shapes;
   `expand:` for the group → many-rows shape (self-`:key`ed rows); a verdict
   node declares `status:` instead of `into:`.
-- **`join left_rel:/right_rel:`** — a relationship per SIDE: each carries its
-  resource, join key (`destination_attribute`) and predicate (the
-  relationship's own `filter`). The sides may be **different nodes** — each
-  read and scoped independently, each its own input edge — so two nodes can be
-  reconciled; the discriminator split becomes two filtered relationships over
-  one node. Example: `join left_rel: :budget_lines, right_rel: :actual_lines,
-  into: [left: [amount: :budget], right: [amount: :actual]]`.
 - **`join`** — a left join over ONE input, declared: sides are attributes
   (`left: :declared_id`) or `[key: :acct, where: [kind: "budget"]]`
   discriminator splits; `into:` picks columns per side, absent sides yielding

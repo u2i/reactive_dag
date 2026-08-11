@@ -56,7 +56,6 @@ defmodule ReactiveDag.Node do
   |---|---|---|---|
   | group + `avg`/`sum`/`count` a relationship | `aggregate` | **none** (datastore GROUP BY) | attribute atoms |
   | fold rows across a declared RELATIONSHIP | `reduce over_rel:` | the scoped slice | the relationship name + an `into:` fold |
-  | reconcile TWO nodes (or one, split) by relationship | `join left_rel:/right_rel:` | each side's scoped slice | a relationship per side + `into:` picks |
   | fold one input's rows into per-group summaries | `reduce` | the scoped slice of `over` | `group_by:` attrs + an `into:` fold |
   | reconcile one input's two sides by key | `join` | the scoped slice of `over` | side attrs/`[key:, where:]` + picks |
   | a slot the attributes can't express | the slot's escape | same | `query:` (shape the Ash read), fn group/key/into, `expand:`, `status:` |
@@ -406,8 +405,6 @@ defmodule ReactiveDag.Node do
       :query,
       :left,
       :right,
-      :left_rel,
-      :right_rel,
       :key,
       :key_prefix,
       :key_rule,
@@ -424,37 +421,14 @@ defmodule ReactiveDag.Node do
     name: :join,
     target: Join,
     describe:
-      "Declarative join: emit a row per left key (per EITHER side's key with " <>
-        "`outer: true`). Ash-first: name a RELATIONSHIP per side " <>
-        "(`left_rel:`/`right_rel:` — each carries its resource, join key and filter, " <>
-        "and the sides may be different nodes); or index one `over:` into two sides " <>
-        "with `left:`/`right:`. Pick the row's columns in `into:`.",
+      "Declarative join: index `over` into left/right sides, emit a row per left key (per EITHER side's key with `outer: true`). " <>
+        "Ash-first: omit `read:`, name each side's attribute (or `[key:, where:]` for a " <>
+        "discriminator split), and pick the row's columns in `into:`.",
     schema: [
       over: [
         type: :atom,
-        required: false,
-        doc:
-          "the input node id whose payload is read + indexed into BOTH sides (the " <>
-            "self-join shape: `left:`/`right:` split it by a discriminator). Omit it " <>
-            "when the sides name relationships (`left_rel:`/`right_rel:`), which carry " <>
-            "their own resources."
-      ],
-      left_rel: [
-        type: :atom,
-        required: false,
-        doc:
-          "the ASH-NATIVE left side: a `has_many` on THIS resource. It supplies the side's " <>
-            "input node (its destination), its join key (`destination_attribute`, matched " <>
-            "against this node's `source_attribute`) and its membership predicate (the " <>
-            "relationship's own `filter` — where Ash already puts `where:`). The two " <>
-            "sides may name DIFFERENT nodes (a real two-relation join, each side read " <>
-            "and claimed independently) or the same node (the discriminator split, as " <>
-            "two filtered relationships). Declared with `right_rel:`, never with `over:`."
-      ],
-      right_rel: [
-        type: :atom,
-        required: false,
-        doc: "the ASH-NATIVE right side — same shape as `left_rel:`."
+        required: true,
+        doc: "the input node id whose payload is read + indexed"
       ],
       read: [
         type: :atom,
@@ -472,17 +446,16 @@ defmodule ReactiveDag.Node do
       ],
       left: [
         type: {:or, [{:fun, 1}, :atom, :keyword_list]},
-        required: false,
+        required: true,
         doc:
-          "the LEFT side, as a projection of `over:`: an attribute (`:declared_id` — nil " <>
-            "value = not on this side), `[key: :acct, where: [kind: :budget]]` (on this " <>
-            "side iff every `where` pair matches; join key = the `key:` attribute), or " <>
-            "the fn escape hatch `(item -> join_key | nil)`. Required with `over:`; " <>
-            "supplied by `left_rel:` otherwise."
+          "the LEFT side: an attribute (`:declared_id` — nil value = not on this side), " <>
+            "`[key: :acct, where: [kind: :budget]]` (on this side iff every `where` pair " <>
+            "matches; join key = the `key:` attribute), or the fn escape hatch " <>
+            "`(item -> join_key | nil)`."
       ],
       right: [
         type: {:or, [{:fun, 1}, :atom, :keyword_list]},
-        required: false,
+        required: true,
         doc: "the RIGHT side — same shapes as `left`."
       ],
       key: [
@@ -970,90 +943,65 @@ defmodule ReactiveDag.Node do
   end
 
   defp resolve_read_cell(cell, by_id) do
-    case cell.meta[:reduce] || cell.meta[:join] do
-      # a TWO-RELATION join: each side names its own node, so each gets its own
-      # source (resource, payload key, loads) and is read + scoped separately.
-      %Join{left_rel: l, right_rel: r} = spec when not is_nil(l) or not is_nil(r) ->
-        sides =
-          %{
-            left: side_source!(cell, spec, spec.left_rel, by_id),
-            right: side_source!(cell, spec, spec.right_rel, by_id)
-          }
+    spec = cell.meta[:reduce] || cell.meta[:join]
 
-        # the left side doubles as `over_source` so single-source paths
-        # (`group_key_plan` consumers, key rules) keep working unchanged.
-        meta =
-          cell.meta
-          |> Map.put(:side_sources, sides)
-          |> Map.put(:over_source, sides.left || sides.right)
+    case spec do
+      %{read: read} ->
+        over_id = to_string(spec.over)
+        over = by_id[over_id]
+        resource = over && over.meta[:resource]
 
-        %{cell | meta: meta}
+        cond do
+          is_nil(resource) ->
+            raise ArgumentError,
+                  "reactive_dag: #{cell.id} reads over #{inspect(spec.over)}, " <>
+                    "but that cell has no backing resource to read" <>
+                    if(is_nil(over), do: " (no such cell in this graph)", else: "") <>
+                    " — a combinator read is an Ash read of the over node's resource. " <>
+                    "Point `over:` at a resource-backed node, or use `run`/`compute` " <>
+                    "for a non-Ash read."
 
-      %{read: read} = spec ->
-        source = over_source!(cell, spec, spec.over, read, by_id)
+          over.meta[:verdict] ->
+            raise ArgumentError,
+                  "reactive_dag: #{cell.id} reads over #{inspect(spec.over)}, a VERDICT " <>
+                    "node — its result lives in the coordination tuple, not a payload " <>
+                    "table, so there are no rows to read. Point `over:` at a payload " <>
+                    "node, or use `run`/`compute` to read the tuple."
+
+          Ash.Resource.Info.attributes(resource) == [] ->
+            raise ArgumentError,
+                  "reactive_dag: #{cell.id} reads over #{inspect(spec.over)}, whose " <>
+                    "resource #{inspect(resource)} declares no attributes — nothing to " <>
+                    "read. Give the over node payload attributes, or use `run`/`compute`."
+
+          true ->
+            :ok
+        end
+
+        if read && is_nil(read_action(resource, read)) do
+          raise ArgumentError,
+                "reactive_dag: #{cell.id} names read action #{inspect(read)} on " <>
+                  "#{inspect(resource)}, which has no such :read action. " <>
+                  "Available: #{inspect(read_action_names(resource))}"
+        end
+
+        loads = declarative_loads!(cell, spec, resource)
+
+        source = %{
+          resource: resource,
+          # nil for an IDENTITY-KEYED over (composite PK): its cell keys are
+          # serialized identities, not a column — key scoping then stands down.
+          payload_key: over.meta[:payload_key],
+          read_action: read,
+          load: loads,
+          group_key_plan: group_key_plan(spec, resource)
+        }
+
         %{cell | meta: Map.put(cell.meta, :over_source, source)}
 
       _ ->
         cell
     end
-  end
-
-  defp side_source!(_cell, _spec, nil, _by_id), do: nil
-
-  defp side_source!(cell, spec, rel_name, by_id) do
-    over_id = relationship!(cell.meta[:resource], rel_name).__over_id__
-    over_source!(cell, spec, over_id, spec.read, by_id)
-  end
-
-  # the cross-node facts one input node contributes to a combinator's read.
-  defp over_source!(cell, spec, over_ref, read, by_id) do
-    over_id = to_string(over_ref)
-    over = by_id[over_id]
-    resource = over && over.meta[:resource]
-
-    cond do
-      is_nil(resource) ->
-        raise ArgumentError,
-              "reactive_dag: #{cell.id} reads over #{inspect(over_ref)}, " <>
-                "but that cell has no backing resource to read" <>
-                if(is_nil(over), do: " (no such cell in this graph)", else: "") <>
-                " — a combinator read is an Ash read of the over node's resource. " <>
-                "Point `over:` at a resource-backed node, or use `run`/`compute` " <>
-                "for a non-Ash read."
-
-      over.meta[:verdict] ->
-        raise ArgumentError,
-              "reactive_dag: #{cell.id} reads over #{inspect(over_ref)}, a VERDICT " <>
-                "node — its result lives in the coordination tuple, not a payload " <>
-                "table, so there are no rows to read. Point `over:` at a payload " <>
-                "node, or use `run`/`compute` to read the tuple."
-
-      Ash.Resource.Info.attributes(resource) == [] ->
-        raise ArgumentError,
-              "reactive_dag: #{cell.id} reads over #{inspect(over_ref)}, whose " <>
-                "resource #{inspect(resource)} declares no attributes — nothing to " <>
-                "read. Give the over node payload attributes, or use `run`/`compute`."
-
-      true ->
-        :ok
-    end
-
-    if read && is_nil(read_action(resource, read)) do
-      raise ArgumentError,
-            "reactive_dag: #{cell.id} names read action #{inspect(read)} on " <>
-              "#{inspect(resource)}, which has no such :read action. " <>
-              "Available: #{inspect(read_action_names(resource))}"
-    end
-
-    %{
-      resource: resource,
-      # nil for an IDENTITY-KEYED over (composite PK): its cell keys are
-      # serialized identities, not a column — key scoping then stands down.
-      payload_key: over.meta[:payload_key],
-      read_action: read,
-      load: declarative_loads!(cell, spec, resource),
-      group_key_plan: group_key_plan(spec, resource)
-    }
   end
 
   # the ONE cross-node fact behind every `:group` capability — an ordered plan
@@ -1107,12 +1055,6 @@ defmodule ReactiveDag.Node do
       case spec do
         %Reduce{group_by: g} when is_atom(g) or is_list(g) ->
           ReactiveDag.Node.Recompute.Declarative.group_children(g)
-
-        # a two-relation join's sides live on DIFFERENT resources, so each is
-        # checked against its own (see side_source!/4, which passes one side);
-        # only the single-`over:` join checks both against the one resource.
-        %Join{left_rel: l, right_rel: r} when not is_nil(l) or not is_nil(r) ->
-          []
 
         %Join{} = j ->
           side_attrs(j.left) ++ side_attrs(j.right)
@@ -1450,22 +1392,10 @@ defmodule ReactiveDag.Node do
 
     # a `reduce`/`join over: :x` implies an input edge to :x (the node it reads);
     # so does `attested over: :x` (the raw cell the view attests).
-    # a two-relation join has TWO input edges (one per side); everything else
-    # reads a single node.
     combinator_refs =
       case combinator(resource) do
-        nil ->
-          []
-
-        %Join{left_rel: l, right_rel: r} when not is_nil(l) or not is_nil(r) ->
-          [l, r]
-          |> Enum.reject(&is_nil/1)
-          |> Enum.map(&relationship!(resource, &1).__over_id__)
-          |> Enum.uniq()
-          |> Enum.map(&%Ref{to: &1})
-
-        c ->
-          [%Ref{to: over_id!(c, resource)}]
+        nil -> []
+        c -> [%Ref{to: over_id!(c, resource)}]
       end
 
     attested_refs =
@@ -1615,95 +1545,6 @@ defmodule ReactiveDag.Node do
     }
   end
 
-  # SUGAR → CORE for the JOIN: each `left_rel:`/`right_rel:` resolves to the
-  # side's over id, its join key (the relationship's `destination_attribute`)
-  # and its membership predicate (the relationship's own `filter` — Ash's home
-  # for what `where:` used to say). The two sides may name different nodes, so
-  # the resolved sides are stamped as `side_source` and each is read + scoped
-  # independently at recompute.
-  defp lower_side_rels(%Join{left_rel: nil, right_rel: nil} = j, _resource), do: j
-
-  defp lower_side_rels(%Join{left_rel: l, right_rel: r} = j, resource) do
-    %{j | left: j.left || side_spec(resource, l), right: j.right || side_spec(resource, r)}
-  end
-
-  # a relationship → the declarative side spec the existing `side_fn/1`
-  # already understands: `[key: <destination_attribute>, where: [...]]`.
-  defp side_spec(_resource, nil), do: nil
-
-  defp side_spec(resource, name) do
-    rel = relationship!(resource, name)
-
-    if is_nil(rel.destination_attribute) do
-      raise ArgumentError,
-            "reactive_dag: join side `#{inspect(name)}` on #{inspect(resource)} declares no " <>
-              "`destination_attribute` — the side needs a join key. Give the " <>
-              "relationship one, or spell the side directly with `left:`/`right:`."
-    end
-
-    [key: rel.destination_attribute, where: relationship_where!(resource, name, rel)]
-  end
-
-  # the relationship's `filter` as the simple equality pairs the side matcher
-  # supports. Ash filters are full expressions; we accept the `expr(a == b)`
-  # shape (and `and`-chains of it) — the discriminator case — and say so
-  # plainly when a filter is richer than the in-BEAM side matcher can honour.
-  defp relationship_where!(resource, name, rel) do
-    case Map.get(rel, :filter) do
-      nil ->
-        []
-
-      filter ->
-        case equality_pairs(filter) do
-          {:ok, pairs} ->
-            pairs
-
-          :error ->
-            raise ArgumentError,
-                  "reactive_dag: join side `#{inspect(name)}` on #{inspect(resource)} has a " <>
-                    "relationship `filter` this side matcher can't evaluate in the BEAM " <>
-                    "(#{inspect(filter)}) — it supports `expr(attr == value)` and `and` " <>
-                    "chains of it. Narrow the filter, or spell the side directly with " <>
-                    "`left: [key: …, where: […]]`."
-        end
-    end
-  end
-
-  # Ash stores a relationship filter as a parsed expression tree
-  # (`%Ash.Query.Call{name: :==, args: [%Ash.Query.Ref{attribute: :kind}, v]}`),
-  # not raw AST — walk that.
-  defp equality_pairs(%Ash.Query.Call{name: :and, args: [l, r]}) do
-    with {:ok, lp} <- equality_pairs(l), {:ok, rp} <- equality_pairs(r), do: {:ok, lp ++ rp}
-  end
-
-  defp equality_pairs(%Ash.Query.Call{name: :==, args: args}), do: equality_arg_pair(args)
-
-  defp equality_pairs(%Ash.Query.BooleanExpression{op: :and, left: l, right: r}) do
-    with {:ok, lp} <- equality_pairs(l), {:ok, rp} <- equality_pairs(r), do: {:ok, lp ++ rp}
-  end
-
-  defp equality_pairs(%{__struct__: Ash.Query.Operator.Eq, left: l, right: r}),
-    do: equality_arg_pair([l, r])
-
-  defp equality_pairs(_other), do: :error
-
-  defp equality_arg_pair([%Ash.Query.Ref{attribute: attr}, value]), do: ref_pair(attr, value)
-  defp equality_arg_pair([value, %Ash.Query.Ref{attribute: attr}]), do: ref_pair(attr, value)
-  defp equality_arg_pair(_other), do: :error
-
-  # the ref may carry the attribute struct itself rather than its name; a
-  # non-literal other side (another ref, a template) is not a value we can
-  # compare in the BEAM.
-  defp ref_pair(attr, value) do
-    name = if is_atom(attr), do: attr, else: Map.get(attr, :name)
-
-    cond do
-      is_nil(name) -> :error
-      is_struct(value) -> :error
-      true -> {:ok, [{name, value}]}
-    end
-  end
-
   defp normalize_dep(id, _resource) when is_atom(id), do: %Ref{to: id}
 
   defp normalize_dep({id, opts}, _resource) when is_atom(id) and is_list(opts),
@@ -1811,7 +1652,7 @@ defmodule ReactiveDag.Node do
     combinator_meta =
       case combinator(resource) do
         %Reduce{} = r -> %{reduce: lower_over_rel(r, resource)}
-        %Join{} = j -> %{join: lower_side_rels(j, resource)}
+        %Join{} = j -> %{join: j}
         nil -> %{}
       end
 
