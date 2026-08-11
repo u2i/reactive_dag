@@ -53,5 +53,10 @@ defmodule ReactiveDag.Node.Recompute.Read do
   defp apply_query(query, fun, claimed) when is_function(fun, 2), do: fun.(query, claimed)
 
   defp scope_query(query, _pk, nil), do: query
-  defp scope_query(query, pk, keys), do: Ash.Query.do_filter(query, [{pk, [in: keys]}])
+
+  defp scope_query(query, pk, {:keys, keys}),
+    do: Ash.Query.do_filter(query, [{pk, [in: keys]}])
+
+  defp scope_query(query, _pk, {:range, attr, from, to}),
+    do: Ash.Query.do_filter(query, [{attr, [greater_than_or_equal: from, less_than: to]}])
 end

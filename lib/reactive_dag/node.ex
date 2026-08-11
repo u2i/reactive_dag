@@ -699,9 +699,19 @@ defmodule ReactiveDag.Node do
           "OPTIONAL free-atom label. Recompute dispatches on the `reduce`/`join`/`aggregate`/`compute` entity + `meta` shape, NOT on `op` — so `op` is documentation here, load-bearing only for a `RecomputeStrategy` that dispatches on it (e.g. `ReactiveDag.SetOp`). See `ReactiveDag.Cell`."
       ],
       key_rule: [
-        type: {:one_of, [:identity, :all]},
+        type:
+          {:or,
+           [
+             {:one_of, [:identity, :all]},
+             {:custom, ReactiveDag.Node, :validate_bucket_rule, []}
+           ]},
         default: :identity,
-        doc: "how a child key maps to this cell's key on propagation"
+        doc:
+          "how a child key maps to this cell's key on propagation: `:identity` (same " <>
+            "key), `:all` (whole-cell), or `{:bucket, kind}` — the CALENDAR ladder: a " <>
+            "changed child key claims its `kind` bucket by pure string work (the key's " <>
+            "leading segment parses as a date or finer bucket label; " <>
+            "`ReactiveDag.Calendar.bucket_of_key/2`). Unparseable keys degrade to `:all`."
       ],
       leaf?: [type: :boolean, default: false, doc: "true for a source-fed leaf (no compute)"],
       payload_key: [
@@ -791,6 +801,21 @@ defmodule ReactiveDag.Node do
   # ── introspection + graph assembly ────────────────────────────────────────
 
   alias Spark.Dsl.Extension, as: Ext
+
+  @doc false
+  # the DSL schema's custom validator for `key_rule {:bucket, kind}`.
+  def validate_bucket_rule({:bucket, kind}) do
+    if kind in ReactiveDag.Calendar.buckets() do
+      {:ok, {:bucket, kind}}
+    else
+      {:error,
+       "key_rule {:bucket, kind} takes one of #{inspect(ReactiveDag.Calendar.buckets())}, " <>
+         "got #{inspect(kind)}"}
+    end
+  end
+
+  def validate_bucket_rule(other),
+    do: {:error, "key_rule must be :identity, :all, or {:bucket, kind} — got #{inspect(other)}"}
 
   @doc "The cell id for a node resource (explicit `id`, else the module's snake short-name)."
   @spec cell_id(module()) :: atom()
@@ -886,13 +911,27 @@ defmodule ReactiveDag.Node do
           resource: resource,
           payload_key: over.meta[:payload_key] || :key,
           read_action: read,
-          load: loads
+          load: loads,
+          bucket_scopes: bucket_scopes(resource, loads)
         }
 
         %{cell | meta: Map.put(cell.meta, :over_source, source)}
 
       _ ->
         cell
+    end
+  end
+
+  # which of the loaded calculations are ReactiveDag.Calendar buckets, as
+  # %{bucket_kind => date_attribute} — what lets a `{:bucket, kind}` key rule's
+  # claims scope the read to the claimed buckets' date range automatically.
+  defp bucket_scopes(resource, calc_names) do
+    for name <- calc_names,
+        calc = Ash.Resource.Info.calculation(resource, name),
+        match?({ReactiveDag.Calendar, _}, calc.calculation),
+        {ReactiveDag.Calendar, opts} = calc.calculation,
+        into: %{} do
+      {opts[:bucket], opts[:of]}
     end
   end
 

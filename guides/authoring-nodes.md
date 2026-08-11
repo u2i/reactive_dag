@@ -116,14 +116,19 @@ chronologically. A Postgres host wanting pushdown declares an
 `expr(fragment("to_char(?, 'YYYY-MM')", date))` calculation instead — the
 rollup neither knows nor cares.
 
-Because a month's grain differs from a reading's, the rollup is `key_rule
-:all` — whole-cell recompute, with the payload loop's change detection keeping
-*propagation* per-month. A host that wants per-bucket **claims** brings a
-custom `ReactiveDag.KeyRule` mapping changed reading keys to their month keys
-(consulting the same calculation); the library's payload-key auto-scope stands
-down for grain-changing rules, and `query:` still receives the claimed month
-keys for host-grain scoping. `test/date_rollup_demo_test.exs` is the worked
-demo: touch one reading, watch exactly one month recompute and propagate.
+And the mid-granularity claims come declaratively too — `key_rule
+{:bucket, :month}`: each changed reading key claims its **month** by pure
+string work off the key's leading date segment (give time-series leaves
+date-prefixed keys — `"2026-08-11|r4"` — so the rule needs no data lookup and
+a *deleted* reading still names the month it left; an unparseable key degrades
+to `:all`). Because the group calculation is a Calendar bucket of the same
+kind, the library also scopes the read to the claimed months' date range
+automatically. The general soundness rule: a scoped read must be **closed over
+group boundaries** — `:identity` is entry-closure, `{:bucket, kind}` is
+bucket-closure, `:all` is the universe. Chained rollups (`readings → daily →
+monthly`) make every step a pure relabel of the child's key.
+`test/date_rollup_demo_test.exs` is the worked demo: touch one reading, watch
+exactly one month recompute and propagate.
 
 ### `join` — a left join (one input, two sides), declared
 

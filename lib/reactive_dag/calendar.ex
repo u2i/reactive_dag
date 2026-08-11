@@ -70,5 +70,92 @@ defmodule ReactiveDag.Calendar do
     "#{y}-W#{pad2(w)}"
   end
 
+  @doc """
+  Parse a bucket LABEL back to `{kind, first_date}` — the pure inverse of
+  `label/2` (`"2026-08"` → `{:month, ~D[2026-08-01]}`). `:error` for anything
+  that isn't a bucket label. This is what makes bucket keys self-describing:
+  a key rule can relabel a child's key without consulting any data.
+  """
+  @spec parse(String.t()) :: {atom(), Date.t()} | :error
+  def parse(label) when is_binary(label) do
+    cond do
+      match?({:ok, _}, Date.from_iso8601(label)) ->
+        {:ok, d} = Date.from_iso8601(label)
+        {:day, d}
+
+      Regex.match?(~r/\A\d{4}-\d{2}\z/, label) ->
+        [y, m] = label |> String.split("-") |> Enum.map(&String.to_integer/1)
+
+        case Date.new(y, m, 1) do
+          {:ok, d} -> {:month, d}
+          _ -> :error
+        end
+
+      Regex.match?(~r/\A\d{4}-Q[1-4]\z/, label) ->
+        {y, q} = {String.to_integer(binary_part(label, 0, 4)), String.to_integer(binary_part(label, 6, 1))}
+        {:quarter, Date.new!(y, (q - 1) * 3 + 1, 1)}
+
+      Regex.match?(~r/\A\d{4}-W\d{2}\z/, label) ->
+        y = String.to_integer(binary_part(label, 0, 4))
+        w = String.to_integer(binary_part(label, 6, 2))
+        {:week, iso_week_first(y, w)}
+
+      Regex.match?(~r/\A\d{4}\z/, label) ->
+        {:year, Date.new!(String.to_integer(label), 1, 1)}
+
+      true ->
+        :error
+    end
+  end
+
+  def parse(_), do: :error
+
+  @doc """
+  The half-open date range a bucket label covers: `{first, next_first}` —
+  `range(:month, "2026-08")` → `{~D[2026-08-01], ~D[2026-09-01]}`. `:error`
+  when the label isn't a `kind` label. What a host (or the library's automatic
+  bucket scoping) filters the date attribute by.
+  """
+  @spec range(atom(), String.t()) :: {Date.t(), Date.t()} | :error
+  def range(kind, label) do
+    case parse(label) do
+      {^kind, first} -> {first, next(kind, first)}
+      _ -> :error
+    end
+  end
+
+  @doc """
+  The `kind` bucket a child KEY belongs to, by PURE string work: the key's
+  leading `|`-segment is parsed as a date or a finer bucket label, and
+  relabeled — `bucket_of_key(:month, "2026-08-11|r4")` → `"2026-08"`;
+  `bucket_of_key(:month, "2026-08-11")` → `"2026-08"`. `:error` when the
+  leading segment isn't date-shaped (the key rule then degrades to `:all`).
+
+  Deletion-safe: a vanished entry's key still parses to the bucket it left.
+  Nesting is "the bucket containing the child bucket's START date" — exact
+  for day→month/quarter/year and month→quarter/year; a `:week` child only
+  nests deterministically into `:year` (weeks straddle months).
+  """
+  @spec bucket_of_key(atom(), String.t()) :: String.t() | :error
+  def bucket_of_key(kind, key) when is_binary(key) do
+    case key |> String.split("|") |> hd() |> parse() do
+      {_child_kind, first} -> label(kind, first)
+      :error -> :error
+    end
+  end
+
+  defp next(:day, d), do: Date.add(d, 1)
+  defp next(:week, d), do: Date.add(d, 7)
+  defp next(:month, d), do: d |> Date.beginning_of_month() |> Date.shift(month: 1)
+  defp next(:quarter, d), do: d |> Date.beginning_of_month() |> Date.shift(month: 3)
+  defp next(:year, d), do: Date.new!(d.year + 1, 1, 1)
+
+  defp iso_week_first(year, week) do
+    # ISO 8601: week 1 contains Jan 4th; weeks start Monday.
+    jan4 = Date.new!(year, 1, 4)
+    week1_monday = Date.add(jan4, -(Date.day_of_week(jan4) - 1))
+    Date.add(week1_monday, (week - 1) * 7)
+  end
+
   defp pad2(n), do: String.pad_leading("#{n}", 2, "0")
 end

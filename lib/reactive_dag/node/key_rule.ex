@@ -19,5 +19,17 @@ defmodule ReactiveDag.Node.KeyRule do
 
   @impl true
   def rule(%Cell{meta: %{key_rule: :all}}, _child, _changed), do: :all
+
+  # `{:bucket, kind}` — the calendar ladder: each changed child key claims its
+  # bucket by PURE string work (the key's leading segment parses as a date or a
+  # finer bucket label; see ReactiveDag.Calendar.bucket_of_key/2). Deletion-safe
+  # (a vanished key still names the bucket it left); a key that doesn't parse
+  # degrades the whole propagation to :all — correctness over precision.
+  def rule(%Cell{meta: %{key_rule: {:bucket, kind}}}, _child, changed) do
+    labels = Enum.map(changed, &ReactiveDag.Calendar.bucket_of_key(kind, &1))
+
+    if :error in labels, do: :all, else: {:keys, Enum.uniq(labels)}
+  end
+
   def rule(_parent, _child, changed), do: {:keys, changed}
 end

@@ -95,9 +95,11 @@ defmodule ReactiveDag.DateRollupDemoTest do
     reactive do
       id(:monthly_readings)
       op(:fold)
-      # a month's grain differs from a reading's → whole-cell recompute; the
-      # payload loop's change detection keeps PROPAGATION per-month.
-      key_rule(:all)
+      # THE CALENDAR SUGAR: a changed reading key claims its MONTH — pure
+      # string work off the key's date prefix, no data lookup, deletion-safe.
+      # The library also auto-scopes the read to the claimed months' date
+      # range (the group calculation is a Calendar bucket of the same kind).
+      key_rule({:bucket, :month})
 
       reduce over: :readings,
              group_by: [:month],
@@ -173,11 +175,13 @@ defmodule ReactiveDag.DateRollupDemoTest do
       Application.put_env(:reactive_dag, :coordination_writer, prev_writer)
     end)
 
+    # date-PREFIXED keys — the key carries its coordinates, so the bucket rule
+    # is pure string work and a deleted reading still names the month it left.
     for {k, date, v} <- [
-          {"r1", ~D[2026-07-03], 1.0},
-          {"r2", ~D[2026-07-19], 2.0},
-          {"r3", ~D[2026-08-05], 4.0},
-          {"r4", ~D[2026-08-11], 8.0}
+          {"2026-07-03|r1", ~D[2026-07-03], 1.0},
+          {"2026-07-19|r2", ~D[2026-07-19], 2.0},
+          {"2026-08-05|r3", ~D[2026-08-05], 4.0},
+          {"2026-08-11|r4", ~D[2026-08-11], 8.0}
         ] do
       Readings |> Ash.Changeset.for_create(:create, %{key: k, date: date, value: v}) |> Ash.create!()
     end
@@ -185,33 +189,9 @@ defmodule ReactiveDag.DateRollupDemoTest do
     :ok
   end
 
-  # the issue's item 3: a HOST KeyRule mapping changed reading keys → their
-  # month keys keeps the rollup's claim per-bucket instead of whole-cell. The
-  # mapping consults the data (the same :month calculation); a changed key it
-  # can't resolve (a deleted reading) escalates to :all — vanish must reprice
-  # everything it might have left.
-  defmodule MonthRule do
-    @behaviour ReactiveDag.KeyRule
-
-    @impl true
-    def rule(%{id: "monthly_readings"}, _child, changed) do
-      found =
-        Readings
-        |> Ash.Query.do_filter([{:key, [in: changed]}])
-        |> Ash.Query.load(:month)
-        |> Ash.read!()
-
-      if length(found) == length(changed),
-        do: {:keys, found |> Enum.map(& &1.month) |> Enum.uniq()},
-        else: :all
-    end
-
-    def rule(parent, child, changed), do: ReactiveDag.Node.KeyRule.rule(parent, child, changed)
-  end
-
   defp plan, do: ReactiveDag.Node.graph([Readings, MonthlyReadings, MonthHealth])
   defp drain(plan),
-    do: Drain.run(plan, recompute: ReactiveDag.Node.Recompute, key_rule: MonthRule)
+    do: Drain.run(plan, recompute: ReactiveDag.Node.Recompute, key_rule: ReactiveDag.Node.KeyRule)
 
   test "the classic: readings roll up per month; touching one reading moves ONE month" do
     plan = plan()
@@ -226,19 +206,18 @@ defmodule ReactiveDag.DateRollupDemoTest do
 
     # ── revise ONE August reading, mark it dirty, drain again ────────────────
     Readings
-    |> Ash.get!("r4")
+    |> Ash.get!("2026-08-11|r4")
     |> Ash.Changeset.for_update(:revise, %{value: 10.0})
     |> Ash.update!()
 
-    Frontier.mark_dirty("readings", ["r4"], "revised")
+    Frontier.mark_dirty("readings", ["2026-08-11|r4"], "revised")
     {:ok, report} = drain(plan)
 
     steps = Map.new(report.steps, &{&1.cell, &1})
 
-    # the host MonthRule mapped the changed reading to ITS month — the rollup
-    # was claimed per-bucket, not whole-cell. (The library's payload-key
-    # auto-scope correctly stands down here: the claim is month-grain, the
-    # read is reading-grain — key_rule :all disables the identity filter.)
+    # `key_rule {:bucket, :month}` mapped the changed reading key to ITS month
+    # by pure string work — the rollup was claimed per-bucket, not whole-cell,
+    # and the library scoped the read to that month's date range.
     assert steps["monthly_readings"].claimed == ["2026-08"]
     assert steps["monthly_readings"].changed == ["2026-08"]
 
@@ -252,9 +231,36 @@ defmodule ReactiveDag.DateRollupDemoTest do
     assert rows["2026-08"].total == 14.0
   end
 
+  test "the granularity ladder is PURE relabeling — day keys claim their month" do
+    alias ReactiveDag.{Calendar, Cell}
+
+    # a daily cell's keys ARE day labels; its monthly parent relabels purely
+    monthly = %Cell{id: "monthly", meta: %{key_rule: {:bucket, :month}}}
+
+    assert ReactiveDag.Node.KeyRule.rule(monthly, "daily", ["2026-08-11", "2026-08-30"]) ==
+             {:keys, ["2026-08"]}
+
+    # a key whose leading segment isn't date-shaped degrades the whole
+    # propagation to :all — correctness over precision (e.g. a deleted entry
+    # whose key carries no coordinates)
+    assert ReactiveDag.Node.KeyRule.rule(monthly, "daily", ["2026-08-11", "oops"]) == :all
+
+    # the pure inverse trio behind it
+    assert Calendar.parse("2026-08") == {:month, ~D[2026-08-01]}
+    assert Calendar.parse("2026-Q3") == {:quarter, ~D[2026-07-01]}
+    assert Calendar.parse("not-a-label") == :error
+    assert Calendar.range(:month, "2026-08") == {~D[2026-08-01], ~D[2026-09-01]}
+    assert Calendar.range(:year, "2026") == {~D[2026-01-01], ~D[2027-01-01]}
+    assert Calendar.bucket_of_key(:month, "2026-08-11|r4") == "2026-08"
+    assert Calendar.bucket_of_key(:quarter, "2026-08") == "2026-Q3"
+    assert Calendar.bucket_of_key(:month, "r4") == :error
+  end
+
   test "bucket labels: the calculation is ordinary Ash, loaded by the library" do
     # read the calculation directly — nothing reactive_dag-specific about it
-    reading = Readings |> Ash.Query.load(:month) |> Ash.read!() |> Enum.find(&(&1.key == "r1"))
+    reading =
+      Readings |> Ash.Query.load(:month) |> Ash.read!() |> Enum.find(&(&1.key =~ "r1"))
+
     assert reading.month == "2026-07"
 
     # and the other bucket kinds
