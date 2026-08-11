@@ -275,8 +275,11 @@ defmodule ReactiveDag.Node do
         type: {:or, [{:fun, 1}, :atom, {:list, :atom}]},
         required: true,
         doc:
-          "an attribute (`:fund`), a list of attributes (`[:fund, :fy]` — the group term " <>
-            "is the TUPLE of their values), or the fn escape hatch `(item -> group_term)`"
+          "an attribute or CALCULATION on the over resource (`:fund`, or `:month` where " <>
+            "the over declares `calculate :month, :string, {ReactiveDag.Calendar, " <>
+            "bucket: :month, of: :date}` — derived grouping values are Ash calculations, " <>
+            "declared where the data lives; the library loads them). A list groups by " <>
+            "the TUPLE of values. The fn escape hatch: `(item -> group_term)`."
       ],
       key: [
         type: {:fun, 1},
@@ -877,12 +880,13 @@ defmodule ReactiveDag.Node do
                   "Available: #{inspect(read_action_names(resource))}"
         end
 
-        validate_declarative_attrs!(cell, spec, resource)
+        loads = declarative_loads!(cell, spec, resource)
 
         source = %{
           resource: resource,
           payload_key: over.meta[:payload_key] || :key,
-          read_action: read
+          read_action: read,
+          load: loads
         }
 
         %{cell | meta: Map.put(cell.meta, :over_source, source)}
@@ -903,11 +907,13 @@ defmodule ReactiveDag.Node do
     for %{type: :read, name: n} <- Ash.Resource.Info.actions(resource), do: n
   end
 
-  # declarative group_by / left / right attributes must exist on the over
-  # resource — checkable only here (with a read: fn, items are host-shaped and
-  # uncheckable; that path never reaches this).
-  defp validate_declarative_attrs!(cell, spec, resource) do
-    attrs =
+  # a declarative group_by / left / right entry names an ATTRIBUTE or a
+  # CALCULATION on the over resource (derived grouping values — a calendar
+  # bucket, a normalized code — are Ash calculations, declared where the data
+  # lives; see `ReactiveDag.Calendar`). Checkable only here, where the over
+  # resource is known. Returns the calculations to `Ash.Query.load` at read.
+  defp declarative_loads!(cell, spec, resource) do
+    names =
       case spec do
         %Reduce{group_by: g} when is_atom(g) -> [g]
         %Reduce{group_by: g} when is_list(g) -> g
@@ -915,14 +921,21 @@ defmodule ReactiveDag.Node do
         _ -> []
       end
 
-    for attr <- attrs, is_nil(Ash.Resource.Info.attribute(resource, attr)) do
-      raise ArgumentError,
-            "reactive_dag: #{cell.id} names attribute #{inspect(attr)}, which " <>
-              "#{inspect(resource)} does not have. Its attributes: " <>
-              "#{inspect(Enum.map(Ash.Resource.Info.attributes(resource), & &1.name))}"
-    end
-
-    :ok
+    Enum.reduce(names, [], fn name, loads ->
+      cond do
+        Ash.Resource.Info.attribute(resource, name) -> loads
+        Ash.Resource.Info.calculation(resource, name) -> [name | loads]
+        true ->
+          raise ArgumentError,
+                "reactive_dag: #{cell.id} names #{inspect(name)}, which " <>
+                  "#{inspect(resource)} has neither as an attribute nor a calculation. " <>
+                  "Attributes: " <>
+                  "#{inspect(Enum.map(Ash.Resource.Info.attributes(resource), & &1.name))}; " <>
+                  "calculations: " <>
+                  "#{inspect(Enum.map(Ash.Resource.Info.calculations(resource), & &1.name))}"
+      end
+    end)
+    |> Enum.uniq()
   end
 
   defp side_attrs(side) when is_atom(side) and not is_nil(side), do: [side]

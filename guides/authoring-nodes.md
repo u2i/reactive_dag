@@ -90,6 +90,41 @@ Two shapes have their own slots instead of `into:`:
 - **expand** — declare `expand:` (`(group, items -> [row])`, each row carrying
   its own `:key`, since one group fans out to many keys).
 
+#### The classic: date-bucketed rollups
+
+A `group_by:` entry may name a **calculation** as well as an attribute — so a
+derived grouping value (the classic being a calendar bucket) is declared where
+Ash puts derived values: on the resource that owns the data. The library loads
+it in the read; the bucket label becomes the group column *and* the derived
+cell key.
+
+```elixir
+# on the data's resource — usable by ANY Ash consumer, not just the DAG
+calculations do
+  calculate :month, :string, {ReactiveDag.Calendar, bucket: :month, of: :date}
+end
+
+# the rollup node: daily readings → monthly totals, keys like "2026-08"
+reduce over: :readings,
+       group_by: [:month],
+       into: [sum: [value: :total], count: :n]
+```
+
+`ReactiveDag.Calendar` ships `:day`/`:week`/`:month`/`:quarter`/`:year`
+buckets, computes in the BEAM (works on every data layer), and its labels sort
+chronologically. A Postgres host wanting pushdown declares an
+`expr(fragment("to_char(?, 'YYYY-MM')", date))` calculation instead — the
+rollup neither knows nor cares.
+
+Because a month's grain differs from a reading's, the rollup is `key_rule
+:all` — whole-cell recompute, with the payload loop's change detection keeping
+*propagation* per-month. A host that wants per-bucket **claims** brings a
+custom `ReactiveDag.KeyRule` mapping changed reading keys to their month keys
+(consulting the same calculation); the library's payload-key auto-scope stands
+down for grain-changing rules, and `query:` still receives the claimed month
+keys for host-grain scoping. `test/date_rollup_demo_test.exs` is the worked
+demo: touch one reading, watch exactly one month recompute and propagate.
+
 ### `join` — a left join (one input, two sides), declared
 
 ```elixir

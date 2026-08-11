@@ -55,7 +55,8 @@ defmodule ReactiveDag.MixProject do
         Authoring: [
           ReactiveDag.Node,
           ReactiveDag.Node.Payload,
-          ReactiveDag.Node.Recompute.Aggregate
+          ReactiveDag.Node.Recompute.Aggregate,
+          ReactiveDag.Calendar
         ],
         Attestation: [
           ReactiveDag.Attestation,

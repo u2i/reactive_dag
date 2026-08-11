@@ -16,12 +16,18 @@ defmodule ReactiveDag.Node.Recompute.Declarative do
   @spec fold_kinds() :: [atom()]
   def fold_kinds, do: @fold_kinds
 
-  @doc "group_by spec → `(item -> group_term)`. A list groups by the TUPLE of values."
+  @doc """
+  group_by spec → `(item -> group_term)`. A list groups by the TUPLE of entry
+  values. An entry names an attribute OR a CALCULATION on the over resource —
+  derived grouping values (a calendar bucket, a normalized code) are Ash
+  calculations, declared where the data lives; the library loads them in the
+  read (`ReactiveDag.Calendar` ships the calendar ones).
+  """
   def group_fn(fun) when is_function(fun, 1), do: fun
   def group_fn(attr) when is_atom(attr), do: fn item -> Map.get(item, attr) end
 
-  def group_fn(attrs) when is_list(attrs) do
-    fn item -> attrs |> Enum.map(&Map.get(item, &1)) |> List.to_tuple() end
+  def group_fn(entries) when is_list(entries) do
+    fn item -> entries |> Enum.map(&Map.get(item, &1)) |> List.to_tuple() end
   end
 
   @doc """
@@ -52,18 +58,20 @@ defmodule ReactiveDag.Node.Recompute.Declarative do
   def into_fn(fun, _group_by) when is_function(fun, 2), do: fun
 
   def into_fn(folds, group_by) when is_list(folds) do
-    group_attrs = List.wrap(group_by)
+    dests = List.wrap(group_by)
 
     fn group_term, items ->
-      group_attrs
-      |> Enum.zip(group_values(group_term, group_attrs))
+      dests
+      |> Enum.zip(group_values(group_term))
       |> Map.new()
       |> Map.merge(fold_row(folds, items))
     end
   end
 
-  defp group_values(term, [_single]), do: [term]
-  defp group_values(term, _attrs) when is_tuple(term), do: Tuple.to_list(term)
+  # a list-form group_by always yields a tuple (even single-entry); a bare-atom
+  # group_by yields the bare value.
+  defp group_values(term) when is_tuple(term), do: Tuple.to_list(term)
+  defp group_values(term), do: [term]
 
   defp fold_row(folds, items) do
     folds
