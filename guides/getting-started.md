@@ -17,7 +17,7 @@ running two-cell graph.
 defp deps do
   [
     # pin the latest tag — https://github.com/u2i/reactive_dag/tags
-    {:reactive_dag, git: "git@github.com:u2i/reactive_dag.git", tag: "v0.15.0"}
+    {:reactive_dag, git: "git@github.com:u2i/reactive_dag.git", tag: "v0.16.0"}
   ]
 end
 ```
