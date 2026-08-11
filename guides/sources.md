@@ -147,3 +147,41 @@ end
 Order sources so that ones which only observe the world run before any source
 that derives from other cells' results — a deriving source that runs first
 computes against a stale model.
+
+## `dirties_on` vs a `Source`: which trigger?
+
+Two ways a leaf becomes dirty, and they are not alternatives — they cover
+different kinds of state.
+
+| | use | why |
+|---|---|---|
+| **`dirties_on`** | state written **through Ash** | the write itself is the trigger; nothing to poll, nothing to miss |
+| **`Source`** | state the datastore **doesn't own** | an S3 bucket, an API, another system's table — only a poll can notice |
+
+```elixir
+reactive do
+  id :expenses
+  leaf? true
+  dirties_on [:create, :update, :destroy]   # writes here trigger the cascade
+end
+```
+
+A create/update/destroy marks that record's key dirty on its own cell, so the
+next drain picks it up. Without it, a host must call
+`ReactiveDag.Frontier.mark_dirty/3` at every write site — and a missed call is
+silent staleness, which is the failure this removes.
+
+**The mark is inside the write's transaction.** It runs as an `after_action`
+hook, so a rolled-back write leaves no dirty key, and a committed write always
+leaves one. (An `Ash.Notifier` looks like the natural fit and is not: Ash
+dispatches notifications *after* commit, so a crash in between would lose the
+mark.)
+
+It is **opt-in and not implied by `leaf?`** — a leaf fed by a `Source` poll
+would otherwise double-trigger, marking itself on the write the poll just made.
+
+Keys derive exactly as the payload loop's do: a composite primary key
+serializes in primary-key order (`"gf|2025"`), otherwise the payload key
+attribute. A record with no derivable key escalates to a whole-cell claim
+rather than silently marking nothing.
+
