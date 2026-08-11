@@ -43,7 +43,7 @@ defmodule ReactiveDag.FrontierTest do
   end
 
   setup do
-    {:ok, _} = FakeRepo.start_link()
+    start_supervised!(%{id: FakeRepo, start: {FakeRepo, :start_link, []}})
     prev = Application.get_env(:reactive_dag, :repo)
     Application.put_env(:reactive_dag, :repo, FakeRepo)
     on_exit(fn -> Application.put_env(:reactive_dag, :repo, prev) end)

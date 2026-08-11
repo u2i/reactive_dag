@@ -47,7 +47,7 @@ defmodule ReactiveDag.DrainTest do
   end
 
   setup do
-    {:ok, _} = FakeRepo.start_link()
+    start_supervised!(%{id: FakeRepo, start: {FakeRepo, :start_link, []}})
     prev = Application.get_env(:reactive_dag, :repo)
     Application.put_env(:reactive_dag, :repo, FakeRepo)
     on_exit(fn -> Application.put_env(:reactive_dag, :repo, prev) end)
@@ -123,5 +123,63 @@ defmodule ReactiveDag.DrainTest do
     assert log =~ ~s(["gk"])
     # the stale rows were consumed, not left to re-select forever
     assert Frontier.empty?()
+  end
+  # ── strategy-reported meta ──────────────────────────────────────────────────
+  #
+  # A recompute may report what the work COST — token/cost counts for an LLM
+  # node, cache hits, retries, rows scanned. The library carries the map without
+  # interpreting it, so Insights and a dashboard can show it.
+
+  defmodule CountingStrategy do
+    @behaviour ReactiveDag.RecomputeStrategy
+
+    @impl true
+    def recompute(%ReactiveDag.Cell{leaf?: true}, keys), do: {:ok, keys}
+
+    def recompute(_cell, keys),
+      do: {:ok, keys, %{tokens_in: 100 * length(keys), tokens_out: 7, model: "stub"}}
+  end
+
+  defmodule SilentStrategy do
+    @behaviour ReactiveDag.RecomputeStrategy
+    @impl true
+    def recompute(_cell, keys), do: {:ok, keys}
+  end
+
+  test "a strategy may report meta; it rides on the step untouched" do
+    Frontier.mark_dirty("a", ["k1", "k2"], "seed")
+
+    {:ok, report} =
+      Drain.run(plan(), recompute: CountingStrategy, key_rule: ReactiveDag.Node.KeyRule)
+
+    steps = Map.new(report.steps, &{&1.cell, &1})
+
+    # the derived cell reported; the library stored the map verbatim
+    assert steps["b"].meta == %{tokens_in: 200, tokens_out: 7, model: "stub"}
+
+    # a leaf returns the 2-tuple, so its meta is simply empty
+    assert steps["a"].meta == %{}
+  end
+
+  test "the 2-tuple contract still works — meta defaults to empty" do
+    Frontier.mark_dirty("a", ["k1"], "seed")
+
+    {:ok, report} =
+      Drain.run(plan(), recompute: SilentStrategy, key_rule: ReactiveDag.Node.KeyRule)
+
+    assert Enum.all?(report.steps, &(&1.meta == %{}))
+  end
+
+  test "Report.total/2 rolls one meta key up across steps" do
+    Frontier.mark_dirty("a", ["k1", "k2"], "seed")
+
+    {:ok, report} =
+      Drain.run(plan(), recompute: CountingStrategy, key_rule: ReactiveDag.Node.KeyRule)
+
+    # only the derived step reported tokens; the leaf contributes nothing
+    assert ReactiveDag.Drain.Report.total(report, :tokens_in) == 200
+
+    # a key no step reported sums to zero rather than raising
+    assert ReactiveDag.Drain.Report.total(report, :cost_usd) == 0
   end
 end

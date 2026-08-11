@@ -106,8 +106,20 @@ shape above:
 - **One call per key, serially.** The drain is synchronous per cell, so a long
   LLM cell dominates wall-clock. Batching (N rows per prompt) and bounded
   concurrency inside the action are the levers; both live in your action for now.
-- **No token/cost telemetry.** `Report` steps carry `duration_us` but nothing
-  model-specific.
+- ~~No token/cost telemetry.~~ **Solved.** A recompute may return
+  `{:ok, changed, meta}`, and the map rides on the drain's `%Report{}` step:
+
+  ```elixir
+  def recompute(cell, keys) do
+    {changed, usage} = call_model(keys)
+    {:ok, changed, %{tokens_in: usage.in, tokens_out: usage.out, cost_usd: usage.cost}}
+  end
+  ```
+
+  `Report.total(report, :tokens_in)` rolls one key up across every step, and
+  `ReactiveDag.Insights` carries it to a dashboard. The library never
+  interprets the map — cache hits, retries and rows scanned are equally valid
+  keys.
 - **The per-key map is hand-written.** Reading the claimed rows, calling the
   model, and writing structured output into this resource's attributes is the
   same loop every time — which is exactly what a declarative `llm` rung would
