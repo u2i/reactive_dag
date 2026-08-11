@@ -23,17 +23,17 @@ defmodule ReactiveDag.Node.Recompute.Aggregate do
   @spec recompute(ReactiveDag.Cell.t(), module(), map()) :: [String.t()]
   def recompute(cell, resource, agg) do
     loads = load_specs(agg)             # [{tmp_name, kind, over, src, dest}]
-    key_attr = cell.meta[:payload_key] || :key
     action = cell.meta[:payload_action] || :upsert
+    {key_attr, key_of} = keying(cell)
 
     resource
     |> load_aggregates(agg.over, loads)
     |> Ash.read!()
     |> Enum.flat_map(fn row ->
-      cell_key = Map.fetch!(row, key_attr) |> to_string()
-      payload = project(row, key_attr, loads)
+      cell_key = key_of.(row)
+      payload = project(row, key_attr, identity_fields(cell), loads)
 
-      case ReactiveDag.Node.Payload.upsert(resource, key_attr, cell_key, payload, action) do
+      case write(resource, cell, key_attr, cell_key, payload, action) do
         :changed ->
           ReactiveDag.Op.put(cell, cell_key)
           [cell_key]
@@ -42,6 +42,29 @@ defmodule ReactiveDag.Node.Recompute.Aggregate do
           []
       end
     end)
+  end
+
+  # KEYS ARE ASH KEYS here too (the same rule `reduce` follows): a COMPOSITE
+  # primary key means the row IS its identity — no key column, and the cell key
+  # is the identity serialized in primary-key order. Otherwise the payload key
+  # (derived from a single-attribute PK, or declared) names the column.
+  defp keying(%{meta: %{identity_fields: fields}}) when is_list(fields) do
+    key_fn = ReactiveDag.Node.Recompute.Declarative.identity_key_fn(fields, nil)
+    {nil, key_fn}
+  end
+
+  defp keying(cell) do
+    key_attr = cell.meta[:payload_key] || :key
+    {key_attr, fn row -> row |> Map.fetch!(key_attr) |> to_string() end}
+  end
+
+  defp write(resource, %{meta: %{identity_fields: fields}}, _key_attr, _cell_key, payload, action)
+       when is_list(fields) do
+    ReactiveDag.Node.Payload.upsert_identity(resource, fields, payload, action)
+  end
+
+  defp write(resource, _cell, key_attr, cell_key, payload, action) do
+    ReactiveDag.Node.Payload.upsert(resource, key_attr, cell_key, payload, action)
   end
 
   # add each aggregate to the query under its temp name, then LOAD them so they're
@@ -53,12 +76,21 @@ defmodule ReactiveDag.Node.Recompute.Aggregate do
     end)
   end
 
-  # the row's payload = its key attr + each aggregate projected onto its dest attr.
-  # Query-added aggregates land in the row's `.aggregates` map (keyed by our temp
-  # name), NOT as struct fields.
-  defp project(row, key_attr, loads) do
+  defp identity_fields(%{meta: %{identity_fields: fields}}) when is_list(fields), do: fields
+  defp identity_fields(_cell), do: nil
+
+  # the row's payload = the columns that IDENTIFY it (the identity fields for a
+  # composite-PK node, else the key attribute) + each aggregate on its dest.
+  # Query-added aggregates land in the row's `.aggregates` map (keyed by our
+  # temp name), NOT as struct fields.
+  defp project(row, key_attr, identity_fields, loads) do
     aggs = Map.get(row, :aggregates) || %{}
-    base = %{key_attr => Map.fetch!(row, key_attr)}
+
+    base =
+      case identity_fields do
+        fields when is_list(fields) -> Map.new(fields, &{&1, Map.fetch!(row, &1)})
+        _ -> %{key_attr => Map.fetch!(row, key_attr)}
+      end
 
     Enum.reduce(loads, base, fn {tmp, _kind, _over, _src, dest}, acc ->
       Map.put(acc, dest, Map.get(aggs, tmp))
@@ -69,7 +101,7 @@ defmodule ReactiveDag.Node.Recompute.Aggregate do
   # `count: :day_count` → src nil, dest :day_count.
   # `avg: [flow: :avg_flow]` → src :flow, dest :avg_flow.
   defp load_specs(%{over: over} = agg) do
-    for kind <- [:count, :sum, :avg, :min, :max, :first],
+    for kind <- ReactiveDag.Node.Recompute.Declarative.fold_kinds(),
         spec = Map.get(agg, kind),
         not is_nil(spec),
         {src, dest} <- normalize(kind, spec) do

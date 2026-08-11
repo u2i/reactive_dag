@@ -752,7 +752,11 @@ defmodule ReactiveDag.Node do
     ]
   end
 
-  @agg_kinds [:count, :sum, :avg, :min, :max, :first]
+  # ONE list, shared with the in-BEAM fold: `aggregate` and `reduce into:` speak
+  # the SAME vocabulary (same kinds, same `[src: dest]` spelling, same SQL nil
+  # semantics), so moving a fold between the datastore and the BEAM cannot
+  # change the answer. Declared once so the two can never drift.
+  @agg_kinds ReactiveDag.Node.Recompute.Declarative.fold_kinds()
 
   @aggregate %Spark.Dsl.Entity{
     name: :aggregate,

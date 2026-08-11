@@ -49,6 +49,22 @@ Postgres does the `GROUP BY`; **no rows cross into the BEAM**. Only expressible
 as a relationship aggregate (the group must be a resource with a relationship
 to the input) — for anything else, step down to `reduce`.
 
+**Same vocabulary as the in-BEAM fold.** `aggregate` and `reduce into:` take
+the same kinds (`count`/`sum`/`avg`/`min`/`max`/`first`), the same
+`[src: dest]` spelling, the same SQL nil semantics, and the same key rules
+(a composite primary key makes either node identity-keyed). One list backs
+both, so they cannot drift — moving a fold between the datastore and the BEAM
+does not change the answer, only who computes it:
+
+| | who aggregates | rows into BEAM | recompute unit |
+|---|---|---|---|
+| `aggregate` | **Postgres**, in one query | none | whole cell, always |
+| `reduce into:` | the BEAM | the scoped slice | whatever `recompute_by` says |
+
+The trade is real in both directions: `aggregate` reads nothing into the BEAM
+but reprices every group; `reduce` + a tight `recompute_by` reads only the
+claimed slice, which often wins for a big table with fine-grained changes.
+
 ### `reduce` — an in-BEAM fold, declared
 
 ```elixir

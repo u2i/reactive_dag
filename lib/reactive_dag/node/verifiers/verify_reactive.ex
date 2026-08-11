@@ -108,7 +108,54 @@ defmodule ReactiveDag.Node.Verifiers.VerifyReactive do
     end
   end
 
+  # `aggregate` speaks the SAME fold vocabulary as `reduce into:`, so its dest
+  # attributes get the same check: every column the row would carry must exist
+  # on this resource. (The aggregate's groups are its own rows, so there are no
+  # group columns to add — the identity is already the row's.)
+  defp verify_entity(dsl, %ReactiveDag.Node.Aggregate{} = a) do
+    folds =
+      for kind <- Declarative.fold_kinds(),
+          spec = Map.get(a, kind),
+          not is_nil(spec),
+          do: {kind, spec}
+
+    cond do
+      folds == [] ->
+        error(
+          dsl,
+          "an `aggregate` declares no aggregates — give it at least one of " <>
+            "#{inspect(Declarative.fold_kinds())} (e.g. `count: :n`, " <>
+            "`avg: [flow: :avg_flow]`)"
+        )
+
+      true ->
+        verify_agg_dests(dsl, fold_dests(folds))
+    end
+  end
+
   defp verify_entity(_dsl, _other), do: :ok
+
+  defp verify_agg_dests(dsl, dests) do
+    payload_attrs =
+      dsl |> Ash.Resource.Info.attributes() |> Enum.map(& &1.name) |> MapSet.new()
+
+    if MapSet.size(payload_attrs) == 0 do
+      :ok
+    else
+      case Enum.reject(dests, &MapSet.member?(payload_attrs, &1)) do
+        [] ->
+          :ok
+
+        missing ->
+          error(
+            dsl,
+            "the `aggregate` would write #{inspect(missing)}, but this resource has no " <>
+              "such attribute(s) — each aggregate maps onto one of the node's own " <>
+              "attributes. Declared: #{inspect(MapSet.to_list(payload_attrs))}"
+          )
+      end
+    end
+  end
 
   # the `recompute_by` unit, as the group_by it lowers to.
   defp block_group_by(dsl) do
