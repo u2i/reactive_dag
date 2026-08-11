@@ -74,34 +74,51 @@ defmodule ReactiveDag.Drain do
         keys = if "*" in claimed, do: ["*"], else: claimed
 
         {cause, steps} =
-          if keys != [] do
-            cell = Map.fetch!(plan.cells, cell_id)
-            {changed, us} = timed(fn -> recompute(cell, keys, opts) end)
-            # A WHOLE-CELL claim ("*") propagates :all: a whole recompute can DELETE
-            # keys, and per-key propagation only carries survivors — it would strand
-            # a vanished key in the parent. So escalate downstream when the claim was
-            # whole, regardless of the per-parent key_rule.
-            prop = if "*" in keys, do: :all, else: changed
-            parents = propagate(plan, cell_id, prop, opts)
+          cond do
+            keys == [] ->
+              {cause, steps}
 
-            step = %{
-              claimed: keys,
-              changed: changed,
-              triggered_by: Map.get(cause, cell_id),
-              duration_us: us
-            }
+            not Map.has_key?(plan.cells, cell_id) ->
+              # A STALE frontier row — the dirty table outlives any one plan, so
+              # a renamed/removed cell, a drain over a subgraph plan, or a source
+              # writing to an old leaf id can leave ids this plan doesn't know.
+              # The claim above already consumed the rows; log what was dropped
+              # and keep draining rather than crashing after destroying the work
+              # item (and claiming, not skipping, is what prevents the same row
+              # from being re-selected forever).
+              Logger.warning(
+                "reactive_dag: frontier holds cell #{inspect(cell_id)} absent from this plan; " <>
+                  "dropping its claimed dirty keys #{inspect(keys)}"
+              )
 
-            if f = opts[:on_step], do: f.(cell, step)
+              {cause, steps}
 
-            # Every parent we just dirtied was triggered by this cell.
-            cause =
-              Enum.reduce(parents, cause, fn parent_id, acc ->
-                Map.put(acc, parent_id, cell_id)
-              end)
+            true ->
+              cell = Map.fetch!(plan.cells, cell_id)
+              {changed, us} = timed(fn -> recompute(cell, keys, opts) end)
+              # A WHOLE-CELL claim ("*") propagates :all: a whole recompute can DELETE
+              # keys, and per-key propagation only carries survivors — it would strand
+              # a vanished key in the parent. So escalate downstream when the claim was
+              # whole, regardless of the per-parent key_rule.
+              prop = if "*" in keys, do: :all, else: changed
+              parents = propagate(plan, cell_id, prop, opts)
 
-            {cause, [Map.merge(step, %{cell: cell_id, pass: passes}) | steps]}
-          else
-            {cause, steps}
+              step = %{
+                claimed: keys,
+                changed: changed,
+                triggered_by: Map.get(cause, cell_id),
+                duration_us: us
+              }
+
+              if f = opts[:on_step], do: f.(cell, step)
+
+              # Every parent we just dirtied was triggered by this cell.
+              cause =
+                Enum.reduce(parents, cause, fn parent_id, acc ->
+                  Map.put(acc, parent_id, cell_id)
+                end)
+
+              {cause, [Map.merge(step, %{cell: cell_id, pass: passes}) | steps]}
           end
 
         do_run(plan, opts, passes + 1, cause, steps, t0)
