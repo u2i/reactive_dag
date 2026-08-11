@@ -30,7 +30,7 @@ real change.
 | rung | you write | when |
 |---|---|---|
 | `aggregate` | attribute atoms only | the fold is a datastore aggregate over a relationship |
-| `reduce over_rel:` | a relationship name + the fold | the edge is a declared Ash relationship — it carries the grouping too |
+| `over_grain` block | the edge + its grain pair, then the fold | the input's grain maps to this node's by a column correspondence |
 | declarative `reduce`/`join` | attributes + fold keywords | grouping/joining by attributes; the library reads Ash for you |
 | per-slot escapes | a fn for the one slot that outgrew attributes | `query:`, computed groups/keys/rows, `expand:`, `status:` |
 | `run :action` | a generic Ash action on this resource | arbitrary recompute that should stay a first-class action |
@@ -76,40 +76,48 @@ the DAG edge reads as a **relational join**: a `group_by` entry may be the
 pair `parent_column: :child_field` (`group_by: [fund: :fund_code, fy: :fy]` —
 "this node's `fund` = the child's `fund_code`").
 
-### The edge as an Ash relationship
+### The edge and its grain: `over_grain`
 
-Better still, don't spell the correspondence twice. Ash's relational
-vocabulary is a **named relationship** — declared once on the resource, then
-*referenced* by name wherever it's used (loads, filters, aggregates). A DAG
-edge is the same thing, so it can be named the same way:
+Better still, don't spell the correspondence twice. Declare the edge as a
+block, with the grain pair on it:
 
 ```elixir
-relationships do
-  has_many :expenses, MyApp.Expense do
-    source_attribute :category          # this node's column
-    destination_attribute :expense_cat  # the child's field
-  end
-end
-
 reactive do
-  reduce over_rel: :expenses,           # the relationship IS the edge
-         key_rule: :group,
+  over_grain :expenses do
+    source_attribute :category          # this node's column
+    destination_attribute :expense_cat  # the input's field
+  end
+
+  reduce key_rule: :group,
          into: [sum: [amount: :total], count: :n]
 end
 ```
 
-One declaration supplies all three facts the edge needs: **which node** (the
-relationship's destination), **how rows group** (its attribute pair — no
-`group_by:` to write), and **how `:group` claims traverse back** (the same
-pair, in reverse). Grouping by something other than the relationship's own
-attributes is still open — declare `group_by:` explicitly and the relationship
-names only the edge.
+One declaration supplies all three facts the edge needs: **which node**, **how
+rows group** (the pair — no `group_by:` to write), and **how `:group` claims
+traverse back** (the same pair, in reverse). Declare `group_by:` explicitly to
+group by something else, and the block names only the edge.
 
-`over_rel:` is **sugar**: it lowers to `over:` + `group_by:` pairs at compile
-time, so both spellings share one execution path. Reach for plain `over:` when
-the input node has no natural relationship to this resource, or when the
-destination is a generator — one resource expanding to many cells, so a
-relationship can't name *which*.
+The **notation** is Ash's — `source_attribute`/`destination_attribute`, the
+correspondence written once and named — because Ash already solved how to *say*
+this. The **semantics** are deliberately not a relationship's: a DAG edge
+asserts no cardinality, isn't loadable, isn't writable, and isn't a public API
+surface. Declaring a `has_many` to mean "this node reduces over that one" would
+tell every reader and every Ash tool that loading and managing through the
+parent is meaningful — when the parent is a *derived rollup* whose whole point
+is that you query it directly.
+
+That distinction is load-bearing. The block is consumed at **compile time** —
+it lowers to `over:` + `group_by:` pairs and nothing traverses it at recompute.
+A node reads its **one** input, materializes rows, and downstream consumers
+query *those rows* rather than re-deriving them back up the chain. One input
+means one grain and one claim translation; a node reading two independent
+inputs would make every claim partial by construction, so the DAG-native answer
+to "reconcile two sources" is a node whose input already carries the joined
+grain.
+
+Reach for plain `over:` + `group_by:` when the input is a generator instance
+(`<id>.<member>`), or when the grouping isn't a simple column correspondence.
 
 A combinator read is **always an Ash read** — to shape it, stay in the query:
 
@@ -265,7 +273,7 @@ ref :transcripts                  # recompute edge: a change dirties this node
 context :people                   # read-as-context: consulted, never triggers
 depends_on [:a, :b]               # flat sugar — one ref per id
 reduce over: :x, ...              # a combinator's `over:` implies a ref
-reduce over_rel: :xs, ...         # ...as does the relationship's destination
+over_grain :xs do … end          # ...as does the `over_grain` block
 ref :machines, gate: :ownership   # gated: consume through the attested view
 ```
 

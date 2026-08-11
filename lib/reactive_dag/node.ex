@@ -55,7 +55,7 @@ defmodule ReactiveDag.Node do
   | you want to… | use | rows into BEAM? | you write |
   |---|---|---|---|
   | group + `avg`/`sum`/`count` a relationship | `aggregate` | **none** (datastore GROUP BY) | attribute atoms |
-  | fold rows across a declared RELATIONSHIP | `reduce over_rel:` | the scoped slice | the relationship name + an `into:` fold |
+  | fold with the edge + grain declared once | `over_grain` + `reduce` | the scoped slice | the block's attribute pair + an `into:` fold |
   | fold one input's rows into per-group summaries | `reduce` | the scoped slice of `over` | `group_by:` attrs + an `into:` fold |
   | reconcile one input's two sides by key | `join` | the scoped slice of `over` | side attrs/`[key:, where:]` + picks |
   | a slot the attributes can't express | the slot's escape | same | `query:` (shape the Ash read), fn group/key/into, `expand:`, `status:` |
@@ -189,6 +189,75 @@ defmodule ReactiveDag.Node do
     ]
   }
 
+  defmodule Over do
+    @moduledoc """
+    The INPUT EDGE of a combinator, with the grain correspondence declared on
+    it — `over_grain :expenses do source_attribute :category; destination_attribute
+    :expense_cat end`, read as "this node's `category` = the input's
+    `expense_cat`".
+
+    The notation is Ash's (`source_attribute`/`destination_attribute`, the
+    correspondence written once and named), because Ash already solved how to
+    *say* this. The semantics are NOT `has_many`'s: a DAG edge asserts no
+    cardinality, is not loadable, is not writable, and is not a public API
+    surface. It states one fact — how the child's grain maps to this node's —
+    and that fact is consumed at COMPILE time, lowered to the combinator's
+    `group_by` pairs. Nothing traverses it at recompute; a node reads its own
+    input and materializes rows, and downstream consumers query THOSE rows
+    rather than re-deriving them by reaching back up the chain.
+
+    One `over` block per node, so a combinator reads exactly one input — one
+    grain, one claim translation. (Two independent inputs re-joined in the BEAM
+    would make every claim partial by construction; the DAG-native answer is a
+    node whose input already carries the joined grain.)
+    """
+    defstruct [
+      :to,
+      :source_attribute,
+      :destination_attribute,
+      :read,
+      :__identifier__,
+      :__spark_metadata__
+    ]
+  end
+
+  @over %Spark.Dsl.Entity{
+    name: :over_grain,
+    target: Over,
+    args: [:to],
+    describe:
+      "The combinator's input edge, carrying the grain correspondence: " <>
+        "`over_grain :expenses do source_attribute :category; destination_attribute :expense_cat end`. " <>
+        "Ash's naming for the pair, none of `has_many`'s semantics (no cardinality, " <>
+        "no loading, no writes) — it lowers to the combinator's `group_by` pair at " <>
+        "compile time and is never traversed at recompute.",
+    schema: [
+      to: [type: :atom, required: true, doc: "the input node's id"],
+      source_attribute: [
+        type: :atom,
+        required: false,
+        doc:
+          "THIS node's column — the grain the rows are keyed by (`:category`). " <>
+            "Declared with `destination_attribute`; omit both to declare only the " <>
+            "edge and group explicitly on the combinator."
+      ],
+      destination_attribute: [
+        type: :atom,
+        required: false,
+        doc:
+          "the INPUT's field that maps to `source_attribute` (`:expense_cat`) — what " <>
+            "is read and grouped, and what a `:group` claim traverses back through."
+      ],
+      read: [
+        type: :atom,
+        required: false,
+        doc:
+          "OMIT for the input's primary read; an atom names a different `:read` action " <>
+            "on it (the same auto-scoping applies). Equivalent to the combinator's `read:`."
+      ]
+    ]
+  }
+
   @compose_base %Spark.Dsl.Entity{
     name: :compose,
     target: Compose,
@@ -228,7 +297,6 @@ defmodule ReactiveDag.Node do
     """
     defstruct [
       :over,
-      :over_rel,
       :group_by,
       :key,
       :key_prefix,
@@ -249,35 +317,19 @@ defmodule ReactiveDag.Node do
     target: Reduce,
     describe:
       "Declarative fold: read the input, group it, reduce each group with `into`. " <>
-        "Ash-first: name a relationship in `over_rel:` (it supplies the input node AND " <>
-        "the grouping pair), or `over:` a node id with explicit `group_by:`; omit " <>
-        "`read:` (the library reads the over node's resource, dirty-key scoped) and " <>
-        "declare the fold in `into:` — each slot has a fn escape hatch when the shape " <>
-        "outgrows attributes.",
+        "Ash-first: declare the edge as an `over_grain` BLOCK (it carries the grain pair, so " <>
+        "`group_by:` is implied), or name `over:` a node id with an explicit " <>
+        "`group_by:`; omit `read:` (the library reads the over node's resource, " <>
+        "dirty-key scoped) and declare the fold in `into:` — each slot has a fn escape " <>
+        "hatch when the shape outgrows attributes.",
     schema: [
       over: [
         type: :atom,
         required: false,
         doc:
-          "the input node id whose payload is read + grouped. Exactly one of " <>
-            "`over:`/`over_rel:` — `over_rel:` names an Ash RELATIONSHIP that supplies " <>
-            "this and the grouping together."
-      ],
-      over_rel: [
-        type: :atom,
-        required: false,
-        doc:
-          "the ASH-NATIVE edge: name a `has_many` on THIS resource and the relationship " <>
-            "IS the edge — its destination resolves to the over node, and its " <>
-            "`source_attribute`/`destination_attribute` become the `group_by` pair " <>
-            "(`[source: :destination]`), so grouping, keys and `:group` claims all " <>
-            "derive from one declaration. The correspondence is declared once, on the " <>
-            "resource, and named here — exactly how `aggregate` already works and how " <>
-            "Ash relationships are used everywhere else. Sugar: it LOWERS to " <>
-            "`over:` + `group_by:` pairs, so both spellings share one execution path. " <>
-            "Declare `group_by:` explicitly to group by something other than the " <>
-            "relationship's own attributes. Not usable when the destination resource " <>
-            "expands to many cells (a `for_each` generator) — name the cell with `over:` there."
+          "the input node id whose payload is read + grouped, with `group_by:` declared " <>
+            "here. Omit it when the node declares an `over_grain` BLOCK, which names the " <>
+            "input and its grain correspondence together."
       ],
       read: [
         type: :atom,
@@ -302,8 +354,8 @@ defmodule ReactiveDag.Node do
         type: {:or, [{:fun, 1}, :atom, {:list, :any}]},
         required: false,
         doc:
-          "REQUIRED with `over:`; with `over_rel:` it defaults to the relationship's own " <>
-            "attribute pair. An attribute or CALCULATION on the over resource (`:fund`, or `:month` where " <>
+          "REQUIRED with `over:`; implied by an `over_grain` BLOCK that declares a grain pair. " <>
+            "An attribute or CALCULATION on the over resource (`:fund`, or `:month` where " <>
             "the over declares `calculate :month, :string, {ReactiveDag.Calendar, " <>
             "bucket: :month, of: :date}` — derived grouping values are Ash calculations, " <>
             "declared where the data lives; the library loads them). A list groups by " <>
@@ -753,6 +805,7 @@ defmodule ReactiveDag.Node do
     entities: [
       @ref,
       @context,
+      @over,
       @compose,
       @reduce,
       @join,
@@ -1391,11 +1444,24 @@ defmodule ReactiveDag.Node do
       |> Enum.map(&normalize_dep(&1, resource))
 
     # a `reduce`/`join over: :x` implies an input edge to :x (the node it reads);
-    # so does `attested over: :x` (the raw cell the view attests).
+    # so does `attested over: :x` (the raw cell the view attests). The `over`
+    # BLOCK names the same edge — one input either way.
     combinator_refs =
       case combinator(resource) do
-        nil -> []
-        c -> [%Ref{to: over_id!(c, resource)}]
+        nil ->
+          []
+
+        c ->
+          case c.over || (over_block(resource) || %{to: nil}).to do
+            nil ->
+              raise ArgumentError,
+                    "reactive_dag: the combinator on #{inspect(resource)} names no input — " <>
+                      "declare an `over_grain :node do … end` block, or `over: :node` on the " <>
+                      "combinator itself."
+
+            over ->
+              [%Ref{to: over}]
+          end
       end
 
     attested_refs =
@@ -1424,126 +1490,72 @@ defmodule ReactiveDag.Node do
 
   # a flat depends_on entry: `:id`, or `{:id, gate: :requirement}` (plus an
   # optional `mode: :require | :annotate`).
-  # ── `over_rel:` — an Ash relationship IS the edge ───────────────────────────
+  # ── the `over_grain` block — the edge, with its grain correspondence ───────
   #
-  # The relational correspondence Ash already knows how to state: a `has_many`
-  # names its destination and the attribute pair that relates them. We take all
-  # three facts from it — WHICH node (the destination resource's own node id),
-  # HOW rows group (source_attribute ← destination_attribute, i.e. the #34 pair),
-  # and thus how `:group` claims traverse back. Resolution happens per-resource
-  # rather than at assembly because the edge must be known before inputs are
-  # built; the destination's node id is declared on the destination itself, so
-  # nothing here needs the graph.
+  # `over_grain :expenses do source_attribute :category; destination_attribute
+  # :expense_cat end` states two facts: WHICH node this combinator reads, and
+  # HOW the child's grain maps to this node's. Both are consumed HERE, at
+  # lowering: the block folds into the combinator's `over:` + `group_by:` pair,
+  # and nothing downstream knows the block existed. The pair is also what a
+  # `:group` claim traverses in reverse, so one declaration covers grouping,
+  # keys and claims.
+  #
+  # The notation is Ash's; the semantics are not `has_many`'s. This asserts no
+  # cardinality, is never loaded, and is never traversed at recompute — a node
+  # reads its one input and materializes rows, and consumers query those rows.
 
   @doc false
-  # the over node's id, from `over:` directly or via `over_rel:`'s destination.
-  def over_id!(%{over: over, over_rel: rel}, resource) do
-    case {over, rel} do
-      {nil, nil} ->
-        raise ArgumentError,
-              "reactive_dag: the combinator on #{inspect(resource)} declares neither " <>
-                "`over:` nor `over_rel:` — name the input node id, or an Ash " <>
-                "relationship on this resource that points at it."
+  # the node's `over_grain` block, or nil.
+  def over_block(resource) do
+    Ext.get_entities(resource, [:reactive]) |> Enum.find(&match?(%Over{}, &1))
+  end
 
-      {over, nil} when not is_nil(over) ->
-        over
+  # SUGAR → CORE: fold the `over_grain` block into the combinator, so exactly one
+  # shape reaches assembly, recompute, the key rules and the verifiers.
+  defp lower_over(%Reduce{} = r, resource) do
+    case over_block(resource) do
+      nil ->
+        r
 
-      {nil, rel} ->
-        relationship!(resource, rel).__over_id__
+      %Over{} = o ->
+        if r.over do
+          raise ArgumentError,
+                "reactive_dag: #{inspect(resource)} declares an `over_grain #{inspect(o.to)}` block " <>
+                  "AND `reduce over: #{inspect(r.over)}` — they name the same edge twice. " <>
+                  "Keep the block (it carries the grain pair too), or `over:` alone."
+        end
 
-      {_, _} ->
-        raise ArgumentError,
-              "reactive_dag: the combinator on #{inspect(resource)} declares BOTH " <>
-                "`over: #{inspect(over)}` and `over_rel: #{inspect(rel)}` — they name the " <>
-                "same edge two ways. Keep `over_rel:` (the relationship supplies the " <>
-                "grouping too), or `over:` alone."
+        %{
+          r
+          | over: o.to,
+            group_by: r.group_by || over_group_by!(o, resource),
+            read: r.read || o.read
+        }
     end
   end
 
-  # a join has no `over_rel:` (its sides, not one relationship, name the edge)
-  def over_id!(%{over: over}, _resource), do: over
-
-  # the declared relationship, plus the node id its destination lowers to.
-  defp relationship!(resource, name) do
-    rel =
-      Ash.Resource.Info.relationship(resource, name) ||
-        raise ArgumentError,
-              "reactive_dag: `over_rel: #{inspect(name)}` on #{inspect(resource)} names no " <>
-                "such relationship. Declare it in the `relationships` block " <>
-                "(`has_many #{inspect(name)}, TheResource, source_attribute: …, " <>
-                "destination_attribute: …`), or name the node directly with `over:`. " <>
-                "Available: #{inspect(Enum.map(Ash.Resource.Info.relationships(resource), & &1.name))}"
-
-    dest = rel.destination
-
-    unless Spark.extensions(dest) |> Enum.member?(__MODULE__) do
-      raise ArgumentError,
-            "reactive_dag: `over_rel: #{inspect(name)}` on #{inspect(resource)} points at " <>
-              "#{inspect(dest)}, which is not a reactive node (it lacks the " <>
-              "`ReactiveDag.Node` extension) — a DAG edge must name a node. Add the " <>
-              "extension to #{inspect(dest)}, or use `over:` with `compute`/`run`."
-    end
-
-    if Ext.get_opt(dest, [:reactive], :for_each, nil) do
-      raise ArgumentError,
-            "reactive_dag: `over_rel: #{inspect(name)}` on #{inspect(resource)} points at " <>
-              "#{inspect(dest)}, a GENERATOR node — one resource expands to many cells, so " <>
-              "the relationship cannot name WHICH. Use `over:` with the instance id " <>
-              "(`<id>.<member>`)."
-    end
-
-    over_id =
-      Ext.get_opt(dest, [:reactive], :id, nil) ||
-        raise ArgumentError,
-              "reactive_dag: `over_rel: #{inspect(name)}` resolves to #{inspect(dest)}, " <>
-                "which declares no `id` in its `reactive` block."
-
-    Map.put(rel, :__over_id__, over_id)
+  # the block's grain pair as a `group_by` entry: `[source: :destination]` —
+  # this node's column on the left, the input's field on the right.
+  defp over_group_by!(%Over{source_attribute: nil, destination_attribute: nil} = o, resource) do
+    raise ArgumentError,
+          "reactive_dag: the `over_grain #{inspect(o.to)}` block on #{inspect(resource)} declares no " <>
+            "grain pair, and the combinator declares no `group_by:` — one of them must say " <>
+            "how the input's rows group. Add `source_attribute`/`destination_attribute` to " <>
+            "the block, or `group_by:` to the combinator."
   end
 
-  # the relationship's own attribute pair, as a `group_by` entry:
-  # `[source_attribute: :destination_attribute]` — this node's column on the
-  # left, the child's field on the right, exactly the #34 spelling.
-  defp relationship_group_by(resource, name) do
-    rel = relationship!(resource, name)
+  defp over_group_by!(%Over{source_attribute: s, destination_attribute: d} = o, resource)
+       when is_nil(s) or is_nil(d) do
+    missing = if is_nil(s), do: "source_attribute", else: "destination_attribute"
 
-    cond do
-      Map.get(rel, :no_attributes?) ->
-        raise ArgumentError,
-              "reactive_dag: `over_rel: #{inspect(name)}` on #{inspect(resource)} is a " <>
-                "`no_attributes?` relationship — it relates every row to every row, so it " <>
-                "carries no grouping. Declare `group_by:` explicitly alongside it."
-
-      is_nil(rel.source_attribute) or is_nil(rel.destination_attribute) ->
-        raise ArgumentError,
-              "reactive_dag: `over_rel: #{inspect(name)}` on #{inspect(resource)} declares no " <>
-                "attribute pair to group by. Give it `source_attribute`/" <>
-                "`destination_attribute`, or declare `group_by:` explicitly."
-
-      true ->
-        [{rel.source_attribute, rel.destination_attribute}]
-    end
+    raise ArgumentError,
+          "reactive_dag: the `over_grain #{inspect(o.to)}` block on #{inspect(resource)} declares a " <>
+            "half grain pair — `#{missing}` is missing. The pair reads " <>
+            "\"this node's <source_attribute> = the input's <destination_attribute>\"."
   end
 
-  # SUGAR → CORE: rewrite an `over_rel:` reduce into the `over:` + `group_by:`
-  # pair form, so exactly one shape reaches assembly, recompute, the key rules
-  # and the verifiers. Nothing downstream knows relationships exist.
-  defp lower_over_rel(%Reduce{over_rel: nil} = r, resource) do
-    if is_nil(r.over) do
-      # surfaces the "neither declared" error at lowering, not as a nil edge
-      over_id!(r, resource)
-    end
-
-    r
-  end
-
-  defp lower_over_rel(%Reduce{over_rel: rel} = r, resource) do
-    %{
-      r
-      | over: over_id!(r, resource),
-        group_by: r.group_by || relationship_group_by(resource, rel)
-    }
-  end
+  defp over_group_by!(%Over{source_attribute: s, destination_attribute: d}, _resource),
+    do: [{s, d}]
 
   defp normalize_dep(id, _resource) when is_atom(id), do: %Ref{to: id}
 
@@ -1651,7 +1663,7 @@ defmodule ReactiveDag.Node do
   defp extra_meta(resource, all_refs) do
     combinator_meta =
       case combinator(resource) do
-        %Reduce{} = r -> %{reduce: lower_over_rel(r, resource)}
+        %Reduce{} = r -> %{reduce: lower_over(r, resource)}
         %Join{} = j -> %{join: j}
         nil -> %{}
       end

@@ -9,7 +9,7 @@ defmodule ReactiveDag.Node.Verifiers.VerifyReactive do
   use Spark.Dsl.Verifier
 
   alias ReactiveDag.Node.Recompute.Declarative
-  alias ReactiveDag.Node.{Compose, Compute, Context, Join, Reduce, Ref, Run}
+  alias ReactiveDag.Node.{Compose, Compute, Context, Join, Over, Reduce, Ref, Run}
   alias Spark.Dsl.Verifier
 
   @impl true
@@ -18,7 +18,7 @@ defmodule ReactiveDag.Node.Verifiers.VerifyReactive do
       Verifier.get_entities(dsl, [:reactive])
       |> Enum.reject(
         &(match?(%Ref{}, &1) or match?(%Context{}, &1) or match?(%Compose{}, &1) or
-            match?(%ReactiveDag.Attestation.Requirement{}, &1))
+            match?(%Over{}, &1) or match?(%ReactiveDag.Attestation.Requirement{}, &1))
       )
 
     # NOT Attested: `attested` + an explicit `compute` is a documented pair
@@ -58,11 +58,15 @@ defmodule ReactiveDag.Node.Verifiers.VerifyReactive do
   end
 
   defp verify_entity(dsl, %Reduce{} = r) do
+    # check what LOWERING will produce: an `over_grain` block's pair becomes the
+    # combinator's group_by, so the row-column checks below must see it.
+    effective = %{r | group_by: r.group_by || block_group_by(dsl)}
+
     with :ok <- verify_over(dsl, r),
          :ok <- verify_key_rule_home(dsl, r.key_rule),
          :ok <- verify_key_prefix(dsl, r.key, r.key_prefix),
          :ok <- verify_result_slots(dsl, :reduce, r.status, into: r.into, expand: r.expand),
-         :ok <- verify_reduce_into(dsl, r) do
+         :ok <- verify_reduce_into(dsl, effective) do
       :ok
     end
   end
@@ -105,49 +109,58 @@ defmodule ReactiveDag.Node.Verifiers.VerifyReactive do
 
   defp verify_entity(_dsl, _other), do: :ok
 
-  # the edge is declared ONE way: a node id (`over:`, with its own `group_by:`)
-  # or an Ash relationship (`over_rel:`, which supplies both).
-  defp verify_over(dsl, %Reduce{over: nil, over_rel: nil}) do
-    error(
-      dsl,
-      "a `reduce` declares neither `over:` nor `over_rel:` — name the input node " <>
-        "(`over: :expenses, group_by: [...]`), or an Ash relationship on this " <>
-        "resource that points at it (`over_rel: :expenses`)."
-    )
-  end
-
-  defp verify_over(dsl, %Reduce{over: over, over_rel: rel})
-       when not is_nil(over) and not is_nil(rel) do
-    error(
-      dsl,
-      "a `reduce` declares BOTH `over: #{inspect(over)}` and `over_rel: #{inspect(rel)}` — " <>
-        "they name the same edge two ways. Keep `over_rel:` (the relationship supplies " <>
-        "the grouping too), or `over:` alone."
-    )
-  end
-
-  defp verify_over(dsl, %Reduce{over_rel: nil, group_by: nil}) do
-    error(
-      dsl,
-      "a `reduce over:` must declare `group_by:` — the grouping is only implicit when " <>
-        "the edge is an Ash relationship (`over_rel:`), which carries its own " <>
-        "attribute pair."
-    )
-  end
-
-  defp verify_over(dsl, %Reduce{over_rel: rel}) when not is_nil(rel) do
-    case Ash.Resource.Info.relationship(dsl, rel) do
-      nil ->
-        names = Enum.map(Ash.Resource.Info.relationships(dsl), & &1.name)
-
-        error(
-          dsl,
-          "`over_rel: #{inspect(rel)}` names no such relationship on this resource. " <>
-            "Declare it in the `relationships` block, or name the node with `over:`. " <>
-            "Available: #{inspect(names)}"
-        )
+  # the `over_grain` block's grain pair, as the group_by it lowers to.
+  defp block_group_by(dsl) do
+    case Verifier.get_entities(dsl, [:reactive]) |> Enum.find(&match?(%Over{}, &1)) do
+      %Over{source_attribute: s, destination_attribute: d} when not is_nil(s) and not is_nil(d) ->
+        [{s, d}]
 
       _ ->
+        nil
+    end
+  end
+
+  # the edge is declared ONE way: an `over` BLOCK (carrying the grain pair) or
+  # `over:` on the combinator (with its own `group_by:`).
+  defp verify_over(dsl, %Reduce{} = r) do
+    block = Verifier.get_entities(dsl, [:reactive]) |> Enum.find(&match?(%Over{}, &1))
+
+    cond do
+      is_nil(r.over) and is_nil(block) ->
+        error(
+          dsl,
+          "a `reduce` names no input — declare the edge as a block " <>
+            "(`over :expenses do source_attribute :category; destination_attribute " <>
+            ":expense_cat end`), or name it on the combinator " <>
+            "(`over: :expenses, group_by: [...]`)."
+        )
+
+      not is_nil(r.over) and not is_nil(block) ->
+        error(
+          dsl,
+          "the edge is declared TWICE — an `over #{inspect(block.to)}` block and " <>
+            "`reduce over: #{inspect(r.over)}`. Keep the block (it carries the grain " <>
+            "pair too), or `over:` alone."
+        )
+
+      # a block with no pair, and no group_by to supply one
+      not is_nil(block) and is_nil(r.group_by) and
+          (is_nil(block.source_attribute) or is_nil(block.destination_attribute)) ->
+        error(
+          dsl,
+          "the `over #{inspect(block.to)}` block declares no complete grain pair " <>
+            "(`source_attribute` + `destination_attribute`) and the `reduce` declares no " <>
+            "`group_by:` — one of them must say how the input's rows group."
+        )
+
+      is_nil(block) and is_nil(r.group_by) ->
+        error(
+          dsl,
+          "a `reduce over:` must declare `group_by:` — the grouping is only implicit " <>
+            "when the edge is an `over` block carrying a grain pair."
+        )
+
+      true ->
         :ok
     end
   end

@@ -1,14 +1,21 @@
-defmodule ReactiveDag.RelationshipEdgeTest do
+defmodule ReactiveDag.OverEdgeTest do
   @moduledoc """
-  `over_rel:` — an ASH RELATIONSHIP is the DAG edge. This is Ash's own
-  relational vocabulary, not SQL's: the correspondence is declared ONCE on the
-  resource (`has_many … source_attribute/destination_attribute`) and then
-  *named*, exactly as loads, filters and aggregates name it. One declaration
-  supplies all three facts the edge needs — which node, how rows group, and how
-  `:group` claims traverse back.
+  The `over_grain` BLOCK — the combinator's input edge with its grain correspondence
+  declared on it:
 
-  It is SUGAR: it lowers to `over:` + `group_by:` pairs, so the two spellings
-  share one execution path (proved by asserting the lowered spec below).
+      over_grain :expenses do
+        source_attribute :category         # this node's column
+        destination_attribute :expense_cat # the input's field
+      end
+
+  The NOTATION is Ash's (`source_attribute`/`destination_attribute`, the
+  correspondence written once and named), because Ash already solved how to say
+  this. The SEMANTICS are deliberately not `has_many`'s: no cardinality claim,
+  not loadable, not writable, no public API surface. It states one fact — how
+  the input's grain maps to this node's — and that fact is consumed at COMPILE
+  time, lowered to the combinator's `group_by` pair. Nothing traverses it at
+  recompute: a node reads its ONE input, materializes rows, and consumers query
+  those rows rather than re-deriving them back up the chain.
   """
   use ExUnit.Case, async: false
 
@@ -35,7 +42,7 @@ defmodule ReactiveDag.RelationshipEdgeTest do
 
     attributes do
       attribute :key, :string, primary_key?: true, allow_nil?: false, public?: true
-      # deliberately NOT named like the rollup's column — the relationship maps it
+      # deliberately NOT named like the rollup's column — the pair maps it
       attribute :expense_cat, :string, public?: true
       attribute :amount, :float, public?: true
     end
@@ -76,16 +83,8 @@ defmodule ReactiveDag.RelationshipEdgeTest do
       attribute :n, :integer, public?: true
     end
 
-    # THE EDGE, as an ordinary Ash relationship — nothing reactive_dag-specific
-    relationships do
-      has_many :expenses, ReactiveDag.RelationshipEdgeTest.Expenses do
-        source_attribute :category
-        destination_attribute :expense_cat
-      end
-    end
-
     identities do
-      identity :by_key, [:key], pre_check_with: ReactiveDag.RelationshipEdgeTest.Domain
+      identity :by_key, [:key], pre_check_with: ReactiveDag.OverEdgeTest.Domain
     end
 
     actions do
@@ -102,9 +101,13 @@ defmodule ReactiveDag.RelationshipEdgeTest do
       id(:category_totals)
       op(:fold)
 
-      # the relationship IS the edge: it names the input node AND the grouping
-      reduce over_rel: :expenses,
-             key_rule: :group,
+      # THE EDGE: which node, and how its grain maps to ours
+      over_grain :expenses do
+        source_attribute :category
+        destination_attribute :expense_cat
+      end
+
+      reduce key_rule: :group,
              into: [sum: [amount: :total], count: :n]
     end
   end
@@ -176,14 +179,15 @@ defmodule ReactiveDag.RelationshipEdgeTest do
   defp drain(plan),
     do: Drain.run(plan, recompute: ReactiveDag.Node.Recompute, key_rule: ReactiveDag.Node.KeyRule)
 
-  test "the relationship supplies the edge AND the grouping — lowered to the pair form" do
+  test "the block supplies the edge AND the grouping — lowered to the pair form" do
     plan = plan()
     cell = plan.cells["category_totals"]
 
-    # the DAG edge came from the relationship's destination
+    # the DAG edge came from the block
     assert cell.inputs == ["expenses"]
 
-    # SUGAR: what reaches assembly/recompute is the ordinary `over:` + pair form
+    # SUGAR: what reaches assembly/recompute is the ordinary `over:` + pair form.
+    # Nothing downstream knows the block existed.
     assert cell.meta.reduce.over == :expenses
     assert cell.meta.reduce.group_by == [{:category, :expense_cat}]
 
@@ -202,12 +206,12 @@ defmodule ReactiveDag.RelationshipEdgeTest do
     assert rows["meals"].total == 40.0
   end
 
-  test ":group claims traverse the relationship in reverse" do
+  test ":group claims traverse the pair in reverse" do
     plan = plan()
     {:ok, _} = Recompute.recompute(plan.cells["category_totals"], ["*"])
 
-    # a changed expense claims ITS category — resolved through the
-    # relationship's destination_attribute, with no group_by ever written
+    # a changed expense claims ITS category — resolved through the block's
+    # destination_attribute, with no group_by ever written by hand
     assert ReactiveDag.Node.KeyRule.rule(plan.cells["category_totals"], "expenses", ["e3"]) ==
              {:keys, ["meals"]}
   end
@@ -235,10 +239,10 @@ defmodule ReactiveDag.RelationshipEdgeTest do
     assert rows["meals"].total == 40.0
   end
 
-  test "an explicit group_by still wins over the relationship's own pair" do
-    defmodule ByAmountBand do
+  test "a bare `over_grain` block names only the edge; group_by stays explicit" do
+    defmodule ByAmount do
       use Ash.Resource,
-        domain: ReactiveDag.RelationshipEdgeTest.Domain,
+        domain: ReactiveDag.OverEdgeTest.Domain,
         data_layer: Ash.DataLayer.Ets,
         extensions: [ReactiveDag.Node]
 
@@ -251,13 +255,6 @@ defmodule ReactiveDag.RelationshipEdgeTest do
         attribute :n, :integer, public?: true
       end
 
-      relationships do
-        has_many :expenses, ReactiveDag.RelationshipEdgeTest.Expenses do
-          source_attribute :key
-          destination_attribute :expense_cat
-        end
-      end
-
       actions do
         defaults [:read]
 
@@ -268,16 +265,16 @@ defmodule ReactiveDag.RelationshipEdgeTest do
       end
 
       reactive do
-        id(:by_amount_band)
-        # the relationship names the EDGE; grouping is declared explicitly
-        reduce over_rel: :expenses,
-               group_by: [:amount],
-               into: [count: :n]
+        id(:by_amount)
+        # no grain pair: the block names the edge, the reduce names the grouping
+        over_grain(:expenses)
+
+        reduce group_by: [:amount], into: [count: :n]
       end
     end
 
-    plan = ReactiveDag.Node.graph([Expenses, ByAmountBand])
-    cell = plan.cells["by_amount_band"]
+    plan = ReactiveDag.Node.graph([Expenses, ByAmount])
+    cell = plan.cells["by_amount"]
 
     assert cell.inputs == ["expenses"]
     assert cell.meta.reduce.group_by == [:amount]
@@ -286,10 +283,10 @@ defmodule ReactiveDag.RelationshipEdgeTest do
   describe "compile-time errors" do
     alias ReactiveDag.Node.Verifiers.VerifyReactive
 
-    test "declaring neither over: nor over_rel:" do
+    test "naming no input at all" do
       defmodule NoEdge do
         use Ash.Resource,
-          domain: ReactiveDag.RelationshipEdgeTest.Domain,
+          domain: ReactiveDag.OverEdgeTest.Domain,
           data_layer: Ash.DataLayer.Simple,
           extensions: [ReactiveDag.Node]
 
@@ -302,62 +299,62 @@ defmodule ReactiveDag.RelationshipEdgeTest do
       assert {:error, %Spark.Error.DslError{message: msg}} =
                VerifyReactive.verify(NoEdge.spark_dsl_config())
 
-      assert msg =~ "neither `over:` nor `over_rel:`"
+      assert msg =~ "names no input"
     end
 
-    test "declaring BOTH over: and over_rel:" do
-      defmodule BothEdges do
+    test "declaring the edge twice" do
+      defmodule TwiceDeclared do
         use Ash.Resource,
-          domain: ReactiveDag.RelationshipEdgeTest.Domain,
+          domain: ReactiveDag.OverEdgeTest.Domain,
           data_layer: Ash.DataLayer.Simple,
           extensions: [ReactiveDag.Node]
 
-        attributes do
-          attribute :category, :string, primary_key?: true, allow_nil?: false, public?: true
-        end
+        reactive do
+          id(:twice_declared)
 
-        relationships do
-          has_many :expenses, ReactiveDag.RelationshipEdgeTest.Expenses do
-            source_attribute :category
-            destination_attribute :expense_cat
+          over_grain :expenses do
+            source_attribute(:category)
+            destination_attribute(:expense_cat)
           end
-        end
 
-        reactive do
-          id(:both_edges)
-          reduce over: :expenses, over_rel: :expenses, into: [count: :n]
+          reduce over: :expenses, into: [count: :n]
         end
       end
 
       assert {:error, %Spark.Error.DslError{message: msg}} =
-               VerifyReactive.verify(BothEdges.spark_dsl_config())
+               VerifyReactive.verify(TwiceDeclared.spark_dsl_config())
 
-      assert msg =~ "BOTH"
+      assert msg =~ "declared TWICE"
     end
 
-    test "over_rel: naming no such relationship" do
-      defmodule NoSuchRel do
+    test "a half grain pair with no group_by to cover it" do
+      defmodule HalfPair do
         use Ash.Resource,
-          domain: ReactiveDag.RelationshipEdgeTest.Domain,
+          domain: ReactiveDag.OverEdgeTest.Domain,
           data_layer: Ash.DataLayer.Simple,
           extensions: [ReactiveDag.Node]
 
         reactive do
-          id(:no_such_rel)
-          reduce over_rel: :nope, into: [count: :n]
+          id(:half_pair)
+
+          over_grain :expenses do
+            source_attribute(:category)
+          end
+
+          reduce into: [count: :n]
         end
       end
 
       assert {:error, %Spark.Error.DslError{message: msg}} =
-               VerifyReactive.verify(NoSuchRel.spark_dsl_config())
+               VerifyReactive.verify(HalfPair.spark_dsl_config())
 
-      assert msg =~ "names no such relationship"
+      assert msg =~ "no complete grain pair"
     end
 
     test "a plain over: still requires group_by" do
       defmodule NoGroup do
         use Ash.Resource,
-          domain: ReactiveDag.RelationshipEdgeTest.Domain,
+          domain: ReactiveDag.OverEdgeTest.Domain,
           data_layer: Ash.DataLayer.Simple,
           extensions: [ReactiveDag.Node]
 
