@@ -24,13 +24,14 @@ defmodule ReactiveDag.Node do
         reactive do
           op :fold
           key_rule :all
-          # `into` returns the row; the LIBRARY writes it into THIS resource
-          # (keyed by :key) and does the coordination Op.put. No `upsert:` needed.
+          # ASH-FIRST: the library reads :dmr_rows (dirty-key scoped), groups
+          # by the attributes, folds each group, and writes the row into THIS
+          # resource (keyed by :key) with the coordination Op.put. No `read:`,
+          # no `key:`, no `upsert:` — each slot has a fn escape hatch when the
+          # shape outgrows attributes.
           reduce over: :dmr_rows,
-                 read: &MyApp.FlowMonth.read/1,
-                 group_by: &MyApp.FlowMonth.group/1,
-                 key: &MyApp.FlowMonth.key/1,
-                 into: &MyApp.FlowMonth.into/2
+                 group_by: [:plant, :month],
+                 into: [avg: [flow: :avg_flow]]
         end
       end
 
@@ -43,19 +44,19 @@ defmodule ReactiveDag.Node do
   the `payload_action` upsert (default `:upsert`); set those in the `reactive`
   block if they're named otherwise.
 
-  ## Which computation? (reduce / join / aggregate / compute)
+  ## Which computation? (the Ash-first ladder)
 
-  | you want to… | use | rows into BEAM? | needs |
+  Start from what Ash expresses declaratively; each step outward trades
+  declarativeness for power:
+
+  | you want to… | use | rows into BEAM? | you write |
   |---|---|---|---|
-  | fold one input's rows into per-group summaries | `reduce` | all of `over` | a `read`/`group_by`/`into` |
-  | same, but one group → many output rows | `reduce` (`into` returns a list) | all of `over` | list rows carry own `:key` |
-  | left-join two inputs by key | `join` | all of `over` | `left`/`right`/`into` |
-  | group + `avg`/`sum`/`count` a relationship | `aggregate` | **none** (datastore GROUP BY) | a `has_many` on this resource |
-  | anything else (LLM, fetch, bespoke) | `compute Mod` | up to the module | a `ReactiveDag.Op` |
-
-  Rule of thumb: `aggregate` when the fold is a datastore aggregate over a
-  relationship (pushdown, no rows in memory); `reduce` for any other in-BEAM fold;
-  `compute` when no combinator fits.
+  | group + `avg`/`sum`/`count` a relationship | `aggregate` | **none** (datastore GROUP BY) | attribute atoms |
+  | fold one input's rows into per-group summaries | `reduce` | the scoped slice of `over` | `group_by:` attrs + an `into:` fold |
+  | reconcile one input's two sides by key | `join` | the scoped slice of `over` | side attrs/`[key:, where:]` + picks |
+  | a slot the attributes can't express | the slot's `fn` form | same | one fn (computed group, `:status` row, expand, custom read) |
+  | arbitrary recompute, kept Ash-native | `run :action` | up to the action | a generic action on THIS resource |
+  | recompute beyond Ash (LLM, fetch, bespoke) | `compute Mod` | up to the module | a `ReactiveDag.Op` |
 
   ## Node shapes (what scaffolding a node needs)
 

@@ -18,47 +18,24 @@ The line between payload and verdict is exactly whether the result fits the
 tuple's fixed schema. A verdict node that declares payload attributes raises at
 compile time — the attributes would silently never be written.
 
-## Combinators
+## Declaring the computation
 
-Declarative combinators cover the common shapes. Each reads its input, computes
+Authoring is **Ash-first**: start from what Ash can express declaratively and
+work outward — each step down the ladder trades declarativeness for power, and
+you take only the steps your shape needs. Every form reads its input, computes
 the result set, writes it (into the node's own resource by default), and
-`Op.put`s **only the changed keys** — so downstream work is proportional to
+`Op.put`s **only the changed keys**, so downstream work is proportional to
 real change.
 
-### `reduce` — an in-BEAM fold
+| rung | you write | when |
+|---|---|---|
+| `aggregate` | attribute atoms only | the fold is a datastore aggregate over a relationship |
+| declarative `reduce`/`join` | attributes + fold keywords | grouping/joining by attributes; the library reads Ash for you |
+| per-slot `fn` escapes | a fn for the one slot that outgrew attributes | computed groups, `:status` rows, expand, custom reads |
+| `run :action` | a generic Ash action on this resource | arbitrary recompute that should stay a first-class action |
+| `compute Module` | a `ReactiveDag.Op` | recompute that outgrows Ash entirely |
 
-```elixir
-reduce over: :fiscal_lines,
-       read: fn :fiscal_lines -> FiscalDoc |> Ash.read!() end,
-       group_by: fn line -> {line.fund, line.fy} end,
-       key: fn {fund, fy} -> "#{fund}|#{fy}" end,
-       into: fn {fund, _fy}, lines -> %{key: ..., fund: fund, total: sum(lines)} end
-```
-
-Two variations worth knowing:
-
-- **expand** — `into` may return a **list** of rows (one group → many outputs);
-  each returned row must carry its own `:key`. There is no separate `expand`
-  entity; it is this list-returning shape of `reduce`.
-- **scoped reads** — `read` may be arity-2 (`(over, dirty_keys) -> items`;
-  `dirty_keys` is `nil` for whole-cell) to narrow the datastore read to the
-  claimed keys. Important for large inputs.
-
-### `join` — a left join (one input, two sides)
-
-```elixir
-join over: :observations,
-     read: fn _over -> Observation |> Ash.read!() end,
-     left: fn item -> item.declared_id end,       # nil = not on this side
-     right: fn item -> item.observed_id end,
-     key: fn join_key -> join_key end,
-     into: fn _key, declared, observed_or_nil -> %{key: ..., status: ...} end
-```
-
-One row per **left** key, right side optional — the declared-vs-observed
-reconcile shape. A missing right is information (a gap), not an error.
-
-### `aggregate` — a pure-datastore fold
+### `aggregate` — the datastore does it
 
 ```elixir
 aggregate over: :dmr_reports,          # a has_many on THIS resource
@@ -69,15 +46,94 @@ aggregate over: :dmr_reports,          # a has_many on THIS resource
 
 Postgres does the `GROUP BY`; **no rows cross into the BEAM**. Only expressible
 as a relationship aggregate (the group must be a resource with a relationship
-to the input) — for anything else, use `reduce`.
+to the input) — for anything else, step down to `reduce`.
 
-### `compute` — the escape hatch
+### `reduce` — an in-BEAM fold, declared
+
+```elixir
+reduce over: :fiscal_lines,
+       group_by: [:fund, :fy],                    # group by attributes
+       into: [sum: [amount: :total], count: :n]   # fold each group
+```
+
+No `read:` — the library reads the over node's resource (its primary read
+action), **automatically scoped to the claimed dirty keys** by filtering the
+over's payload key. No `key:` — the group's values join with `"|"`
+(`"gf|2025"`); `key_prefix: "roll"` namespaces (`"roll|gf|2025"`). The row is
+the group's attributes plus the fold results (`count`/`sum`/`avg`/`min`/`max`/
+`first`, nil sources excluded, SQL-style), written into this resource by the
+payload loop. `read: :recent` names a `:read` action on the over resource
+instead of its primary — same auto-scoping.
+
+Each slot has a **fn escape hatch** when the shape outgrows attributes:
+
+```elixir
+reduce over: :fiscal_lines,
+       read: fn :fiscal_lines, dirty -> MyApp.Fiscal.lines!(dirty) end,  # custom read/scoping
+       group_by: fn line -> {line.fund, line.fy} end,                    # computed group
+       key: fn {fund, fy} -> "#{fund}|#{fy}" end,
+       into: fn {fund, _fy}, lines -> %{key: ..., fund: fund, total: sum(lines)} end
+```
+
+Slots resolve independently — a declarative `group_by` with an `into:` fn is
+fine (the fn receives the group tuple exactly as the fn idiom always has). Two
+shapes *require* the `into:` fn: a **verdict** row (it must carry `:status`)
+and **expand** (`into` returns a **list** of self-`:key`ed rows — one group →
+many outputs; there is no separate `expand` entity). An arity-2 `read:` fn
+receives the claimed dirty keys (`nil` = whole-cell) for hand-rolled scoping.
+
+### `join` — a left join (one input, two sides), declared
+
+```elixir
+join over: :entries,
+     left:  [key: :acct, where: [kind: "budget"]],   # side = discriminator + key
+     right: [key: :acct, where: [kind: "actual"]],
+     into:  [left: [amount: :budget], right: [amount: :actual]]
+```
+
+One row per **left** key, right side optional; an absent side yields `nil`
+columns, so the declared-vs-observed gap is information, not an error. A plain
+attribute is the two-column case (`left: :declared_id` — a nil value means
+"not on this side"); `[key:, where:]` splits ONE input into sides by a
+discriminator field. `outer: true` also emits right-only keys (an undeclared
+member is a finding). The fn escapes: `left: fn item -> ... end` for computed
+side keys, `into: fn jk, l, r -> ... end` for computed columns
+(variance = budget − actual) or `:status` rows.
+
+### `run` — a generic Ash action as the recompute
+
+```elixir
+actions do
+  action :extract, {:array, :string} do
+    argument :keys, {:array, :string}, allow_nil?: true   # nil = whole-cell
+    argument :cell_id, :string
+    run fn input, _ctx ->
+      changed = MyApp.Extract.run(input.arguments[:keys])
+      {:ok, changed}                                      # the CHANGED keys
+    end
+  end
+end
+
+reactive do
+  run :extract
+  ref :transcripts
+end
+```
+
+The Ash-native escape hatch — one step less escape than a module, because the
+computation stays a first-class action: arguments, policies, testable with
+`Ash.run_action`. The library passes only the arguments the action declares
+(`keys`, `cell_id` — declare neither for a whole-cell recompute), the action
+does its own domain writes, and the library `Op.put`s each returned key. The
+action must exist and be generic — verified at compile time.
+
+### `compute` — the outermost escape hatch
 
 ```elixir
 compute MyApp.Ops.EventsExtract   # implements ReactiveDag.Op
 ```
 
-For anything the combinators can't express: an LLM call, an external fetch, a
+For recompute that outgrows Ash entirely: an LLM call, an external fetch, a
 bespoke multi-input recompute. The op receives `(cell, dirty_keys)`, reads its
 inputs however it likes, writes via `ReactiveDag.Op.put/3`, and returns the
 keys that actually changed.

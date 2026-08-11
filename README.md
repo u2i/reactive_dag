@@ -66,22 +66,23 @@ defmodule MyApp.BudgetRollups do
   attributes do
     attribute :key, :string, primary_key?: true          # the payload columns
     attribute :fund, :string
+    attribute :fy, :integer
     attribute :total, :float
   end
   actions do
-    create :upsert do upsert?(true); upsert_identity(:key); accept([:key, :fund, :total]) end
+    create :upsert do upsert?(true); upsert_identity(:key); accept([:key, :fund, :fy, :total]) end
   end
 
   reactive do
     op :fold
     key_rule :all
-    # read → group_by → reduce each group to one row. `into`'s row is written into
-    # THIS resource (keyed by :key) by the library; it Op.puts only changed keys.
+    # ASH-FIRST: the library reads :fiscal_lines (dirty-key scoped), groups by
+    # the attributes, folds each group, writes the row into THIS resource, and
+    # Op.puts only the changed keys. Keys derive as "gf|2025". Every slot has a
+    # fn escape hatch when the shape outgrows attributes.
     reduce over: :fiscal_lines,
-           read:     fn :fiscal_lines -> FiscalDoc |> Ash.read!() end,
-           group_by: fn line -> {line.fund, line.fy} end,
-           key:      fn {fund, fy} -> "#{fund}|#{fy}" end,
-           into:     fn {fund, _fy}, lines -> %{key: …, fund: fund, total: sum(lines)} end
+           group_by: [:fund, :fy],
+           into: [sum: [amount: :total]]
   end
 end
 ```
@@ -91,30 +92,36 @@ than the node's own resource (e.g. an existing shadow table). A tableless node
 (`data_layer: Ash.DataLayer.Simple`, no attributes) either supplies `upsert:` or
 uses the `compute Module` escape hatch.
 
-Declarative combinators cover the common shapes; each writes the result set (into
-the node's resource, or a custom `upsert:`) and `Op.put`s only the changed keys:
+Authoring is **Ash-first** — start from what Ash expresses declaratively and
+step outward only as far as the shape demands. Each form writes the result set
+(into the node's resource, or a custom `upsert:`) and `Op.put`s only the
+changed keys:
 
-- **`reduce`** — a fold: read `over` into the BEAM, group, `into` returns one row
-  per group. (`into` may instead return a **list** of rows — a group → many-rows
-  "expand"; each returned row must carry its own `:key`. There is no separate
-  `expand` entity; it's this list-returning shape of `reduce`.) `read` may be
-  arity-2 (`over, dirty_keys -> items`) to **scope** the datastore read to the
-  claimed keys instead of whole-cell — important for large inputs.
-- **`join`** — a left join over ONE input's rows, split into `left`/`right`
-  sides by two key fns: emit one row per left key joined to its right (right
-  may be absent).
-- **`aggregate`** — a **pure-Ash-query** fold: the datastore groups + aggregates a
-  relationship (`avg`/`sum`/`count`/…) in ONE query — no rows cross into the BEAM.
-  The node's resource is the group's resource (one row per group); `over` is its `has_many`. Only for
-  relationship aggregates (Ash has no arbitrary `GROUP BY … → rows`); use `reduce`
-  for in-BEAM folds. Example: `aggregate over: :readings, avg: [flow: :avg_flow], count: :day_count`.
+- **`aggregate`** — the datastore does it: group + aggregate a relationship
+  (`avg`/`sum`/`count`/…) in ONE query — no rows cross into the BEAM. The
+  node's resource is the group's resource; `over` is its `has_many`. Only for
+  relationship aggregates (Ash has no arbitrary `GROUP BY … → rows`).
+  Example: `aggregate over: :readings, avg: [flow: :avg_flow], count: :day_count`.
+- **`reduce`** — an in-BEAM fold, declared: no `read:` (the library reads the
+  over node's resource, auto-scoped to the dirty keys), `group_by:` names
+  attributes, `into:` declares the fold (`[sum: [amount: :total], count: :n]`),
+  keys derive as `"gf|2025"` (`key_prefix:` namespaces). Per-slot fn escape
+  hatches cover computed groups, custom reads/scoping, verdict `:status` rows,
+  and expand (`into` returning a **list** of self-`:key`ed rows).
+- **`join`** — a left join over ONE input, declared: sides are attributes
+  (`left: :declared_id`) or `[key: :acct, where: [kind: "budget"]]`
+  discriminator splits; `into:` picks columns per side, absent sides yielding
+  nils (the gap is information). fn escapes for computed side keys/columns.
+- **`run :action`** — the Ash-native escape hatch: the recompute is a GENERIC
+  action on the node's own resource (`(keys, cell_id) -> changed keys`; the
+  action writes its domain, the library `Op.put`s). Arguments, policies,
+  `Ash.run_action` testability — the computation stays a first-class action.
 
-Anything the combinators can't express — an LLM call, a PDF/Tigris fetch, a
-bespoke multi-input recompute — uses the module escape hatch, declared as an
-entity in the same block: `compute MyOp` where `MyOp` implements
-`ReactiveDag.Op`. (Mirrors Ash's `calculate :x, :type, MyModule` — the arbitrary
-case is an entity too, not a schema key beside the declarative ones.) The
-combinators and the escape hatch coexist in the block.
+Beyond Ash entirely — an LLM call, a PDF/Tigris fetch, a bespoke multi-input
+recompute — the outermost escape hatch is a module: `compute MyOp` where `MyOp`
+implements `ReactiveDag.Op`. (Mirrors Ash's `calculate :x, :type, MyModule` —
+the arbitrary case is an entity too, not a schema key beside the declarative
+ones.)
 
 ### Input edges: `ref` (recompute) vs `reference` (read-as-context)
 
