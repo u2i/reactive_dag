@@ -4,7 +4,11 @@
     ".": {
       "release-type": "elixir",
       "include-component-in-tag": false,
-      "extra-files": ["mix.exs"]
+      "extra-files": ["mix.exs"],
+      "bump-minor-pre-major": true,
+      "versioning": "prerelease",
+      "prerelease": true,
+      "prerelease-type": "rc"
     }
   }
 }
