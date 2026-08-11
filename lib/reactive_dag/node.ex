@@ -244,17 +244,21 @@ defmodule ReactiveDag.Node do
     args: [:unit],
     describe:
       "The unit a change invalidates — `recompute_by :category, from: :expense_cat` " <>
-        "(per category, by looking the changed rows up), `from_key: true` (per unit, " <>
-        "resolved purely from the key's segments), or `:cell` (redo everything). " <>
-        "Omit it for key-for-key. Subsumes `key_rule`, and supplies the grouping.",
+        "(per category, by looking the changed rows up), the COMPOSITE form " <>
+        "`recompute_by [fund: :fund_code, fy: :fy]` (a multi-column unit, stated once), " <>
+        "`from_key: true` (resolved purely from the key's segments), or `:cell` (redo " <>
+        "everything). Omit it for key-for-key. Subsumes `key_rule` AND the grouping.",
     schema: [
       unit: [
-        type: :atom,
+        type: {:or, [:atom, :keyword_list]},
         required: true,
         doc:
-          "THIS node's column naming the unit (`:category`, `:month`), or the reserved " <>
-            "`:cell` — the whole cell, for a computation whose every output depends on " <>
-            "every input."
+          "THIS node's column naming the unit (`:category`, `:month`), the reserved " <>
+            "`:cell` (the whole cell, for a computation whose every output depends on " <>
+            "every input), or the COMPOSITE grain as `[this_column: :input_field, …]` " <>
+            "(`[fund: :fund_code, fy: :fy]` — the unit IS the grouping, so `group_by:` " <>
+            "is not restated; the cell key serializes the columns in order). With the " <>
+            "composite form, `from:` is carried per entry and must not also be given."
       ],
       to: [
         type: :atom,
@@ -269,7 +273,8 @@ defmodule ReactiveDag.Node do
         doc:
           "the INPUT's field the unit is computed from (`:expense_cat`) — what is read " <>
             "and grouped, and what a claim traverses back through. Resolution READS the " <>
-            "changed rows; a key it can't find (a deleted row) degrades to whole-cell."
+            "changed rows; a key it can't find (a deleted row) degrades to whole-cell. " <>
+            "For a COMPOSITE unit the pairs carry this instead, so `from:` is omitted."
       ],
       from_key: [
         type: :boolean,
@@ -1529,6 +1534,11 @@ defmodule ReactiveDag.Node do
   # left, the input's field on the right. `:cell` groups nothing (the whole cell
   # is one unit); a unit with no `from:` leaves grouping to the combinator.
   defp unit_group_by(%RecomputeBy{unit: :cell}), do: nil
+
+  # the COMPOSITE form IS the grouping: `[fund: :fund_code, fy: :fy]` is already
+  # the `group_by` pair list, so it passes straight through.
+  defp unit_group_by(%RecomputeBy{unit: pairs}) when is_list(pairs), do: pairs
+
   defp unit_group_by(%RecomputeBy{from: nil}), do: nil
   defp unit_group_by(%RecomputeBy{unit: u, from: f}), do: [{u, f}]
 

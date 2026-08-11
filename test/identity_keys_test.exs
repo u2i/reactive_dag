@@ -88,12 +88,12 @@ defmodule ReactiveDag.IdentityKeysTest do
       id(:rollups)
       op(:fold)
 
-      # a COMPOSITE unit: the pair spelling stays on `group_by:` (two columns,
-      # one key), and `recompute_by` names the unit those columns form.
-      recompute_by :fund, to: :lines, from: :fund_code
+      # THE COMPOSITE UNIT, stated once: the grain IS the grouping, so there
+      # is no `group_by:` to restate. Reads as
+      # "rollups.fund = lines.fund_code AND rollups.fy = lines.fy".
+      recompute_by [fund: :fund_code, fy: :fy], to: :lines
 
-      reduce group_by: [fund: :fund_code, fy: :fy],
-             into: [sum: [amount: :total], count: :n]
+      reduce into: [sum: [amount: :total], count: :n]
     end
   end
 
@@ -204,4 +204,35 @@ defmodule ReactiveDag.IdentityKeysTest do
     assert msg =~ ":fy"
     assert msg =~ "identify its row"
   end
+  test "a COMPOSITE unit scopes the read per column (a superset, never the whole table)" do
+    plan = plan()
+    cell = plan.cells["rollups"]
+
+    # the unit lowered to the pair form, and assembly proved both columns are
+    # plain strings — the two facts composite scoping needs
+    assert cell.meta.reduce.group_by == [fund: :fund_code, fy: :fy]
+    assert cell.meta.over_source.group_key_plan ==
+             [{:attr, :fund_code, true}, {:attr, :fy, true}]
+
+    {:ok, _} = Recompute.recompute(cell, ["*"])
+
+    # ONE claim inverts exactly: fund_code in ["gf"] AND fy in ["2025"]
+    assert {:all_of, [{:attr, :fund_code, ["gf"]}, {:attr, :fy, ["2025"]}]} =
+             scope_for(cell, ["gf|2025"])
+
+    # SEVERAL claims are a cross-product superset — sound (closed over unit
+    # boundaries), and still far tighter than reading every line
+    assert {:all_of, [{:attr, :fund_code, funds}, {:attr, :fy, fys}]} =
+             scope_for(cell, ["gf|2025", "water|2026"])
+
+    assert Enum.sort(funds) == ["gf", "water"]
+    assert Enum.sort(fys) == ["2025", "2026"]
+
+    # and the fold still lands on exactly the claimed units
+    {:ok, changed} = Recompute.recompute(cell, ["gf|2025"])
+    assert changed == []
+  end
+
+  # the library's auto-scope for a claim set (what Read filters the query by)
+  defp scope_for(cell, keys), do: Recompute.auto_scope(cell, keys)
 end

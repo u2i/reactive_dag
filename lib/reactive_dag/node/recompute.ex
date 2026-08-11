@@ -171,7 +171,9 @@ defmodule ReactiveDag.Node.Recompute do
   #   anything else    → no auto scope: a grain-changing host rule's claims must
   #                     not filter the child-grain read; `query:` still receives
   #                     them for host-grain scoping.
-  defp auto_scope(%Cell{meta: meta}, keys) do
+  @doc false
+  # public for tests: the scope the library derives from a claim set.
+  def auto_scope(%Cell{meta: meta}, keys) do
     case meta[:key_rule] do
       :identity -> keyed_scope(keys)
       nil -> keyed_scope(keys)
@@ -211,8 +213,42 @@ defmodule ReactiveDag.Node.Recompute do
           {:range, attr, Enum.min(froms, Date), Enum.max(tos, Date)}
         end
 
+      # a COMPOSITE unit: each claim is its columns joined with "|", so split
+      # them back apart and scope each column by the values seen at its
+      # position. For SEVERAL claims this is a cross-product SUPERSET (claims
+      # "gf|2025" and "water|2026" also admit "gf|2026") — still sound, because
+      # a superset read stays closed over unit boundaries, and far tighter than
+      # reading the whole table. Only plain-string columns invert; a mixed plan
+      # scopes by the string ones it can and leaves the rest to the fold.
+      %{group_key_plan: [_, _ | _] = plan} ->
+        composite_scope(plan, values)
+
       _ ->
         nil
+    end
+  end
+
+  defp composite_scope(plan, labels) do
+    segments = Enum.map(labels, &String.split(&1, "|"))
+
+    if Enum.any?(segments, &(length(&1) != length(plan))) do
+      # a key that doesn't match the plan's arity isn't ours to invert
+      nil
+    else
+      plan
+      |> Enum.with_index()
+      |> Enum.flat_map(fn
+        {{:attr, attr, true}, i} ->
+          [{:attr, attr, segments |> Enum.map(&Enum.at(&1, i)) |> Enum.uniq()}]
+
+        _other ->
+          []
+      end)
+      |> case do
+        [] -> nil
+        [one] -> one
+        many -> {:all_of, many}
+      end
     end
   end
 

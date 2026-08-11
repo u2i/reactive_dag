@@ -119,8 +119,29 @@ Four answers to the one question:
 |---|---|
 | *(omitted)* | key-for-key — a changed input key maps to the same output key |
 | `recompute_by :cat, from: :field` | per unit, resolved by **reading** the changed rows; a key the lookup can't find (a deleted row) degrades to whole-cell |
+| `recompute_by [fund: :fund_code, fy: :fy]` | a **composite** unit — the grain IS the grouping, so `group_by:` is not restated |
 | `recompute_by :month, from_key: true` | per unit, resolved **purely** from the changed key's `\|`-segments — no query, deletion-safe, at the price of the key-grammar contract |
 | `recompute_by :cell` | the whole cell — any change re-does everything |
+
+### Composite grain
+
+A unit can be several columns. State the pairs once and the grouping follows:
+
+```elixir
+recompute_by [fund: :fund_code, fy: :fy], to: :lines
+reduce into: [sum: [amount: :total], count: :n]
+```
+
+Reads as `rollups.fund = lines.fund_code AND rollups.fy = lines.fy`. The cell
+key serializes the columns in order (`"gf|2025"`), and with a composite primary
+key the row is identity-keyed — no key column at all.
+
+The read is **scoped per column**: a claim of `"gf|2025"` becomes
+`fund_code IN ("gf") AND fy IN ("2025")`. For several claims that admits a
+cross-product superset (`"gf|2025"` + `"water|2026"` also matches `"gf|2026"`)
+— still sound, since a superset read stays closed over unit boundaries, and far
+tighter than reading the whole table. Columns that aren't plain strings don't
+invert; the fold sorts them out.
 
 **It is the recompute unit, not the output's grain.** They coincide for a plain
 rollup and diverge the moment one unit emits many rows: percentile

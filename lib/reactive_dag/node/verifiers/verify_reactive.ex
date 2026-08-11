@@ -198,8 +198,31 @@ defmodule ReactiveDag.Node.Verifiers.VerifyReactive do
             "`reduce` still needs `group_by:` to say how rows are folded."
         )
 
-      # a unit with no `from:` can't supply the grouping
-      not is_nil(u) and u.unit != :cell and is_nil(u.from) and is_nil(r.group_by) ->
+      # the composite form carries `from:` per entry — a top-level `from:` too
+      # is two answers to one question
+      not is_nil(u) and is_list(u.unit) and not is_nil(u.from) ->
+        error(
+          dsl,
+          "`recompute_by #{inspect(u.unit)}` is a COMPOSITE unit — each entry already " <>
+            "carries the input field it comes from, so the top-level " <>
+            "`from: #{inspect(u.from)}` is a second answer. Drop it."
+        )
+
+      # a composite unit's entries must all be `this_column: :input_field` pairs
+      not is_nil(u) and is_list(u.unit) and
+          not Enum.all?(u.unit, &match?({a, b} when is_atom(a) and is_atom(b), &1)) ->
+        error(
+          dsl,
+          "a COMPOSITE `recompute_by` takes `[this_column: :input_field, …]` pairs — " <>
+            "got #{inspect(u.unit)}"
+        )
+
+      not is_nil(u) and is_list(u.unit) and u.unit == [] ->
+        error(dsl, "a COMPOSITE `recompute_by` names no columns — got `[]`")
+
+      # a single-column unit with no `from:` can't supply the grouping
+      not is_nil(u) and u.unit != :cell and not is_list(u.unit) and is_nil(u.from) and
+          is_nil(r.group_by) ->
         error(
           dsl,
           "`recompute_by #{inspect(u.unit)}` declares no `from:` (the input field the " <>
