@@ -1,21 +1,26 @@
-defmodule ReactiveDag.OverEdgeTest do
+defmodule ReactiveDag.RecomputeByTest do
   @moduledoc """
-  The `over_grain` BLOCK — the combinator's input edge with its grain correspondence
-  declared on it:
+  `recompute_by` — THE declaration the engine cares about: **what unit does a
+  change invalidate?**
 
-      over_grain :expenses do
-        source_attribute :category         # this node's column
-        destination_attribute :expense_cat # the input's field
-      end
+      recompute_by :category, to: :expenses, from: :expense_cat
 
-  The NOTATION is Ash's (`source_attribute`/`destination_attribute`, the
-  correspondence written once and named), because Ash already solved how to say
-  this. The SEMANTICS are deliberately not `has_many`'s: no cardinality claim,
-  not loadable, not writable, no public API surface. It states one fact — how
-  the input's grain maps to this node's — and that fact is consumed at COMPILE
-  time, lowered to the combinator's `group_by` pair. Nothing traverses it at
-  recompute: a node reads its ONE input, materializes rows, and consumers query
-  those rows rather than re-deriving them back up the chain.
+  Read: "recompute by category, from the input's `expense_cat`". A change to a
+  row's `expense_cat` invalidates my `category` unit, so redo it whole. That one
+  fact supplies the input edge, the grouping, the claim rule and the read scope
+  — which is why it SUBSUMES `key_rule`: the same unit, previously stated twice
+  and required to agree.
+
+  Everything else a combinator declares (`group_by`, `into`, key derivation) is
+  mapping data into shape once you already know what to recompute.
+
+  Note it is the RECOMPUTE unit, not the output's grain. They coincide for a
+  plain rollup and diverge the moment one unit emits many rows — percentiles
+  per day recompute by day while their rows are keyed day+percentile.
+
+  Consumed at COMPILE time: lowered to `over:` + `group_by:` + `key_rule`, and
+  never traversed at recompute. A node reads its ONE input, materializes rows,
+  and consumers query those rows rather than re-deriving them up the chain.
   """
   use ExUnit.Case, async: false
 
@@ -84,7 +89,7 @@ defmodule ReactiveDag.OverEdgeTest do
     end
 
     identities do
-      identity :by_key, [:key], pre_check_with: ReactiveDag.OverEdgeTest.Domain
+      identity :by_key, [:key], pre_check_with: ReactiveDag.RecomputeByTest.Domain
     end
 
     actions do
@@ -101,14 +106,12 @@ defmodule ReactiveDag.OverEdgeTest do
       id(:category_totals)
       op(:fold)
 
-      # THE EDGE: which node, and how its grain maps to ours
-      over_grain :expenses do
-        source_attribute :category
-        destination_attribute :expense_cat
-      end
+      # THE UNIT: a change to an expense's :expense_cat invalidates my
+      # :category unit — redo it whole. Supplies the edge, the grouping and
+      # the claim rule.
+      recompute_by :category, to: :expenses, from: :expense_cat
 
-      reduce key_rule: :group,
-             into: [sum: [amount: :total], count: :n]
+      reduce into: [sum: [amount: :total], count: :n]
     end
   end
 
@@ -179,17 +182,19 @@ defmodule ReactiveDag.OverEdgeTest do
   defp drain(plan),
     do: Drain.run(plan, recompute: ReactiveDag.Node.Recompute, key_rule: ReactiveDag.Node.KeyRule)
 
-  test "the block supplies the edge AND the grouping — lowered to the pair form" do
+  test "the unit supplies the edge, the grouping AND the claim rule" do
     plan = plan()
     cell = plan.cells["category_totals"]
 
-    # the DAG edge came from the block
+    # the DAG edge came from the unit
     assert cell.inputs == ["expenses"]
 
-    # SUGAR: what reaches assembly/recompute is the ordinary `over:` + pair form.
-    # Nothing downstream knows the block existed.
+    # SUGAR: what reaches assembly/recompute is the ordinary `over:` + pair
+    # form, with the claim rule derived. Nothing downstream knows `recompute_by`
+    # existed — including `key_rule`, which is no longer written by hand.
     assert cell.meta.reduce.over == :expenses
     assert cell.meta.reduce.group_by == [{:category, :expense_cat}]
+    assert cell.meta.key_rule == :group
 
     # ...so the group plan is the same one the explicit spelling produces
     assert cell.meta.over_source.group_key_plan == [{:attr, :expense_cat, true}]
@@ -206,12 +211,12 @@ defmodule ReactiveDag.OverEdgeTest do
     assert rows["meals"].total == 40.0
   end
 
-  test ":group claims traverse the pair in reverse" do
+  test "claims traverse the unit's pair in reverse" do
     plan = plan()
     {:ok, _} = Recompute.recompute(plan.cells["category_totals"], ["*"])
 
-    # a changed expense claims ITS category — resolved through the block's
-    # destination_attribute, with no group_by ever written by hand
+    # a changed expense claims ITS category — resolved through the unit's
+    # `from:`, with neither group_by nor key_rule written by hand
     assert ReactiveDag.Node.KeyRule.rule(plan.cells["category_totals"], "expenses", ["e3"]) ==
              {:keys, ["meals"]}
   end
@@ -239,10 +244,10 @@ defmodule ReactiveDag.OverEdgeTest do
     assert rows["meals"].total == 40.0
   end
 
-  test "a bare `over_grain` block names only the edge; group_by stays explicit" do
+  test "`recompute_by :cell` is the whole-cell unit (what key_rule :all said)" do
     defmodule ByAmount do
       use Ash.Resource,
-        domain: ReactiveDag.OverEdgeTest.Domain,
+        domain: ReactiveDag.RecomputeByTest.Domain,
         data_layer: Ash.DataLayer.Ets,
         extensions: [ReactiveDag.Node]
 
@@ -266,8 +271,9 @@ defmodule ReactiveDag.OverEdgeTest do
 
       reactive do
         id(:by_amount)
-        # no grain pair: the block names the edge, the reduce names the grouping
-        over_grain(:expenses)
+        # whole-cell unit: any change re-prices everything, so the reduce
+        # still says how rows are folded
+        recompute_by :cell, to: :expenses
 
         reduce group_by: [:amount], into: [count: :n]
       end
@@ -278,6 +284,7 @@ defmodule ReactiveDag.OverEdgeTest do
 
     assert cell.inputs == ["expenses"]
     assert cell.meta.reduce.group_by == [:amount]
+    assert cell.meta.key_rule == :all
   end
 
   describe "compile-time errors" do
@@ -286,7 +293,7 @@ defmodule ReactiveDag.OverEdgeTest do
     test "naming no input at all" do
       defmodule NoEdge do
         use Ash.Resource,
-          domain: ReactiveDag.OverEdgeTest.Domain,
+          domain: ReactiveDag.RecomputeByTest.Domain,
           data_layer: Ash.DataLayer.Simple,
           extensions: [ReactiveDag.Node]
 
@@ -302,20 +309,17 @@ defmodule ReactiveDag.OverEdgeTest do
       assert msg =~ "names no input"
     end
 
-    test "declaring the edge twice" do
+    test "naming the input twice" do
       defmodule TwiceDeclared do
         use Ash.Resource,
-          domain: ReactiveDag.OverEdgeTest.Domain,
+          domain: ReactiveDag.RecomputeByTest.Domain,
           data_layer: Ash.DataLayer.Simple,
           extensions: [ReactiveDag.Node]
 
         reactive do
           id(:twice_declared)
 
-          over_grain :expenses do
-            source_attribute(:category)
-            destination_attribute(:expense_cat)
-          end
+          recompute_by :category, to: :expenses, from: :expense_cat
 
           reduce over: :expenses, into: [count: :n]
         end
@@ -324,22 +328,20 @@ defmodule ReactiveDag.OverEdgeTest do
       assert {:error, %Spark.Error.DslError{message: msg}} =
                VerifyReactive.verify(TwiceDeclared.spark_dsl_config())
 
-      assert msg =~ "declared TWICE"
+      assert msg =~ "named TWICE"
     end
 
-    test "a half grain pair with no group_by to cover it" do
+    test "a unit with no `from:` and no group_by to cover it" do
       defmodule HalfPair do
         use Ash.Resource,
-          domain: ReactiveDag.OverEdgeTest.Domain,
+          domain: ReactiveDag.RecomputeByTest.Domain,
           data_layer: Ash.DataLayer.Simple,
           extensions: [ReactiveDag.Node]
 
         reactive do
           id(:half_pair)
 
-          over_grain :expenses do
-            source_attribute(:category)
-          end
+          recompute_by :category, to: :expenses
 
           reduce into: [count: :n]
         end
@@ -348,13 +350,13 @@ defmodule ReactiveDag.OverEdgeTest do
       assert {:error, %Spark.Error.DslError{message: msg}} =
                VerifyReactive.verify(HalfPair.spark_dsl_config())
 
-      assert msg =~ "no complete grain pair"
+      assert msg =~ "declares no `from:`"
     end
 
     test "a plain over: still requires group_by" do
       defmodule NoGroup do
         use Ash.Resource,
-          domain: ReactiveDag.OverEdgeTest.Domain,
+          domain: ReactiveDag.RecomputeByTest.Domain,
           data_layer: Ash.DataLayer.Simple,
           extensions: [ReactiveDag.Node]
 

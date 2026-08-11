@@ -95,14 +95,14 @@ defmodule ReactiveDag.DateRollupDemoTest do
     reactive do
       id(:monthly_readings)
       op(:fold)
-      # THE UNIFIED RULE: a changed reading claims its GROUP (the month), and
-      # `from: :key` resolves it PURELY — the key's date prefix is the group's
-      # input field, relabeled through the SAME Calendar calculation group_by
-      # names. No data lookup, deletion-safe, and the library auto-scopes the
-      # read to the claimed months' date range through the same plan.
-      reduce over: :readings,
-             group_by: [:month],
-             key_rule: {:group, from: :key},
+      # THE UNIT: recompute by month, resolved PURELY from the changed key's
+      # leading segments (`from_key: true`) — the key's date prefix relabels
+      # through the SAME Calendar calculation `group_by` names. No data lookup,
+      # deletion-safe, and the library auto-scopes the read to the claimed
+      # months' date range through the same plan.
+      recompute_by :month, to: :readings, from_key: true
+
+      reduce group_by: [:month],
              into: [sum: [value: :total], count: :n]
     end
   end
@@ -215,8 +215,8 @@ defmodule ReactiveDag.DateRollupDemoTest do
 
     steps = Map.new(report.steps, &{&1.cell, &1})
 
-    # `key_rule: {:group, from: :key}` mapped the changed reading key to ITS
-    # month by pure string work — the rollup was claimed per-group, not
+    # `recompute_by :month, from_key: true` mapped the changed reading key to
+    # ITS month by pure string work — the rollup was claimed per-unit, not
     # whole-cell, and the library scoped the read to that month's date range.
     assert steps["monthly_readings"].claimed == ["2026-08"]
     assert steps["monthly_readings"].changed == ["2026-08"]
@@ -235,7 +235,9 @@ defmodule ReactiveDag.DateRollupDemoTest do
     alias ReactiveDag.{Calendar, Cell}
 
     # a daily cell's keys ARE day labels; its monthly parent relabels purely
-    # through the group plan assembly would stamp (a :month Calendar calc)
+    # through the group plan assembly would stamp (a :month Calendar calc).
+    # NB this builds the CELL directly, so it carries the internal rule
+    # `{:group, from: :key}` that `recompute_by ... from_key: true` lowers to.
     monthly = %Cell{
       id: "monthly",
       meta: %{

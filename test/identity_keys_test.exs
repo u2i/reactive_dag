@@ -88,11 +88,11 @@ defmodule ReactiveDag.IdentityKeysTest do
       id(:rollups)
       op(:fold)
 
-      # RELATIONAL-JOIN spelling: rollups.fund = lines.fund_code, rollups.fy =
-      # lines.fy — parent column on the left, child field on the right.
-      reduce over: :lines,
-             group_by: [fund: :fund_code, fy: :fy],
-             key_rule: :group,
+      # a COMPOSITE unit: the pair spelling stays on `group_by:` (two columns,
+      # one key), and `recompute_by` names the unit those columns form.
+      recompute_by :fund, to: :lines, from: :fund_code
+
+      reduce group_by: [fund: :fund_code, fy: :fy],
              into: [sum: [amount: :total], count: :n]
     end
   end

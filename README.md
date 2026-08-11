@@ -76,11 +76,11 @@ defmodule MyApp.BudgetRollups do
     op :fold
     # ASH-FIRST: the library reads :fiscal_lines, groups by the attributes,
     # folds each group, upserts the row by its Ash IDENTITY, and Op.puts only
-    # the changed keys. `key_rule: :group` claims per changed group. Every
-    # slot has an escape hatch when the shape outgrows attributes.
-    reduce over: :fiscal_lines,
-           group_by: [:fund, :fy],
-           key_rule: :group,
+    # the changed keys. `recompute_by` names the UNIT a change invalidates —
+    # it supplies the edge, the grouping and the claim rule. Every slot has an
+    # escape hatch when the shape outgrows attributes.
+    recompute_by :fund, to: :fiscal_lines, from: :fund
+    reduce group_by: [:fund, :fy],
            into: [sum: [amount: :total]]
   end
 end
@@ -101,13 +101,16 @@ changed keys:
   node's resource is the group's resource; `over` is its `has_many`. Only for
   relationship aggregates (Ash has no arbitrary `GROUP BY … → rows`).
   Example: `aggregate over: :readings, avg: [flow: :avg_flow], count: :day_count`.
-- **`over_grain`** — the edge WITH its grain correspondence, declared once:
-  `over_grain :expenses do source_attribute :category; destination_attribute
-  :expense_cat end`. It supplies the input node, the grouping and the `:group`
-  claim traversal, and lowers to `over:` + `group_by:` pairs at compile time.
-  Ash's NAMING for the pair; none of a relationship's semantics (no
-  cardinality, not loadable, not writable) — a DAG edge is never traversed at
-  recompute, because consumers query the derived rows instead.
+- **`recompute_by`** — THE declaration the engine cares about: *what unit does
+  a change invalidate?* `recompute_by :category, to: :expenses, from:
+  :expense_cat` supplies the input edge, the grouping, the claim resolution and
+  the read scope, so it **subsumes `key_rule`** on combinator nodes. Four
+  answers: omitted (key-for-key), `from:` (per unit, by lookup), `from_key:
+  true` (per unit, purely from the key's segments), `:cell` (redo everything).
+  It is the recompute unit, not the output's grain — percentiles
+  `recompute_by :day` while their rows are keyed day+percentile. Consumed at
+  compile time; never traversed at recompute, because consumers query the
+  derived rows instead.
 - **`reduce`** — an in-BEAM fold, declared: the library reads the over node's
   resource (primary or a named `:read` action), auto-scoped to the dirty keys;
   `group_by:` names attributes, `into:` declares the fold

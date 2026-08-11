@@ -9,7 +9,7 @@ defmodule ReactiveDag.Node.Verifiers.VerifyReactive do
   use Spark.Dsl.Verifier
 
   alias ReactiveDag.Node.Recompute.Declarative
-  alias ReactiveDag.Node.{Compose, Compute, Context, Join, Over, Reduce, Ref, Run}
+  alias ReactiveDag.Node.{Compose, Compute, Context, Join, RecomputeBy, Reduce, Ref, Run}
   alias Spark.Dsl.Verifier
 
   @impl true
@@ -18,7 +18,7 @@ defmodule ReactiveDag.Node.Verifiers.VerifyReactive do
       Verifier.get_entities(dsl, [:reactive])
       |> Enum.reject(
         &(match?(%Ref{}, &1) or match?(%Context{}, &1) or match?(%Compose{}, &1) or
-            match?(%Over{}, &1) or match?(%ReactiveDag.Attestation.Requirement{}, &1))
+            match?(%RecomputeBy{}, &1) or match?(%ReactiveDag.Attestation.Requirement{}, &1))
       )
 
     # NOT Attested: `attested` + an explicit `compute` is a documented pair
@@ -58,11 +58,12 @@ defmodule ReactiveDag.Node.Verifiers.VerifyReactive do
   end
 
   defp verify_entity(dsl, %Reduce{} = r) do
-    # check what LOWERING will produce: an `over_grain` block's pair becomes the
-    # combinator's group_by, so the row-column checks below must see it.
+    # check what LOWERING will produce: the unit's pair becomes the combinator's
+    # group_by, so the row-column checks below must see it.
     effective = %{r | group_by: r.group_by || block_group_by(dsl)}
 
     with :ok <- verify_over(dsl, r),
+         :ok <- verify_unit_vs_key_rule(dsl),
          :ok <- verify_key_rule_home(dsl, r.key_rule),
          :ok <- verify_key_prefix(dsl, r.key, r.key_prefix),
          :ok <- verify_result_slots(dsl, :reduce, r.status, into: r.into, expand: r.expand),
@@ -109,55 +110,69 @@ defmodule ReactiveDag.Node.Verifiers.VerifyReactive do
 
   defp verify_entity(_dsl, _other), do: :ok
 
-  # the `over_grain` block's grain pair, as the group_by it lowers to.
+  # the `recompute_by` unit, as the group_by it lowers to.
   defp block_group_by(dsl) do
-    case Verifier.get_entities(dsl, [:reactive]) |> Enum.find(&match?(%Over{}, &1)) do
-      %Over{source_attribute: s, destination_attribute: d} when not is_nil(s) and not is_nil(d) ->
-        [{s, d}]
-
-      _ ->
-        nil
+    case unit(dsl) do
+      %RecomputeBy{unit: u, from: f} when not is_nil(f) -> [{u, f}]
+      _ -> nil
     end
   end
 
-  # the edge is declared ONE way: an `over` BLOCK (carrying the grain pair) or
-  # `over:` on the combinator (with its own `group_by:`).
+  defp unit(dsl) do
+    Verifier.get_entities(dsl, [:reactive]) |> Enum.find(&match?(%RecomputeBy{}, &1))
+  end
+
+  # the input is named ONCE (`recompute_by to:` or the combinator's `over:`),
+  # and the grouping comes from the unit's `from:` or an explicit `group_by:`.
   defp verify_over(dsl, %Reduce{} = r) do
-    block = Verifier.get_entities(dsl, [:reactive]) |> Enum.find(&match?(%Over{}, &1))
+    u = unit(dsl)
 
     cond do
-      is_nil(r.over) and is_nil(block) ->
+      is_nil(r.over) and (is_nil(u) or is_nil(u.to)) ->
         error(
           dsl,
-          "a `reduce` names no input — declare the edge as a block " <>
-            "(`over :expenses do source_attribute :category; destination_attribute " <>
-            ":expense_cat end`), or name it on the combinator " <>
-            "(`over: :expenses, group_by: [...]`)."
+          "a `reduce` names no input — declare the unit with its edge " <>
+            "(`recompute_by :category, to: :expenses, from: :expense_cat`), or name it " <>
+            "on the combinator (`over: :expenses, group_by: [...]`)."
         )
 
-      not is_nil(r.over) and not is_nil(block) ->
+      not is_nil(r.over) and not is_nil(u) and not is_nil(u.to) ->
         error(
           dsl,
-          "the edge is declared TWICE — an `over #{inspect(block.to)}` block and " <>
-            "`reduce over: #{inspect(r.over)}`. Keep the block (it carries the grain " <>
-            "pair too), or `over:` alone."
+          "the input is named TWICE — `recompute_by to: #{inspect(u.to)}` and " <>
+            "`reduce over: #{inspect(r.over)}`. Declare it once."
         )
 
-      # a block with no pair, and no group_by to supply one
-      not is_nil(block) and is_nil(r.group_by) and
-          (is_nil(block.source_attribute) or is_nil(block.destination_attribute)) ->
+      # `:cell` recomputes whole, so it names no grouping — the combinator must
+      not is_nil(u) and u.unit == :cell and is_nil(r.group_by) ->
         error(
           dsl,
-          "the `over #{inspect(block.to)}` block declares no complete grain pair " <>
-            "(`source_attribute` + `destination_attribute`) and the `reduce` declares no " <>
-            "`group_by:` — one of them must say how the input's rows group."
+          "`recompute_by :cell` redoes the whole cell, so it names no grouping — the " <>
+            "`reduce` still needs `group_by:` to say how rows are folded."
         )
 
-      is_nil(block) and is_nil(r.group_by) ->
+      # a unit with no `from:` can't supply the grouping
+      not is_nil(u) and u.unit != :cell and is_nil(u.from) and is_nil(r.group_by) ->
+        error(
+          dsl,
+          "`recompute_by #{inspect(u.unit)}` declares no `from:` (the input field the " <>
+            "unit is computed from) and the `reduce` declares no `group_by:` — one of " <>
+            "them must say how the input's rows group."
+        )
+
+      is_nil(u) and is_nil(r.group_by) ->
         error(
           dsl,
           "a `reduce over:` must declare `group_by:` — the grouping is only implicit " <>
-            "when the edge is an `over` block carrying a grain pair."
+            "when `recompute_by` names the unit and the field it comes from."
+        )
+
+      # `from_key:` resolves from the key's segments, so it needs the key grammar
+      not is_nil(u) and u.from_key == true and u.unit == :cell ->
+        error(
+          dsl,
+          "`recompute_by :cell` redoes everything, so there is no unit to resolve from " <>
+            "the key — drop `from_key:`."
         )
 
       true ->
@@ -166,6 +181,23 @@ defmodule ReactiveDag.Node.Verifiers.VerifyReactive do
   end
 
   defp verify_over(_dsl, _r), do: :ok
+
+  # `recompute_by` sets the claim rule, so a block-level `key_rule` alongside it
+  # is the same fact stated twice — and they can disagree.
+  defp verify_unit_vs_key_rule(dsl) do
+    case {unit(dsl), Verifier.get_option(dsl, [:reactive], :key_rule)} do
+      {%RecomputeBy{} = u, rule} when rule not in [nil, :identity] ->
+        error(
+          dsl,
+          "`recompute_by #{inspect(u.unit)}` already declares the claim unit, but this " <>
+            "block also sets `key_rule #{inspect(rule)}` — the same fact twice. Drop the " <>
+            "`key_rule` (`recompute_by :cell` is the whole-cell unit)."
+        )
+
+      _ ->
+        :ok
+    end
+  end
 
   # the node-shape × result-slot matrix: a VERDICT node's result IS its status
   # (`status:` required, row slots forbidden); a payload node emits rows
