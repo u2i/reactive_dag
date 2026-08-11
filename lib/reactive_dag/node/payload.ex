@@ -77,6 +77,64 @@ defmodule ReactiveDag.Node.Payload do
     if changed?, do: :changed, else: :unchanged
   end
 
+  @doc """
+  RETIRE a vanished unit's row: the unit's input rows are gone, so the derived
+  row must go too — a derived table whose whole point is that you query it
+  cannot keep rows for units that no longer exist (a stale row is
+  indistinguishable from a live one).
+
+  `keys` are cell keys; for an identity-keyed node each is the identity's `"|"`
+  serialization, split back into its fields. Rows already absent are skipped, so
+  this is idempotent. Returns the keys whose row was actually destroyed.
+
+  Requires a destroy action (default `:destroy`); a resource without one raises
+  with the fix, since silently keeping the row would defeat the reconcile.
+  """
+  @spec retire(module(), atom() | nil, [atom()] | nil, [String.t()], atom()) :: [String.t()]
+  def retire(resource, key_attr, identity_fields, keys, action \\ :destroy)
+  def retire(_resource, _key_attr, _identity_fields, [], _action), do: []
+
+  def retire(resource, key_attr, identity_fields, keys, action) do
+    ensure_destroy!(resource, action)
+
+    Enum.filter(keys, fn key ->
+      case find_row(resource, key_attr, identity_fields, key) do
+        nil ->
+          false
+
+        record ->
+          record |> Ash.Changeset.for_destroy(action) |> Ash.destroy!()
+          true
+      end
+    end)
+  end
+
+  defp find_row(resource, _key_attr, fields, key) when is_list(fields) do
+    values = String.split(key, "|")
+
+    if length(values) == length(fields) do
+      existing_by(resource, fields |> Enum.zip(values) |> Map.new())
+    else
+      nil
+    end
+  end
+
+  defp find_row(resource, key_attr, _fields, key), do: existing(resource, key_attr, key)
+
+  defp ensure_destroy!(resource, action) do
+    case Ash.Resource.Info.action(resource, action) do
+      %{type: :destroy} ->
+        :ok
+
+      _ ->
+        raise ArgumentError,
+              "reactive_dag: #{inspect(resource)} needs a #{inspect(action)} action to retire " <>
+                "vanished units' rows (a unit whose input rows are gone must not linger in " <>
+                "the derived table). Add `defaults [:destroy]`, or name another with " <>
+                "`payload_destroy`."
+    end
+  end
+
   defp existing_by(resource, identity_map) do
     resource
     |> Ash.Query.do_filter(Enum.to_list(identity_map))

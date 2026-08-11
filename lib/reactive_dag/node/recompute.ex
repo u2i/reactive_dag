@@ -62,7 +62,7 @@ defmodule ReactiveDag.Node.Recompute do
       |> Enum.group_by(group_by)
       |> Enum.flat_map(fn {group, items} -> emit.(group, items) end)
 
-    {:ok, materialize(cell, pairs, r.upsert)}
+    {:ok, materialize(cell, pairs, r.upsert, scope(keys))}
   end
 
   # a declarative JOIN combinator — read `over` into a LEFT and RIGHT index
@@ -98,7 +98,7 @@ defmodule ReactiveDag.Node.Recompute do
         []
       end
 
-    {:ok, materialize(cell, left_pairs ++ right_only_pairs, j.upsert)}
+    {:ok, materialize(cell, left_pairs ++ right_only_pairs, j.upsert, scope(keys))}
   end
 
   # a PURE-ASH-QUERY aggregate — the datastore groups + aggregates the `over`
@@ -322,35 +322,123 @@ defmodule ReactiveDag.Node.Recompute do
   #     go straight into the tuple (Op.put opts). The result IS the coordination row.
   #   * host `upsert:` callback (override) — `(key, row) -> changed?`.
   #   * the LIB closing the loop into the node's OWN resource (`meta.resource`).
-  defp materialize(%Cell{meta: %{verdict: true}} = cell, pairs, _upsert) do
+  defp materialize(%Cell{meta: %{verdict: true}} = cell, pairs, _upsert, claimed) do
     # a verdict-only node: the computed row lives in the tuple, not a payload
     # table — so the tuple write IS the change detection. A writer reporting
     # the boolean CHANGED signal (the default Tuple.Writer does) scopes
     # propagation to real flips; a bare-:ok writer propagates everything
     # (correct, just less scoped).
-    Enum.flat_map(pairs, fn {key, row} ->
-      case ReactiveDag.Op.put(cell, key, verdict_opts(row)) do
-        false -> []
-        _ok_or_true -> [key]
-      end
-    end)
+    changed =
+      Enum.flat_map(pairs, fn {key, row} ->
+        case ReactiveDag.Op.put(cell, key, verdict_opts(row)) do
+          false -> []
+          _ok_or_true -> [key]
+        end
+      end)
+
+    # a verdict node has no payload row, but its TUPLE still has to be
+    # reconciled — a verdict for a unit that no longer exists is as stale as a
+    # payload row for one.
+    changed ++ retire_vanished(cell, Enum.map(pairs, &elem(&1, 0)), claimed, nil)
   end
 
-  defp materialize(cell, pairs, upsert) do
+  defp materialize(cell, pairs, upsert, claimed) do
     write = writer_fn(cell, upsert)
     coord = cell.meta[:coordination_opts]
 
-    Enum.flat_map(pairs, fn {key, row} ->
-      if write.(key, row) do
-        # the coordination write goes through Op.put → the host CoordinationWriter,
-        # so extension columns (source_ref, fingerprint, …) a node declares via
-        # `coordination_opts:` are applied in the payload loop — not just the spine.
-        ReactiveDag.Op.put(cell, key, coord_opts(coord, key, row))
-        [key]
-      else
+    changed =
+      Enum.flat_map(pairs, fn {key, row} ->
+        if write.(key, row) do
+          # the coordination write goes through Op.put → the host CoordinationWriter,
+          # so extension columns (source_ref, fingerprint, …) a node declares via
+          # `coordination_opts:` are applied in the payload loop — not just the spine.
+          ReactiveDag.Op.put(cell, key, coord_opts(coord, key, row))
+          [key]
+        else
+          []
+        end
+      end)
+
+    changed ++ retire_vanished(cell, Enum.map(pairs, &elem(&1, 0)), claimed, upsert)
+  end
+
+  # RECONCILE, not just upsert. A fold writes the units it produced; a unit whose
+  # input rows have all gone produces nothing, so without this its last computed
+  # value would linger forever — and a stale derived row is indistinguishable
+  # from a live one, which defeats the point of materializing it.
+  #
+  # `want` is what this pass produced. The baseline it is subtracted from is the
+  # CLAIM: a whole-cell pass reconciles every key the cell has, a scoped pass
+  # only the units it claimed (reconciling wider would retire live units that
+  # simply weren't visited). Retirement covers BOTH sides of the node — the
+  # coordination tuple (so propagation carries it downstream) and the payload
+  # row (so the derived table stops showing it).
+  defp retire_vanished(_cell, _want, _claimed, upsert) when is_function(upsert, 2), do: []
+
+  defp retire_vanished(%Cell{meta: meta} = cell, want, claimed, _upsert) do
+    want_set = MapSet.new(want)
+
+    case vanished_baseline(cell, claimed) do
+      nil ->
         []
-      end
-    end)
+
+      baseline ->
+        case Enum.reject(baseline, &MapSet.member?(want_set, &1)) do
+          [] ->
+            []
+
+          vanished ->
+            if resource = meta[:resource] do
+              ReactiveDag.Node.Payload.retire(
+                resource,
+                meta[:payload_key] || :key,
+                meta[:identity_fields],
+                vanished,
+                meta[:payload_destroy] || :destroy
+              )
+            end
+
+            ReactiveDag.Op.delete(cell, vanished)
+            vanished
+        end
+    end
+  end
+
+  # what a pass is entitled to retire: the claimed units for a scoped pass, and
+  # everything the node currently HOLDS for a whole-cell one. `nil` = don't
+  # reconcile (a node whose current key set we cannot enumerate).
+  defp vanished_baseline(cell, nil), do: current_keys(cell)
+  defp vanished_baseline(cell, ["*"]), do: current_keys(cell)
+  defp vanished_baseline(_cell, claimed) when is_list(claimed), do: claimed
+
+  # a payload node's OWN ROWS are the truth about which units it currently
+  # holds — the coordination table is the host's, may be written by a different
+  # writer, and is not what a consumer queries. A verdict node has no rows, so
+  # its tuple keys are the only baseline there is.
+  defp current_keys(%Cell{meta: %{verdict: true}, id: id}), do: tuple_keys(id)
+
+  defp current_keys(%Cell{meta: meta, id: id}) do
+    case meta[:resource] do
+      nil ->
+        tuple_keys(id)
+
+      resource ->
+        key_of =
+          case meta[:identity_fields] do
+            fields when is_list(fields) -> Declarative.identity_key_fn(fields, nil)
+            _ -> &(&1 |> Map.fetch!(meta[:payload_key] || :key) |> to_string())
+          end
+
+        resource |> Ash.read!() |> Enum.map(key_of)
+    end
+  rescue
+    _ -> nil
+  end
+
+  defp tuple_keys(id) do
+    ReactiveDag.Tuple.all_keys(id)
+  rescue
+    _ -> nil
   end
 
   defp coord_opts(nil, _key, _row), do: []

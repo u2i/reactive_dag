@@ -159,6 +159,31 @@ node, so a combinator reads exactly one input: one unit, one claim translation.
 A node reads its input, materializes rows, and downstream consumers query
 *those rows* rather than re-deriving them back up the chain.
 
+### Retirement: units that stop existing
+
+A fold writes the units it produced — and **reconciles** the ones it didn't. A
+unit whose input rows have all gone produces nothing, so without this its last
+computed value would linger forever, and a stale derived row is
+indistinguishable from a live one.
+
+Retirement covers both sides of the node: the **payload row** is destroyed (so
+the derived table stops showing the unit) and the **coordination tuple** is
+deleted (so the retirement propagates downstream as a changed key). A node that
+can retire therefore needs a destroy action — `defaults [:destroy]`, or name
+one with `payload_destroy`.
+
+What a pass may retire is bounded by its **claim**: a whole-cell pass reconciles
+everything the node holds, a scoped pass only the units it claimed. Reconciling
+wider would retire live units that simply weren't visited.
+
+A node with a custom `upsert:` owns its own writes, so the library does not
+reconcile on its behalf.
+
+**Limit — a row moving between units.** The claim names where the row *landed*;
+the unit it *left* is invisible, because nothing records which unit an input key
+previously fed. The origin is repriced by the next whole-cell pass rather than
+the scoped claim. Fixing it exactly needs input-key → unit provenance.
+
 A combinator read is **always an Ash read** — to shape it, stay in the query:
 
 ```elixir
