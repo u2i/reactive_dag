@@ -118,6 +118,60 @@ defmodule ReactiveDag.AttestationDslTest do
     assert "machines" in verdict.inputs
   end
 
+  describe "tolerance units" do
+    # regression: an unsupported unit used to contribute 0 seconds, silently
+    # expiring every signature immediately (presents as policy, not as a bug).
+    test "the full unit set normalizes, and units combine" do
+      assert Requirement.tolerance_seconds(%Requirement{tolerance: [weeks: 2]}) == 2 * 604_800
+      assert Requirement.tolerance_seconds(%Requirement{tolerance: [minutes: 30]}) == 1_800
+
+      assert Requirement.tolerance_seconds(%Requirement{tolerance: [days: 1, hours: 2, seconds: 3]}) ==
+               86_400 + 7_200 + 3
+    end
+
+    test "an unknown unit raises instead of counting as zero" do
+      assert_raise ArgumentError, ~r/unsupported unit.*months/s, fn ->
+        Requirement.tolerance_seconds(%Requirement{name: :req, tolerance: [months: 6]})
+      end
+    end
+
+    test "validate_tolerance (the DSL schema's custom type) rejects the bad shapes" do
+      assert {:ok, nil} = Requirement.validate_tolerance(nil)
+      assert {:ok, 3600} = Requirement.validate_tolerance(3600)
+      assert {:ok, [minutes: 5]} = Requirement.validate_tolerance(minutes: 5)
+
+      assert {:error, _} = Requirement.validate_tolerance(months: 6)
+      assert {:error, _} = Requirement.validate_tolerance(days: -1)
+      assert {:error, _} = Requirement.validate_tolerance([])
+      assert {:error, _} = Requirement.validate_tolerance(-30)
+      assert {:error, _} = Requirement.validate_tolerance("90d")
+    end
+
+    test "a requirement declaring an unsupported unit fails at the DSL schema" do
+      assert_raise Spark.Error.DslError, ~r/unsupported unit/, fn ->
+        defmodule BadTolerance do
+          use Ash.Resource,
+            domain: Domain,
+            data_layer: Ash.DataLayer.Simple,
+            extensions: [ReactiveDag.Node]
+
+          def holder(_scope, _elig_key), do: nil
+
+          reactive do
+            op(:source)
+            leaf?(true)
+
+            attestation :aging do
+              signers(:machine_holders)
+              join(&BadTolerance.holder/2)
+              tolerance(months: 6)
+            end
+          end
+        end
+      end
+    end
+  end
+
   test "the store surfaces as ONE leaf cell — signing propagates like a scan" do
     store = plan().cells[ReactiveDag.Attestation.leaf_cell()]
     assert store.leaf?

@@ -31,7 +31,8 @@ defmodule ReactiveDag.Attestation.Requirement do
     * `quorum` — `:any | :all | {:n_of, k}` over the eligible set.
     * `tolerance` — how long an assertion holds: `nil` (no time bound — the
       host applies its strength-derived default elsewhere), an integer of
-      seconds, or `[days: n]` / `[hours: n]`.
+      seconds, or a keyword of `weeks:` / `days:` / `hours:` / `minutes:` /
+      `seconds:` (units combine; unknown units are rejected, not zeroed).
     * `statuses` — optional override of the admission-state → spine-status
       vocabulary (default `%{affirmed: "covered", pending: "pending",
       unsigned: "unsigned", refused: "refused"}`); status vocabulary is the
@@ -83,13 +84,53 @@ defmodule ReactiveDag.Attestation.Requirement do
   def statuses(%__MODULE__{statuses: nil}), do: @default_statuses
   def statuses(%__MODULE__{statuses: s}), do: Map.merge(@default_statuses, Map.new(s))
 
+  @units [weeks: 604_800, days: 86_400, hours: 3_600, minutes: 60, seconds: 1]
+
   @doc "Tolerance normalized to seconds, or nil for no time bound."
   @spec tolerance_seconds(t()) :: non_neg_integer() | nil
   def tolerance_seconds(%__MODULE__{tolerance: nil}), do: nil
   def tolerance_seconds(%__MODULE__{tolerance: s}) when is_integer(s), do: s
 
-  def tolerance_seconds(%__MODULE__{tolerance: kw}) when is_list(kw) do
-    Keyword.get(kw, :days, 0) * 86_400 + Keyword.get(kw, :hours, 0) * 3_600 +
-      Keyword.get(kw, :seconds, 0)
+  # An unknown unit must raise, not contribute 0: a zeroed tolerance expires
+  # every signature immediately, which presents as policy, not as a bug.
+  def tolerance_seconds(%__MODULE__{tolerance: kw, name: name}) when is_list(kw) do
+    case validate_tolerance(kw) do
+      {:ok, kw} ->
+        Enum.reduce(kw, 0, fn {unit, n}, acc -> acc + n * Keyword.fetch!(@units, unit) end)
+
+      {:error, message} ->
+        raise ArgumentError, "reactive_dag: requirement #{inspect(name)}: #{message}"
+    end
   end
+
+  @doc """
+  Validate a `tolerance` value (the DSL schema's custom type): `nil`, seconds
+  as a non-negative integer, or a non-empty keyword of `#{inspect(Keyword.keys(@units))}`
+  with non-negative integer values. Returns `{:ok, value}` or `{:error, message}`.
+  """
+  @spec validate_tolerance(term()) :: {:ok, term()} | {:error, String.t()}
+  def validate_tolerance(nil), do: {:ok, nil}
+  def validate_tolerance(s) when is_integer(s) and s >= 0, do: {:ok, s}
+
+  def validate_tolerance(kw) when is_list(kw) and kw != [] do
+    case Enum.reject(kw, &valid_unit?/1) do
+      [] ->
+        {:ok, kw}
+
+      bad ->
+        {:error,
+         "tolerance has unsupported unit(s) #{inspect(bad)} — expected " <>
+           "#{inspect(Keyword.keys(@units))} with non-negative integer values " <>
+           "(an unknown unit would otherwise count as zero and expire every signature immediately)"}
+    end
+  end
+
+  def validate_tolerance(other) do
+    {:error,
+     "tolerance must be nil, seconds (a non-negative integer), or a non-empty keyword of " <>
+       "#{inspect(Keyword.keys(@units))}, got: #{inspect(other)}"}
+  end
+
+  defp valid_unit?({unit, n}), do: Keyword.has_key?(@units, unit) and is_integer(n) and n >= 0
+  defp valid_unit?(_), do: false
 end

@@ -418,9 +418,9 @@ defmodule ReactiveDag.Node do
         doc: "`:any | :all | {:n_of, k}` over the currently-eligible set"
       ],
       tolerance: [
-        type: {:or, [:non_neg_integer, :keyword_list]},
+        type: {:custom, ReactiveDag.Attestation.Requirement, :validate_tolerance, []},
         doc:
-          "how long a signature holds: seconds, or `[days: n]`/`[hours: n]`. Omit for no time bound (the host applies its strength-derived default elsewhere)."
+          "how long a signature holds: seconds, or a keyword of `weeks:`/`days:`/`hours:`/`minutes:`/`seconds:` (units combine; unknown units are rejected at compile time). Omit for no time bound (the host applies its strength-derived default elsewhere)."
       ],
       statuses: [
         type: :keyword_list,
