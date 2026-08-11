@@ -172,8 +172,8 @@ key_rule:)` — which is how both apps ran before adopting the `Node` surface.
 ## Verdict nodes (no payload of their own)
 
 A node whose computed result fits the coordination tuple — a status (and, if the
-host extends the tuple, a strength) — needs **no payload table**. Mark it `verdict
-true`: its `reduce`/`join` rows carry `:status`/`:strength`, which the library
+host extends the tuple, a strength) — needs **no payload table**. Mark it
+`verdict? true`: its `reduce`/`join` rows carry `:status`/`:strength`, which the library
 writes straight into the tuple via `Op.put`. No `data_layer`, no attributes, no
 `upsert:`.
 
