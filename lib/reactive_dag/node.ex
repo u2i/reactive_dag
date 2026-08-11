@@ -161,27 +161,27 @@ defmodule ReactiveDag.Node do
     ]
   }
 
-  defmodule Reference do
+  defmodule Context do
     @moduledoc """
-    A by-name REFERENCE input edge: the node READS the target as context but is NOT
-    recomputed when the target changes. Still a real input (validated, ordered by
-    depth so the target settles first, read at recompute) — it just doesn't
-    propagate. For a node whose recompute is expensive/non-deterministic and
-    consults mutable reference data it shouldn't be re-triggered by (an LLM step
-    that looks up a human-curated people/positions table). Contrast `ref`, which
-    dirties this node on change.
+    A by-name CONTEXT input edge (`context :people`): the node READS the target
+    as settled context but is NOT recomputed when the target changes. Still a
+    real input (validated, ordered by depth so the target settles first, read
+    at recompute) — it just doesn't propagate. For a node whose recompute is
+    expensive/non-deterministic and consults mutable context it shouldn't be
+    re-triggered by (an LLM step that looks up a human-curated
+    people/positions table). Contrast `ref`, which dirties this node on change.
     """
     defstruct [:to, :__identifier__, :__spark_metadata__]
   end
 
-  @reference %Spark.Dsl.Entity{
-    name: :reference,
-    target: Reference,
+  @context %Spark.Dsl.Entity{
+    name: :context,
+    target: Context,
     args: [:to],
     describe:
-      "A by-name REFERENCE edge: read the target as context; its changes do NOT recompute this node.",
+      "A by-name CONTEXT edge: read the target as settled context; its changes do NOT recompute this node.",
     schema: [
-      to: [type: :atom, required: true, doc: "the referenced node's id (read-only context)"]
+      to: [type: :atom, required: true, doc: "the target node's id (read-only context)"]
     ]
   }
 
@@ -678,7 +678,7 @@ defmodule ReactiveDag.Node do
     # the nested dependency form; dep is the flat form.
     entities: [
       @ref,
-      @reference,
+      @context,
       @compose,
       @reduce,
       @join,
@@ -1092,8 +1092,8 @@ defmodule ReactiveDag.Node do
   def gated_id(over, gate, :require), do: "#{over}@#{gate}"
   def gated_id(over, gate, :annotate), do: "#{over}@#{gate}~annotate"
 
-  # the vacuity lint (step 5 above). Reference edges still count as paths here:
-  # they are read paths, and a denominator read through a reference is honest.
+  # the vacuity lint (step 5 above). Context edges still count as paths here:
+  # they are read paths, and a denominator read through a context edge is honest.
   # An :annotate view is likewise TRANSPARENT to the lint — it withholds
   # nothing (unsigned rows flow, distinguished), so it cannot swallow a
   # denominator; only :require gates block.
@@ -1242,7 +1242,7 @@ defmodule ReactiveDag.Node do
   defp root_node(resource, root_id) do
     legs =
       Ext.get_entities(resource, [:reactive])
-      |> Enum.filter(&(match?(%Ref{}, &1) or match?(%Reference{}, &1) or match?(%Compose{}, &1)))
+      |> Enum.filter(&(match?(%Ref{}, &1) or match?(%Context{}, &1) or match?(%Compose{}, &1)))
 
     flat_refs =
       Ext.get_opt(resource, [:reactive], :depends_on, [])
@@ -1406,7 +1406,7 @@ defmodule ReactiveDag.Node do
         payload_action: Ext.get_opt(resource, [:reactive], :payload_action, nil),
         coordination_opts: Ext.get_opt(resource, [:reactive], :coordination_opts, nil),
         verdict: verdict_flag(resource),
-        reference_inputs: reference_inputs(resource)
+        context_inputs: context_inputs(resource)
       }
       |> Enum.reject(fn {_k, v} -> is_nil(v) end)
       |> Map.new()
@@ -1435,11 +1435,11 @@ defmodule ReactiveDag.Node do
     end)
   end
 
-  # the ids of this node's `reference` edges (read-as-context, non-propagating) —
+  # the ids of this node's `context` edges (read-as-context, non-propagating) —
   # as strings matching the cell input ids, so `Graph.build_parents` can exclude
   # them from the propagation graph. nil when there are none.
-  defp reference_inputs(resource) do
-    case Ext.get_entities(resource, [:reactive]) |> Enum.filter(&match?(%Reference{}, &1)) do
+  defp context_inputs(resource) do
+    case Ext.get_entities(resource, [:reactive]) |> Enum.filter(&match?(%Context{}, &1)) do
       [] -> nil
       refs -> Enum.map(refs, &to_string(&1.to))
     end
@@ -1449,9 +1449,9 @@ defmodule ReactiveDag.Node do
     %{
       classify: fn
         %Ref{} -> :ref
-        # a reference edge is an input edge too — it just won't propagate (the
-        # non-propagation is enforced in Graph.build_parents via reference_inputs).
-        %Reference{} -> :ref
+        # a context edge is an input edge too — it just won't propagate (the
+        # non-propagation is enforced in Graph.build_parents via context_inputs).
+        %Context{} -> :ref
         # a composed LEAF (leaf? true) is terminal — no leg recursion.
         %Compose{leaf?: true} -> :leaf
         %Compose{} -> :op
@@ -1477,7 +1477,7 @@ defmodule ReactiveDag.Node do
         %Ref{to: to} ->
           to_string(to)
 
-        %Reference{to: to} ->
+        %Context{to: to} ->
           to_string(to)
       end,
       to_cell: &build_cell/3
