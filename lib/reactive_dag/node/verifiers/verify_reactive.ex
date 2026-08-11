@@ -9,7 +9,7 @@ defmodule ReactiveDag.Node.Verifiers.VerifyReactive do
   use Spark.Dsl.Verifier
 
   alias ReactiveDag.Node.Recompute.Declarative
-  alias ReactiveDag.Node.{Compose, Compute, Join, Reduce, Reference, Ref}
+  alias ReactiveDag.Node.{Compose, Compute, Join, Reduce, Reference, Ref, Run}
   alias Spark.Dsl.Verifier
 
   @impl true
@@ -27,7 +27,7 @@ defmodule ReactiveDag.Node.Verifiers.VerifyReactive do
       Enum.filter(
         entities,
         &(match?(%Reduce{}, &1) or match?(%Join{}, &1) or match?(%Compute{}, &1) or
-            match?(%ReactiveDag.Node.Aggregate{}, &1))
+            match?(%Run{}, &1) or match?(%ReactiveDag.Node.Aggregate{}, &1))
       )
 
     with :ok <- one_computation(dsl, computations),
@@ -70,6 +70,30 @@ defmodule ReactiveDag.Node.Verifiers.VerifyReactive do
          :ok <- verify_side(dsl, :right, j.right),
          :ok <- verify_join_into(dsl, j.into) do
       :ok
+    end
+  end
+
+  defp verify_entity(dsl, %Run{action: action}) do
+    case Ash.Resource.Info.action(dsl, action) do
+      %{type: :action} ->
+        :ok
+
+      %{type: other} ->
+        error(
+          dsl,
+          "`run #{inspect(action)}` names a #{inspect(other)} action — it must be a GENERIC " <>
+            "action (`action #{inspect(action)}, {:array, :string} do run … end`) returning " <>
+            "the changed keys"
+        )
+
+      nil ->
+        generic = for %{type: :action, name: n} <- Ash.Resource.Info.actions(dsl), do: n
+
+        error(
+          dsl,
+          "`run #{inspect(action)}` names an action this resource doesn't have. " <>
+            "Generic actions declared: #{inspect(generic)}"
+        )
     end
   end
 

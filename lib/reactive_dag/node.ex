@@ -421,6 +421,44 @@ defmodule ReactiveDag.Node do
     schema: [module: [type: :atom, required: true, doc: "a module implementing ReactiveDag.Op"]]
   }
 
+  defmodule Run do
+    @moduledoc """
+    The ASH-NATIVE escape hatch: `run :recompute_keys` declares that this
+    node's recompute is a GENERIC action on its own resource — one step less
+    escape than a `compute` module, because the computation stays a first-class
+    Ash action (arguments, policies, `Ash.run_action` testability).
+
+    The contract: the action returns the CHANGED keys (`{:array, :string}`;
+    `[]` for none). The library passes only the arguments the action declares —
+    `keys` (`{:array, :string}`, allow_nil — nil means whole-cell) and
+    `cell_id` (`:string`; generator instances need it, since one resource
+    expands to many cells) — and does the coordination `Op.put` for each
+    returned key (an action has no `%Cell{}` to put through; the library
+    closes the coordination loop, as in the payload loop). The action owns its
+    DOMAIN writes. `coordination_opts` does not apply (there is no row).
+    """
+    defstruct [:action, :__identifier__, :__spark_metadata__]
+  end
+
+  @run %Spark.Dsl.Entity{
+    name: :run,
+    target: Run,
+    args: [:action],
+    describe:
+      "Ash-native escape hatch: this node's recompute is the named GENERIC action on its " <>
+        "own resource — `(keys, cell_id) -> changed keys`; the action writes its domain, " <>
+        "the library Op.puts the returned keys.",
+    schema: [
+      action: [
+        type: :atom,
+        required: true,
+        doc:
+          "a generic action on THIS resource returning the changed keys " <>
+            "(`{:array, :string}`); it may declare `keys` and/or `cell_id` arguments"
+      ]
+    ]
+  }
+
   @attestation %Spark.Dsl.Entity{
     name: :attestation,
     target: ReactiveDag.Attestation.Requirement,
@@ -595,6 +633,7 @@ defmodule ReactiveDag.Node do
       @join,
       @aggregate,
       @compute,
+      @run,
       @attestation,
       @attested
     ],
@@ -1266,6 +1305,12 @@ defmodule ReactiveDag.Node do
         nil -> %{}
       end
 
+    run_meta =
+      case Ext.get_entities(resource, [:reactive]) |> Enum.find(&match?(%Run{}, &1)) do
+        %Run{action: a} -> %{run: a}
+        nil -> %{}
+      end
+
     attestation_meta =
       case attestation_reqs(resource) do
         [] -> %{}
@@ -1305,6 +1350,7 @@ defmodule ReactiveDag.Node do
     )
     |> Map.merge(combinator_meta)
     |> Map.merge(aggregate_meta)
+    |> Map.merge(run_meta)
     |> Map.merge(attestation_meta)
     |> Map.merge(attested_meta)
     |> Map.merge(gated_meta)

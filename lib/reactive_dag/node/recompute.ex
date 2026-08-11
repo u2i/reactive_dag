@@ -93,6 +93,34 @@ defmodule ReactiveDag.Node.Recompute do
     {:ok, ReactiveDag.Node.Recompute.Aggregate.recompute(cell, resource, agg)}
   end
 
+  # the ASH-NATIVE escape hatch: a GENERIC action on the node's own resource
+  # (`run :recompute_keys`). The action does its own DOMAIN writes and returns
+  # the changed keys; the library passes only the arguments the action declares
+  # (keys / cell_id) and closes the coordination loop with Op.put — an action
+  # has no %Cell{} to put through, so coordination stays the library's job,
+  # exactly as in the payload loop. MUST precede the compute-nil clause: a run
+  # node's meta carries compute: nil too.
+  def recompute(%Cell{meta: %{run: action, resource: resource}} = cell, keys)
+      when is_atom(action) and not is_nil(action) and not is_nil(resource) do
+    params =
+      %{keys: scope(keys), cell_id: cell.id}
+      |> Map.take(declared_args(resource, action))
+
+    case resource |> Ash.ActionInput.for_action(action, params) |> Ash.run_action() do
+      {:ok, changed} when is_list(changed) ->
+        Enum.each(changed, &ReactiveDag.Op.put(cell, &1))
+        {:ok, changed}
+
+      {:ok, other} ->
+        raise "reactive_dag: run action #{inspect(action)} on #{inspect(resource)} must " <>
+                "return the changed keys (`{:array, :string}`), got: #{inspect(other)}"
+
+      {:error, error} ->
+        raise "reactive_dag: run action #{inspect(action)} on #{inspect(resource)} failed: " <>
+                Exception.message(error)
+    end
+  end
+
   def recompute(%Cell{meta: %{compute: nil}, id: id}, keys) do
     Logger.warning("reactive_dag: node #{inspect(id)} has no compute module; passing keys through")
     {:ok, keys}
@@ -105,6 +133,14 @@ defmodule ReactiveDag.Node.Recompute do
   # a cell whose meta carries no :compute key at all (e.g. a non-Node plan) —
   # treat like a leaf: pass through.
   def recompute(%Cell{}, keys), do: {:ok, keys}
+
+  # the arguments a `run` action declares — the library passes only these.
+  defp declared_args(resource, action) do
+    case Ash.Resource.Info.action(resource, action) do
+      %{arguments: args} -> Enum.map(args, & &1.name)
+      nil -> []
+    end
+  end
 
   # the claimed keys as a read scope: `nil` for a whole-cell recompute (`"*"`),
   # else the specific dirty keys a scoped `read` can filter its query to.
