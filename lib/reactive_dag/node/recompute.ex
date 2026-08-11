@@ -57,7 +57,7 @@ defmodule ReactiveDag.Node.Recompute do
       end
 
     pairs =
-      Read.items(cell.meta[:over_source], r.over, r.query, scope(keys))
+      Read.items(cell.meta[:over_source], r.over, r.query, scope(keys), auto_scope(cell, keys))
       |> Enum.group_by(group_by)
       |> Enum.flat_map(fn {group, items} -> emit.(group, items) end)
 
@@ -71,7 +71,7 @@ defmodule ReactiveDag.Node.Recompute do
   # reconcile shape, where an undeclared right-side member is a finding.
   # `read` may be arity-2 for dirty-key scoping (see `reduce` above).
   def recompute(%Cell{meta: %{join: %{} = j}} = cell, keys) do
-    items = Read.items(cell.meta[:over_source], j.over, j.query, scope(keys))
+    items = Read.items(cell.meta[:over_source], j.over, j.query, scope(keys), auto_scope(cell, keys))
     left = index(items, Declarative.side_fn(j.left))
     right = index(items, Declarative.side_fn(j.right))
     key_fn = Declarative.key_fn(j.key, j.key_prefix)
@@ -156,6 +156,19 @@ defmodule ReactiveDag.Node.Recompute do
     case Ash.Resource.Info.action(resource, action) do
       %{arguments: args} -> Enum.map(args, & &1.name)
       nil -> []
+    end
+  end
+
+  # the library's payload-key filter is sound only when this cell's keys ARE
+  # the over node's keys — key_rule :identity. Under :all claims arrive as "*"
+  # anyway; under a grain-changing host rule (readings → months), the claimed
+  # parent-grain keys must NOT filter the child-grain read — `query:` still
+  # receives them, so the host can scope at its own grain.
+  defp auto_scope(%Cell{meta: meta}, keys) do
+    case meta[:key_rule] do
+      :identity -> scope(keys)
+      nil -> scope(keys)
+      _ -> nil
     end
   end
 

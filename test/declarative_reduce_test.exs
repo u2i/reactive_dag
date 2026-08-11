@@ -385,7 +385,7 @@ defmodule ReactiveDag.DeclarativeReduceTest do
         end
       end
 
-      assert_raise ArgumentError, ~r/no_such_attr.*does not have.*:fund/s, fn ->
+      assert_raise ArgumentError, ~r/no_such_attr.*neither as an attribute nor a calculation.*:fund/s, fn ->
         ReactiveDag.Node.graph([FiscalLines, BadAttr])
       end
     end
