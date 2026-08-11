@@ -116,6 +116,42 @@ Batching (N rows per prompt) is the *other* throughput lever and is not
 implemented: it changes the action's contract from one row to many, and the
 result mapping from one map to results keyed by row. Tracked separately.
 
+## Embeddings: usually not a node at all
+
+For embeddings **on the same resource as the text**, use
+[ash_ai's `vectorize`](https://hexdocs.pm/ash_ai) rather than a reactive node:
+
+```elixir
+vectorize do
+  attributes description: :description_vector
+  strategy :after_action          # or :manual, :ash_oban
+  embedding_model MyApp.OpenAiEmbedding
+end
+```
+
+It maintains an embedding **column next to the text it came from**, and it is
+strictly better at that job than a DAG node would be: it hooks the changeset, so
+it knows what changed without a fingerprint round-trip
+(`has_vectorize_change?` checks the `used_attributes`), and `strategy:` already
+offers inline, on-demand and background scheduling.
+
+A reactive node earns its place only when the embedding is genuinely **derived
+state with its own identity** — a separate resource keyed by something other
+than the source row, or a vector that depends on several inputs. That is
+`per_key` with an embedding action, and it needs no new rung:
+
+```elixir
+recompute_by :key, to: :transcripts, from: :key
+
+per_key :embed,
+  args: [text: :body],
+  fingerprint: [:body],           # do not pay to re-embed unchanged text
+  into: [vector: :vector]         # the action returns a list of floats
+```
+
+The two compose, which is the more common shape in practice: `vectorize` on a
+leaf resource, and reactive nodes reading it as an ordinary input.
+
 ## When to drop to `run` instead
 
 `per_key` maps one input row to one output row. Anything else — many rows per
@@ -185,10 +221,7 @@ shape above:
   `ReactiveDag.Insights` carries it to a dashboard. The library never
   interprets the map — cache hits, retries and rows scanned are equally valid
   keys.
-- **The per-key map is hand-written.** Reading the claimed rows, calling the
-  model, and writing structured output into this resource's attributes is the
-  same loop every time — which is exactly what a declarative `llm` rung would
-  generate.
+- ~~The per-key map is hand-written.~~ **Solved** by the `per_key` rung.
 
 ## Where it sits on the ladder
 
