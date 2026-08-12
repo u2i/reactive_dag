@@ -147,6 +147,99 @@ defmodule ReactiveDag.Source do
   end
 
   @doc """
+  Verify a `scan Mod` declaration on the leaf `cell_id`: the module must be a
+  loadable `ReactiveDag.Source`, and its own `leaf_cells/1` must claim this leaf.
+
+  The second half matters more than it looks. A scanner already knows which
+  cells it feeds; `scan` states the same fact from the other side. Two
+  statements of one fact can disagree, so this is the check that they don't —
+  a scanner refactored to feed `"agenda_docs_v2"` while a resource still
+  declares `scan` fails at assembly rather than polling into a cell nobody
+  reads.
+
+  Called by `ReactiveDag.Node.graph/2` for every cell carrying a `scan`, so a
+  host declaring scanners in the DSL needs no `verify!/2` call of its own.
+  """
+  @spec verify_scan!(module(), String.t(), graph()) :: :ok
+  def verify_scan!(source, cell_id, graph) do
+    unless Code.ensure_loaded?(source) do
+      raise ArgumentError,
+            "reactive_dag: cell #{inspect(cell_id)} declares `scan #{inspect(source)}`, " <>
+              "which is not a loadable module."
+    end
+
+    unless function_exported?(source, :poll, 1) do
+      raise ArgumentError,
+            "reactive_dag: cell #{inspect(cell_id)} declares `scan #{inspect(source)}`, " <>
+              "which does not implement `ReactiveDag.Source` (no poll/1). A scan names " <>
+              "the source that FEEDS this leaf; use `compute`/`run` for a node that " <>
+              "computes its own rows."
+    end
+
+    claimed = cells_of(source, graph)
+
+    unless cell_id in claimed do
+      raise ArgumentError,
+            "reactive_dag: cell #{inspect(cell_id)} declares `scan #{inspect(source)}`, but " <>
+              "that source feeds #{inspect(claimed)} — not this leaf. The scanner and the " <>
+              "leaf disagree about which cells it writes; fix whichever is stale."
+    end
+
+    :ok
+  end
+
+  @doc """
+  Poll every scanner the PLAN declares (via `scan Mod` on its leaves), in the
+  poll phase before a drain.
+
+  Scanners are found from the graph rather than a list the host maintains
+  alongside it — the list is the thing that drifts. A source feeding many
+  leaves appears once, however many leaves declare it.
+
+  Returns `{:ok, %{module => result}}`, or `{:error, failures}` where failures
+  are `{module, reason}`: one scanner failing must not silently cancel the
+  others, and must not look like success.
+  """
+  @spec poll_all(graph(), keyword()) :: {:ok, map()} | {:error, [{module(), term()}]}
+  def poll_all(graph, opts \\ []) do
+    {oks, errors} =
+      graph
+      |> scanners()
+      |> Enum.map(fn mod -> {mod, safe_poll(mod, opts)} end)
+      |> Enum.split_with(fn {_mod, result} -> match?({:ok, _}, result) end)
+
+    case errors do
+      [] -> {:ok, Map.new(oks, fn {mod, {:ok, r}} -> {mod, r} end)}
+      _ -> {:error, Enum.map(errors, fn {mod, {:error, reason}} -> {mod, reason} end)}
+    end
+  end
+
+  @doc "The distinct scanner modules a plan's leaves declare via `scan`."
+  @spec scanners(graph()) :: [module()]
+  def scanners(graph) do
+    graph.cells
+    |> Map.values()
+    |> Enum.map(& &1.meta[:scan])
+    |> Enum.reject(&is_nil/1)
+    |> Enum.uniq()
+  end
+
+  # NB the rescue must not re-wrap: `{:error, reason}` from a well-behaved poll
+  # and a raised exception both have to arrive as ONE `{:error, reason}`, or the
+  # caller has to unwrap two shapes to print one message.
+  defp safe_poll(mod, opts) do
+    case mod.poll(opts) do
+      {:ok, result} -> {:ok, result}
+      {:error, reason} -> {:error, reason}
+      other -> {:error, {:bad_return, other}}
+    end
+  rescue
+    e -> {:error, Exception.message(e)}
+  catch
+    kind, value -> {:error, {kind, value}}
+  end
+
+  @doc """
   Verify every source's declared leaves resolve to real cells in `graph` — the
   authoritative scanner↔leaf check. Each driver's leaves are resolved via
   `cells_of/2` (`leaf_cells/1`, or the single-leaf `leaf_cell/0` fallback); this

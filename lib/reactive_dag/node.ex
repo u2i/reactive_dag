@@ -761,6 +761,53 @@ defmodule ReactiveDag.Node do
     schema: [module: [type: :atom, required: true, doc: "a module implementing ReactiveDag.Op"]]
   }
 
+  defmodule Scan do
+    @moduledoc """
+    The SCANNER that feeds this leaf: `scan MuniWatch.Crawler`.
+
+    A leaf's keys come from outside the graph — a crawled website, an S3
+    listing, an API. `ReactiveDag.Source` is the behaviour that fetches them,
+    and it deliberately runs in a POLL phase outside the drain (external I/O
+    must not sit inside a depth-ordered recompute). What was missing was the
+    library knowing *which* scanner feeds *which* leaf: the binding lived in
+    the scanner's own `leaf_cells/1` and in an opaque `source :atom` label,
+    joined by string matching, with `Source.verify!/2` existing to catch the
+    mismatches that arrangement invites.
+
+    Declaring it here makes the pairing a fact of the graph. `graph/2` verifies
+    it during assembly (a `scan` naming a module that is not a `Source`, or a
+    scanner whose `leaf_cells/1` disowns this leaf, raises there), and
+    `ReactiveDag.Source.poll_all/2` can find every scanner from the plan instead
+    of a hand-kept list that drifts.
+
+    This is the SINGLE-LEAF spelling — one scanner, one leaf. A source that
+    feeds MANY leaves (one per discovered kind, or a generator's instances)
+    still implements `leaf_cells/1` and is passed to `verify!/2` directly:
+    `leaf_cells/1` takes the lowered graph precisely because those leaves come
+    from live data, which no compile-time declaration can name.
+    """
+    defstruct [:module, :__identifier__, :__spark_metadata__]
+  end
+
+  @scan %Spark.Dsl.Entity{
+    name: :scan,
+    target: Scan,
+    args: [:module],
+    describe:
+      "The `ReactiveDag.Source` that feeds this leaf. Makes the scanner\u2194leaf pairing a " <>
+        "fact of the graph: assembly verifies it, and `Source.poll_all/2` finds scanners " <>
+        "from the plan. Single-leaf; a multi-leaf source uses `leaf_cells/1` + `verify!/2`.",
+    schema: [
+      module: [
+        type: :atom,
+        required: true,
+        doc:
+          "a module implementing `ReactiveDag.Source`. Verified at assembly — it must " <>
+            "implement the behaviour, and its `leaf_cells/1` must include this leaf."
+      ]
+    ]
+  }
+
   defmodule Run do
     @moduledoc """
     The ASH-NATIVE escape hatch: `run :recompute_keys` declares that this
@@ -981,6 +1028,7 @@ defmodule ReactiveDag.Node do
       @aggregate,
       @compute,
       @run,
+      @scan,
       @attestation,
       @attested
     ],
@@ -1139,6 +1187,40 @@ defmodule ReactiveDag.Node do
     |> resolve_reads()
     |> resolve_attestations()
     |> ReactiveDag.Graph.build()
+    |> verify_scans!()
+  end
+
+  # `scan Mod` on a leaf: the pairing is now a fact of the graph, so check it
+  # HERE rather than leaving it to a host remembering to call
+  # `Source.verify!/2`. Runs on the built plan because that is when cell ids are
+  # final (a generator's instances only exist after expansion).
+  defp verify_scans!(%ReactiveDag.Plan{} = plan) do
+    for {id, cell} <- plan.cells, mod = cell.meta[:scan] do
+      # A scanner writes a cell's tuples from OUTSIDE the graph; a combinator
+      # computes them from its inputs. Declaring both on one node means the poll
+      # and the drain overwrite each other — the drain reprices from inputs and
+      # discards whatever the poll wrote. That is never intended, so it fails
+      # here rather than as data that mysteriously reverts.
+      if computation = cell.meta[:reduce] || cell.meta[:join] || cell.meta[:per_key] ||
+                         cell.meta[:aggregate] || cell.meta[:run] || cell.meta[:compute] do
+        raise ArgumentError,
+              "reactive_dag: cell #{inspect(id)} declares `scan #{inspect(mod)}` AND a " <>
+                "computation (#{inspect(kind_of(computation, cell))}). A scanner writes " <>
+                "this cell's tuples from outside the graph; a computation derives them " <>
+                "from its inputs — declared together, the poll and the drain overwrite " <>
+                "each other. Keep the scan (making this a leaf), or drop it and let the " <>
+                "node compute."
+      end
+
+      ReactiveDag.Source.verify_scan!(mod, id, plan)
+    end
+
+    plan
+  end
+
+  # which computation a cell declares, for the error above
+  defp kind_of(_value, cell) do
+    Enum.find([:reduce, :join, :per_key, :aggregate, :run, :compute], &cell.meta[&1])
   end
 
   # ── declarative-read resolution (graph assembly) ────────────────────────────
@@ -1872,6 +1954,12 @@ defmodule ReactiveDag.Node do
         nil -> %{}
       end
 
+    scan_meta =
+      case Ext.get_entities(resource, [:reactive]) |> Enum.find(&match?(%Scan{}, &1)) do
+        %Scan{module: m} -> %{scan: m}
+        nil -> %{}
+      end
+
     attestation_meta =
       case attestation_reqs(resource) do
         [] -> %{}
@@ -1933,6 +2021,7 @@ defmodule ReactiveDag.Node do
     |> Map.merge(combinator_meta)
     |> Map.merge(aggregate_meta)
     |> Map.merge(run_meta)
+    |> Map.merge(scan_meta)
     |> Map.merge(attestation_meta)
     |> Map.merge(attested_meta)
     |> Map.merge(gated_meta)

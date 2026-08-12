@@ -148,6 +148,70 @@ Order sources so that ones which only observe the world run before any source
 that derives from other cells' results — a deriving source that runs first
 computes against a stale model.
 
+## Declaring the scanner: `scan`
+
+A leaf says which scanner feeds it:
+
+```elixir
+reactive do
+  id :agenda_docs
+  leaf? true
+  scan MuniWatch.Crawler
+end
+```
+
+That makes the scanner↔leaf pairing **a fact of the graph**, which buys two
+things:
+
+- **`Node.graph/2` verifies it.** The module must implement `ReactiveDag.Source`,
+  and its own `leaf_cells/1` must claim this leaf. A scanner refactored to feed
+  `"agenda_docs_v2"` while a resource still declares `scan` fails at assembly,
+  rather than polling into a cell nobody reads. No `verify!/2` call needed.
+- **`Source.poll_all/2` finds scanners from the plan**, not from a list kept
+  alongside it:
+
+```elixir
+plan = MyApp.Dag.plan()
+{:ok, _results} = ReactiveDag.Source.poll_all(plan)   # poll phase
+{:ok, report} = ReactiveDag.Drain.run(plan, opts)     # then drain
+```
+
+A source feeding many leaves is polled **once**, however many leaves name it.
+One scanner failing is reported (`{:error, [{module, reason}]}`) rather than
+cancelling the others or looking like success.
+
+Polling still happens **outside the drain** — external I/O has no business
+inside a depth-ordered recompute. `scan` changes where the binding is
+*declared*, not when fetching happens.
+
+### A scanner is not required to be `leaf? true`…
+
+…but it must not be a node that **computes**. Nothing about `Source` inspects
+`leaf?`, and hosts legitimately direct-write cells that aren't strictly leaves
+(a companion store cell, for instance). What is a contradiction is declaring a
+scanner *and* a computation on one node:
+
+```elixir
+reactive do
+  id :category_totals
+  scan MyApp.Crawler                 # writes tuples from outside…
+  reduce into: [sum: [amount: :total]]   # …and derives them from inputs
+end
+```
+
+A scanner writes this cell's tuples from outside the graph; a combinator derives
+them from its inputs. Declared together, the poll and the drain overwrite each
+other — the drain reprices from inputs and discards whatever the poll wrote,
+which surfaces as data that mysteriously reverts. `graph/2` raises on it.
+
+### When not to use it
+
+`scan` is the **single-leaf** spelling. A source that feeds many leaves — one per
+discovered kind, or a generator's expanded instances — implements
+`leaf_cells/1` and is passed to `verify!/2` directly. That callback takes the
+lowered graph precisely because those leaves come from live data, which no
+declaration can name ahead of time.
+
 ## `dirties_on` vs a `Source`: which trigger?
 
 Two ways a leaf becomes dirty, and they are not alternatives — they cover
