@@ -218,25 +218,15 @@ defmodule ReactiveDag.LlmNodeTest do
     def query!("SELECT COUNT" <> _, _params), do: %{rows: [[Agent.get(__MODULE__, &MapSet.size/1)]]}
   end
 
-  defmodule NullWriter do
-    @behaviour ReactiveDag.CoordinationWriter
-    @impl true
-    def put(_cell_id, _key, _opts), do: :ok
-    @impl true
-    def delete(_cell_id, _keys), do: :ok
-  end
 
   setup do
     start_supervised!(%{id: FakeRepo, start: {FakeRepo, :start_link, []}})
     start_supervised!(%{id: FakeLLM, start: {FakeLLM, :start_link, []}})
     prev_repo = Application.get_env(:reactive_dag, :repo)
-    prev_writer = Application.get_env(:reactive_dag, :coordination_writer)
     Application.put_env(:reactive_dag, :repo, FakeRepo)
-    Application.put_env(:reactive_dag, :coordination_writer, NullWriter)
 
     on_exit(fn ->
       Application.put_env(:reactive_dag, :repo, prev_repo)
-      Application.put_env(:reactive_dag, :coordination_writer, prev_writer)
     end)
 
     People |> Ash.Changeset.for_create(:create, %{key: "p1", name: "Ada"}) |> Ash.create!()
@@ -384,7 +374,7 @@ defmodule ReactiveDag.LlmNodeTest do
     @behaviour ReactiveDag.Op
 
     @impl true
-    def recompute(cell, keys) do
+    def recompute(_cell, keys) do
       keys =
         if keys == ["*"],
           do: ReactiveDag.LlmNodeTest.Transcripts |> Ash.read!() |> Enum.map(& &1.key),
@@ -403,7 +393,6 @@ defmodule ReactiveDag.LlmNodeTest do
           |> Ash.Changeset.for_create(:upsert, %{key: key, sentiment: result["sentiment"]})
           |> Ash.create!()
 
-          ReactiveDag.Op.put(cell, key)
           key
         end
 

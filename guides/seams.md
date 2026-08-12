@@ -2,13 +2,12 @@
 
 The substrate decides *when* and *in what order* cells recompute; it never
 decides *how*, or *what a value means*. Everything domain-shaped enters through
-four named seams — the same four that let two very different hosts (a per-key
+three named seams — the same three that let two very different hosts (a per-key
 Elixir pipeline calling LLMs, and a set-based SQL compliance model) share one
 engine without forking it.
 
 This guide is for hosts going beyond the `ReactiveDag.Node` authoring surface:
-custom recompute strategies, custom key propagation, extension columns, and
-hand-assembled graphs.
+custom recompute strategies, custom key propagation, and hand-assembled graphs.
 
 ## Seam 1: `ReactiveDag.RecomputeStrategy` — how a cell recomputes
 
@@ -44,58 +43,32 @@ grammars, one-to-many expansions). `ReactiveDag.Node.KeyRule` reads
 `:identity | :all` off the authored block; bring your own for a real key
 grammar.
 
-## Seam 3: `ReactiveDag.CoordinationWriter` — how tuples are written
-
-The spine (`cell_id, key, status, freshness`) is shared, but a host's
-coordination write often touches its **extension columns in the same atomic
-upsert** — a `strength` modality, a `source_ref`, a tombstone policy. That is
-host policy, so the write is a seam:
-
-```elixir
-@callback put(cell_id, key, opts) :: :ok | boolean()
-@callback delete(cell_id, keys) :: :ok
-@callback tombstone(cell_id, keys) :: :ok    # optional
-```
-
-Ops write through `ReactiveDag.Op.put/3`, which routes here. Two things worth
-exploiting:
-
-- **The changed signal.** A writer's `put` may return a boolean — *did the
-  row's verdict actually flip?* — which ops use as their changed-key signal.
-  The spine-only default reports it (`ReactiveDag.Tuple.put_changed/3`: `true`
-  for a new row or a status flip). A writer that returns bare `:ok` is treated
-  as "assume changed": correct, just less scoped.
-- **Opts are the extension channel.** Machinery above the seam passes host
-  fields in opts (`strength:`, `source_ref:`, …); the default writer takes
-  only spine keys and drops the rest, a host writer stamps what it knows. This
-  is how, e.g., attested rows carry `strength: "attested"` without the library
-  ever writing a column it doesn't own.
-
-Configure with `config :reactive_dag, coordination_writer: MyApp.Writer`.
-
-## Seam 4: `ReactiveDag.Source` — how the world gets in
+## Seam 3: `ReactiveDag.Source` — how the world gets in
 
 Covered in depth in [Sources and scanning](sources.md): `id/0`,
 `leaf_cells/1`, `poll/1 → changed keys`, with polling deliberately outside the
 drain. The seam exists because fetching is effectful and fallible while the
 drain must stay pure and re-runnable.
 
-## Spine vs. extension columns
+## Where results live
 
-The library owns the spine columns of the tuple table and is their only
-reader/writer:
+There is no shadow table. A node's results are rows in that node's own
+resource, with that resource's own columns, types, policies and migration.
 
-```
-cell_id, key                      (composite identity)
-status                            (string — the HOST defines the vocabulary)
-observed_at, stale_after, updated_at
-```
+This was not always so. The library used to write a coordination tuple — a row
+per `(cell_id, key)` in a side table — carrying a `status` and freshness
+alongside every result, with a `CoordinationWriter` seam so a host could stamp
+its own extension columns into the same upsert. It existed because a node could
+be *tableless*: a verdict node had nowhere else to put its answer.
 
-The host's physical table may carry anything else beside them; the library
-never reads or writes those columns. `status` deserves emphasis: it is an open
-vocabulary. `"present"` is only a default — a compliance host writes
-`covered/failing/pending`, and rollups (`ReactiveDag.Verdict`) take the
-host's meaning of each status as configuration, not assumption.
+Once every node had a resource, that table had nothing left to record that the
+resource did not already say, and the seam had nothing left to write. A host
+that wants a `source_ref`, a `last_seen_at` or a tombstone flag puts it on the
+node's resource, where the rest of the row already is.
+
+What remains of that machinery is `ReactiveDag.Node.Rows.reconcile/3` — the
+set math a leaf driver needs (`current − want → retired`), reading the leaf's
+own rows.
 
 ## Hand-assembled graphs
 

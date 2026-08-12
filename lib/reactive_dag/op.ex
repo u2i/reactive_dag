@@ -5,18 +5,27 @@ defmodule ReactiveDag.Op do
 
   A `ReactiveDag.Node` records its compute module in `cell.meta.compute`; the
   generic `ReactiveDag.Node.Recompute` strategy dispatches to it. The op reads
-  its inputs (from the coordination tuples of its input cells, and/or the host's
-  typed payload resources) and writes its output (its payload rows + its own
-  coordination tuples), returning the keys that ACTUALLY changed — only those
-  propagate, keeping the cascade O(real changes).
+  its inputs (the input cells' rows, and/or the host's own resources) and writes
+  its output, returning the keys that ACTUALLY changed — only those propagate,
+  keeping the cascade O(real changes).
 
   This is deliberately thin: the substrate says WHEN a cell recomputes and in
   what order; the op says HOW, in whatever storage/effect model the host uses
   (per-key Elixir calling an LLM, or a set-based SQL write). The library never
   inspects what an op does — only that it returns `{:ok, changed_keys}`.
 
-  A LEAF has no op: an external source writes its tuples and marks its parents
+  A LEAF has no op: an external source writes its rows and marks its parents
   dirty, so a leaf never reaches recompute.
+
+  ## There is no coordination write
+
+  This module used to carry `put/3`, `delete/2` and `tombstone/2`, routing to a
+  configured `CoordinationWriter` that wrote a row per `(cell_id, key)` into a
+  side table. Every node now writes its results into its own resource, so that
+  table had nothing left to record that the resource does not already say — and
+  an op's return value is the changed set, which is what the drain actually
+  propagates. An op writes its rows and returns its keys; nothing else is asked
+  of it.
   """
 
   alias ReactiveDag.Cell
@@ -29,47 +38,4 @@ defmodule ReactiveDag.Op do
   always correct, just less efficient.
   """
   @callback recompute(cell :: Cell.t(), keys :: [key()]) :: {:ok, [key()]}
-
-  # ── the coordination-write API ops call ────────────────────────────────────
-  # An op writes its PAYLOAD however it likes (its typed resource — host domain),
-  # then records each key's coordination verdict through these, which route to
-  # the host-configured `ReactiveDag.CoordinationWriter`. This replaces ops
-  # reaching into a host `Frontier.put_tuple` directly: the cell carries its id,
-  # so there's no per-op `@cell` module attribute, and the extension-column write
-  # stays host policy behind the writer seam.
-
-  alias ReactiveDag.CoordinationWriter, as: W
-
-  # These accept the CELL (either a ReactiveDag.Cell from the drain, or a host's
-  # own cell struct in a unit test) and extract its id — both expose `.id` — so
-  # an op body reads naturally (`Op.put(cell, key, …)`) regardless of cell type.
-
-  @doc """
-  Mark `key` of `cell` present (opts carry host fields: source_ref, strength, …).
-  Returns whatever the configured writer's `put` returns — `:ok`, or a boolean
-  CHANGED signal an op can use (a writer that guards its upsert with
-  `IS DISTINCT FROM` reports whether the row actually flipped).
-  """
-  @spec put(struct() | String.t(), key(), keyword()) :: :ok | boolean()
-  def put(cell, key, opts \\ []), do: W.writer().put(id(cell), key, opts)
-
-  @doc "Tombstone `keys` of `cell` (retain-if-vanish, if the writer supports it; else delete)."
-  @spec tombstone(struct() | String.t(), [key()]) :: :ok
-  def tombstone(cell, keys) do
-    w = W.writer()
-
-    # ensure_loaded: function_exported?/3 is false for a module that merely isn't
-    # LOADED yet, which would silently downgrade tombstone to hard delete on the
-    # first call in a lazily-loading VM (dev, `mix run`).
-    if Code.ensure_loaded?(w) and function_exported?(w, :tombstone, 2),
-      do: w.tombstone(id(cell), keys),
-      else: w.delete(id(cell), keys)
-  end
-
-  @doc "Hard-delete `keys` of `cell`."
-  @spec delete(struct() | String.t(), [key()]) :: :ok
-  def delete(cell, keys), do: W.writer().delete(id(cell), keys)
-
-  defp id(%{id: id}), do: to_string(id)
-  defp id(id) when is_binary(id), do: id
 end

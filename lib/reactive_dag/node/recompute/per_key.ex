@@ -17,9 +17,8 @@ defmodule ReactiveDag.Node.Recompute.PerKey do
 
   require Ash.Query
 
+  alias ReactiveDag.Node.Fingerprint
   alias ReactiveDag.Node.Recompute.Read
-
-  @default_fingerprint_attr :fingerprint
 
   @doc "Recompute a per_key node; returns `{changed_keys, meta}`."
   @spec recompute(ReactiveDag.Cell.t(), map(), [String.t()] | nil) :: {[String.t()], map()}
@@ -27,7 +26,7 @@ defmodule ReactiveDag.Node.Recompute.PerKey do
     source = cell.meta[:over_source]
     rows = Read.items(source, source_over(cell), nil, claimed, keyed_scope(source, claimed))
 
-    fp_attr = spec.fingerprint_attribute || @default_fingerprint_attr
+    fp_attr = spec.fingerprint_attribute || Fingerprint.default_attribute()
     existing = existing_fingerprints(cell, fp_attr, rows, source)
 
     # PARTITION FIRST, then call. Skips are decided before anything runs, so a
@@ -36,7 +35,7 @@ defmodule ReactiveDag.Node.Recompute.PerKey do
     # nothing regardless of the concurrency setting.
     {to_call, skipped} =
       Enum.split_with(rows, fn row ->
-        want = fingerprint(spec.fingerprint, row)
+        want = Fingerprint.of(spec.fingerprint, row)
         want == nil or want != Map.get(existing, row_key(row, source))
       end)
 
@@ -51,7 +50,7 @@ defmodule ReactiveDag.Node.Recompute.PerKey do
        when is_nil(n) or n == 1 do
     Enum.map(rows, fn row ->
       key = row_key(row, source)
-      write_row(cell, spec, key, row, fingerprint(spec.fingerprint, row), fp_attr)
+      write_row(cell, spec, key, row, Fingerprint.of(spec.fingerprint, row), fp_attr)
       key
     end)
   end
@@ -64,7 +63,7 @@ defmodule ReactiveDag.Node.Recompute.PerKey do
     |> Task.async_stream(
       fn row ->
         key = row_key(row, source)
-        write_row(cell, spec, key, row, fingerprint(spec.fingerprint, row), fp_attr)
+        write_row(cell, spec, key, row, Fingerprint.of(spec.fingerprint, row), fp_attr)
         key
       end,
       max_concurrency: spec.max_concurrency,
@@ -99,13 +98,13 @@ defmodule ReactiveDag.Node.Recompute.PerKey do
       result
       |> project(spec.into, resource)
       |> Map.put(payload_key(cell), key)
-      |> maybe_put_fingerprint(fp_attr, fingerprint, resource)
+      |> Fingerprint.put(fp_attr, fingerprint, resource, "per_key … fingerprint:")
 
     resource
     |> Ash.Changeset.for_create(cell.meta[:payload_action] || :upsert, attrs)
     |> Ash.create!()
 
-    ReactiveDag.Op.put(cell, key)
+    :ok
   end
 
   # the row's fields → the action's arguments. An explicit `args:` maps them
@@ -148,34 +147,6 @@ defmodule ReactiveDag.Node.Recompute.PerKey do
   end
 
   defp fetch_result(_result, _name), do: nil
-
-  # ── fingerprints ────────────────────────────────────────────────────────────
-
-  # nil when the node declares none — every recompute then calls the action.
-  defp fingerprint(nil, _row), do: nil
-  defp fingerprint([], _row), do: nil
-
-  defp fingerprint(fields, row) do
-    fields
-    |> Enum.map(&Map.get(row, &1))
-    |> :erlang.term_to_binary()
-    |> then(&:crypto.hash(:sha256, &1))
-    |> Base.encode16(case: :lower)
-  end
-
-  defp maybe_put_fingerprint(attrs, _attr, nil, _resource), do: attrs
-
-  defp maybe_put_fingerprint(attrs, attr, value, resource) do
-    if Ash.Resource.Info.attribute(resource, attr) do
-      Map.put(attrs, attr, value)
-    else
-      raise ArgumentError,
-            "reactive_dag: `per_key … fingerprint:` needs somewhere to store the hash, but " <>
-              "#{inspect(resource)} has no #{inspect(attr)} attribute. Add " <>
-              "`attribute #{inspect(attr)}, :string`, or name another with " <>
-              "`fingerprint_attribute`."
-    end
-  end
 
   # the stored fingerprint per key, for exactly the rows this pass will consider
   defp existing_fingerprints(_cell, _attr, [], _source), do: %{}

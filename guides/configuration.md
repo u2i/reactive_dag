@@ -8,19 +8,15 @@ hosts never touch more than two or three.
 
 ```elixir
 # config/config.exs — a typical host
-config :reactive_dag,
-  repo: MyApp.Repo,
-  coordination_writer: MyApp.ReactiveDag.Writer
+config :reactive_dag, repo: MyApp.Repo
 ```
 
 ## The keys
 
 | key | default | required? | read by |
 |---|---|---|---|
-| [`:repo`](#repo) | — | **yes** | `Frontier`, `Tuple` |
-| [`:dirty_table`](#dirty_table-tuple_table) | `"reactive_dag_dirty"` | no | `Frontier`, `Migration` |
-| [`:tuple_table`](#dirty_table-tuple_table) | `"reactive_dag_tuple"` | no | `Tuple` |
-| [`:coordination_writer`](#coordination_writer) | `ReactiveDag.Tuple.Writer` | no | `CoordinationWriter` |
+| [`:repo`](#repo) | — | **yes** | `Frontier` |
+| [`:dirty_table`](#dirty_table) | `"reactive_dag_dirty"` | no | `Frontier`, `Migration` |
 | [`:set_op_templates`](#set_op_templates) | `%{}` | only with `SetOp` | `SetOp` |
 | [`:insights_keep`](#insights_keep) | `20` | no | `Insights` |
 
@@ -28,10 +24,10 @@ config :reactive_dag,
 
 ### `:repo`
 
-Your AshPostgres repo. The library goes through it with raw SQL for the two
-tables it owns — the dirty frontier and the coordination tuple — because
-claim-as-delete (`DELETE … RETURNING`) and the coalescing upserts don't express
-cleanly as Ash actions.
+Your AshPostgres repo. The library goes through it with raw SQL for the one
+table it owns — the dirty frontier — because claim-as-delete
+(`DELETE … RETURNING`) and the coalescing upserts don't express cleanly as Ash
+actions.
 
 ```elixir
 config :reactive_dag, repo: MyApp.Repo
@@ -40,19 +36,17 @@ config :reactive_dag, repo: MyApp.Repo
 **The only required key.** Omitting it raises on the *first query* — which may
 be a long way into a deploy — so validate at boot instead (below).
 
-### `:dirty_table`, `:tuple_table`
+### `:dirty_table`
 
-The physical table names.
+The physical table name for the frontier.
 
 ```elixir
-config :reactive_dag,
-  dirty_table: "my_existing_dirty",
-  tuple_table: "my_existing_tuples"
+config :reactive_dag, dirty_table: "my_existing_dirty"
 ```
 
-These exist so **a host adopting the library keeps its tables without a
-rename** — both current hosts grew their own frontier and tuple tables before
-the library existed. On a green-field app, leave them alone.
+This exists so **a host adopting the library keeps its table without a
+rename** — both current hosts grew their own frontier table before the library
+existed. On a green-field app, leave it alone.
 
 The name is the one identifier SQL cannot parameterise, so it is validated
 against an identifier grammar at read time: a typo fails loudly rather than as
@@ -61,29 +55,6 @@ a syntax error deep inside a query.
 `ReactiveDag.Migration` resolves `:dirty_table` exactly as `Frontier` does, so
 a host that sets the config gets a migration matching the table the runtime
 queries — there is no second place to keep in sync.
-
-### `:coordination_writer`
-
-How a cell's coordination tuples are written — one of the library's
-[three seams](seams.html).
-
-```elixir
-config :reactive_dag, coordination_writer: MyApp.ReactiveDag.Writer
-```
-
-The default (`ReactiveDag.Tuple.Writer`) writes the **spine only**:
-`(cell_id, key, status, freshness)`. That is enough for a host with no
-extension columns.
-
-**This is the seam most hosts eventually replace.** The spine is shared, but
-each host's write also touches its own columns in the *same atomic upsert* —
-one stamps `source_ref`/`last_seen_at` and clears `tombstoned_at`, another
-stamps `strength`. That extension write is host policy, which is why it cannot
-be a pure spine call.
-
-A writer may also report a **changed** boolean from `put/3` (true iff the row's
-verdict actually flipped), which the payload loop uses to scope propagation to
-real changes. Returning `:ok` is correct too — just less scoped.
 
 ### `:set_op_templates`
 
@@ -132,12 +103,10 @@ end
 ** (ReactiveDag.Config.Error) reactive_dag is misconfigured:
 
   * `:repo` is not set (required) — add `config :reactive_dag, repo: MyApp.Repo`
-  * `:coordination_writer` MyApp.Writer does not implement
-    ReactiveDag.CoordinationWriter (missing: put/3, delete/2)
   * `:dirty_table` "my dirty" is not a valid SQL identifier
 ```
 
-It reports **every** problem, not the first — a config with three mistakes
+It reports **every** problem, not the first — a config with two mistakes
 should take one deploy to fix. `Config.problems/0` returns the same list without
 raising, for a host that would rather log them.
 

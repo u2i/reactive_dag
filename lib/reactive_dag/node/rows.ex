@@ -102,6 +102,119 @@ defmodule ReactiveDag.Node.Rows do
     |> take(opts[:limit])
   end
 
+  @doc """
+  Reconcile a leaf's rows against the key set a scan found — the algorithm every
+  leaf driver otherwise hand-rolls.
+
+      current  = the cell's current keys (read from its resource)
+      want     = `want_keys`, what the scan found
+      upsert   each want key   → the host writes the row, returns true iff CHANGED
+      vanished = current − want → retired
+      ⇒ changed_upserts ++ vanished    (the keys to propagate)
+
+  `:upsert` is called once per want-key, in either of two forms:
+
+    * `(key -> row | nil)` — the common case. Return the row you observed and
+      the library writes it, deciding `changed?` against the node's declared
+      `fingerprint` (or every attribute, if it declares none). Return `nil` for
+      a key you could not observe: nothing is written and the key is not
+      reported, which is how a partial outage stays honest.
+    * `(key -> boolean)` — full control. Write the row yourself and say whether
+      it moved. Use this when the write is not an upsert into the node's own
+      resource.
+    * `:retire` — how vanished keys leave. Defaults to destroying the row via
+      the node's `payload_destroy` action; a host with a retain-if-vanish policy
+      passes a `(keys -> any)` fun and marks its own rows instead.
+    * `:current` — the baseline `vanished` is computed against. Defaults to the
+      cell's current keys. A host whose *live* set is narrower than all its rows
+      passes it explicitly — a retain-if-vanish leaf passes its non-tombstoned
+      keys, so already-retired keys are neither re-retired nor reported as newly
+      vanished.
+
+  Vanished keys always propagate: something disappearing is a change.
+
+  A leaf declaring `fingerprint` needs no `:upsert` at all for the row-returning
+  form to be worth using — that is the point: `poll/1` becomes fetch, build
+  rows, call reconcile.
+
+  > #### The honest gap {: .warning}
+  >
+  > Call this only with a want-set you actually observed. An upstream you could
+  > not reach must write NOTHING — handing an empty `want_keys` to a scan that
+  > failed retires every key the cell has, and a downstream rollup over an empty
+  > set typically reads as vacuously fine. A scan that couldn't look must never
+  > render as a scan that found nothing.
+  """
+  @spec reconcile(Cell.t(), [String.t()] | MapSet.t(), keyword()) :: {:ok, [String.t()]}
+  def reconcile(%Cell{meta: meta} = cell, want_keys, opts) do
+    upsert = Keyword.fetch!(opts, :upsert)
+    want_set = MapSet.new(want_keys)
+
+    changed_up =
+      want_set
+      |> MapSet.to_list()
+      |> Enum.sort()
+      |> Enum.filter(&(observe(&1, upsert, meta) == true))
+
+    current = Keyword.get_lazy(opts, :current, fn -> Enum.map(all(cell), & &1.key) end)
+    vanished = Enum.reject(current, &MapSet.member?(want_set, &1))
+
+    retire(vanished, Keyword.get(opts, :retire), meta)
+
+    {:ok, changed_up ++ vanished}
+  end
+
+  # the host either wrote the row itself and told us whether it moved, or handed
+  # us what it observed and let the library decide.
+  defp observe(key, upsert, meta) do
+    case upsert.(key) do
+      changed? when is_boolean(changed?) -> changed?
+      nil -> false
+      row when is_map(row) -> write(key, row, meta) == :changed
+    end
+  end
+
+  defp write(key, row, meta) do
+    opts = [
+      fingerprint: meta[:fingerprint],
+      fingerprint_attribute: meta[:fingerprint_attribute]
+    ]
+
+    case meta[:identity_fields] do
+      fields when is_list(fields) ->
+        ReactiveDag.Node.Payload.upsert_identity(
+          meta[:resource],
+          fields,
+          row,
+          meta[:payload_action] || :upsert,
+          opts
+        )
+
+      _ ->
+        ReactiveDag.Node.Payload.upsert(
+          meta[:resource],
+          meta[:payload_key] || :key,
+          key,
+          row,
+          meta[:payload_action] || :upsert,
+          opts
+        )
+    end
+  end
+
+  defp retire([], _how, _meta), do: :ok
+  defp retire(keys, fun, _meta) when is_function(fun, 1), do: fun.(keys)
+
+  defp retire(keys, _nil, meta) do
+    ReactiveDag.Node.Payload.retire(
+      meta[:resource],
+      meta[:payload_key] || :key,
+      meta[:identity_fields],
+      keys,
+      meta[:payload_destroy] || :destroy
+    )
+  end
+
   defp take(keys, nil), do: keys
   defp take(keys, limit), do: Enum.take(keys, limit)
 

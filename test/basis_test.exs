@@ -209,19 +209,7 @@ defmodule ReactiveDag.BasisTest do
       end
     end
 
-    defmodule NullWriter do
-      @behaviour ReactiveDag.CoordinationWriter
-      @impl true
-      def put(_c, _k, _o), do: :ok
-      @impl true
-      def delete(_c, _k), do: :ok
-    end
-
     setup do
-      prev = Application.get_env(:reactive_dag, :coordination_writer)
-      Application.put_env(:reactive_dag, :coordination_writer, NullWriter)
-      on_exit(fn -> Application.put_env(:reactive_dag, :coordination_writer, prev) end)
-
       Machines |> Ash.read!() |> Enum.each(&Ash.destroy!/1)
       Holdings |> Ash.read!() |> Enum.each(&Ash.destroy!/1)
 

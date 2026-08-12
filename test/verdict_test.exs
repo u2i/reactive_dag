@@ -2,7 +2,7 @@ defmodule ReactiveDag.VerdictTest do
   @moduledoc """
   The generic read/rollup layer (ReactiveDag.Verdict) — the engine piece promoted
   out of the portal's hand-written Verdict. Pure rollup logic tested directly;
-  for_cell is a thin wrapper over ReactiveDag.Tuple reads (proven by host suites).
+  for_cell is a thin wrapper over ReactiveDag.Node.Rows reads.
   """
   use ExUnit.Case, async: true
 

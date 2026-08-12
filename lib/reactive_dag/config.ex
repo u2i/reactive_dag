@@ -5,9 +5,8 @@ defmodule ReactiveDag.Config do
   Misconfiguration otherwise surfaces at the **first query** — a missing
   `:repo` raises on the first drain, which may be a long way into a deploy and
   in whatever process happened to trigger it. Worse, only `:repo` raises at all:
-  a `:coordination_writer` pointing at a module that does not implement the
-  behaviour, or a table name that is not a valid identifier, fails later and
-  less legibly.
+  a `:dirty_table` name that is not a valid identifier fails later and less
+  legibly, as a syntax error deep inside a query.
 
   Call it once at boot:
 
@@ -31,9 +30,8 @@ defmodule ReactiveDag.Config do
   ## What it does not check
 
   Only what is *definitely* wrong. A validator that warns about the
-  suspicious-but-legal gets wrapped in a `try` and stops being read — so a
-  default `:coordination_writer` on a host that clearly has extension columns
-  passes silently. Nothing here touches the database: whether the tables exist
+  suspicious-but-legal gets wrapped in a `try` and stops being read. Nothing
+  here touches the database: whether the tables exist
   is `ReactiveDag.Migration`'s business, and a boot check that queries would
   make boot depend on the database being reachable.
   """
@@ -71,7 +69,6 @@ defmodule ReactiveDag.Config do
     Enum.flat_map(
       [
         &repo/0,
-        &coordination_writer/0,
         &table_names/0,
         &insights_keep/0
       ],
@@ -107,31 +104,10 @@ defmodule ReactiveDag.Config do
     end
   end
 
-  defp coordination_writer do
-    writer = Application.get_env(:reactive_dag, :coordination_writer, ReactiveDag.Tuple.Writer)
-
-    cond do
-      not is_atom(writer) ->
-        ["`:coordination_writer` must be a module, got #{inspect(writer)}"]
-
-      not Code.ensure_loaded?(writer) ->
-        ["`:coordination_writer` is #{inspect(writer)}, which is not a loadable module"]
-
-      (missing = missing_callbacks(writer, put: 3, delete: 2)) != [] ->
-        [
-          "`:coordination_writer` #{inspect(writer)} does not implement " <>
-            "ReactiveDag.CoordinationWriter (missing: #{describe(missing)})"
-        ]
-
-      true ->
-        []
-    end
-  end
-
   # the one identifier SQL cannot parameterise, so a typo would otherwise be a
   # syntax error deep inside a query
   defp table_names do
-    for {key, default} <- [dirty_table: "reactive_dag_dirty", tuple_table: "reactive_dag_tuple"],
+    for {key, default} <- [dirty_table: "reactive_dag_dirty"],
         name = Application.get_env(:reactive_dag, key, default),
         problem = table_problem(key, name),
         do: problem
@@ -156,11 +132,4 @@ defmodule ReactiveDag.Config do
 
   # ── helpers ─────────────────────────────────────────────────────────────────
 
-  # ensure_loaded first: function_exported?/3 is false for a module that merely
-  # is not loaded yet, which would report a correct writer as broken.
-  defp missing_callbacks(module, callbacks) do
-    for {fun, arity} <- callbacks, not function_exported?(module, fun, arity), do: {fun, arity}
-  end
-
-  defp describe(callbacks), do: Enum.map_join(callbacks, ", ", fn {f, a} -> "#{f}/#{a}" end)
 end

@@ -21,9 +21,9 @@ defmodule ReactiveDag.Migration do
     * `:dirty_table` — override the resolved table name for this migration
       only (rare; the config is the normal home).
 
-  The coordination TUPLE table is deliberately not created here: its schema is
-  host-extended (extension columns like `strength` ride the host's
-  `CoordinationWriter`), so its migration belongs to the host.
+  This is the ONLY table the library owns. Every node's results live in that
+  node's own resource, with its own migration — there is no second table
+  shadowing them.
   """
   use Ecto.Migration
 

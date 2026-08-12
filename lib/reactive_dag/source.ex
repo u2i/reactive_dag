@@ -1,19 +1,19 @@
 defmodule ReactiveDag.Source do
   @moduledoc """
-  A **scanner** — the fourth seam, alongside `ReactiveDag.RecomputeStrategy`,
-  `ReactiveDag.KeyRule`, and `ReactiveDag.CoordinationWriter`.
+  A **scanner** — the third seam, alongside `ReactiveDag.RecomputeStrategy` and
+  `ReactiveDag.KeyRule`.
 
   A source reads external state (a fleet API, a cloud estate, a repo, an LLM) and
-  writes a **leaf cell** in a *poll* phase that is deliberately OUTSIDE the drain:
+  writes a **leaf cell**'s rows in a *poll* phase deliberately OUTSIDE the drain:
 
-    1. **poll** — run each source's `poll/1`: fetch → write its leaf tuples →
+    1. **poll** — run each source's `poll/1`: fetch → write its leaf's rows →
        return the leaf keys that CHANGED (so the caller can mark parents dirty).
        Sources are independent; a failure is contained to its own leaf.
     2. **drain** — the engine recomputes everything downstream from the dirty
        frontier (`ReactiveDag.Drain`). No source runs here.
 
   This split is a design invariant, not an accident: the drain is pure set/graph
-  computation over tuples already present — deterministic, re-runnable, and it
+  computation over rows already written — deterministic, re-runnable, and it
   never fails on a network outage. Effectful, non-deterministic, fallible I/O
   (that's every scanner) stays in phase 1.
 
@@ -51,7 +51,7 @@ defmodule ReactiveDag.Source do
 
         @impl true
         def poll(_opts) do
-          # fetch the fleet, write the "machines" leaf's tuples, return changed keys
+          # fetch the fleet, write the "machines" leaf's rows, return changed keys
           {:ok, %{changed: ["host-1", "host-7"]}}
         rescue
           e -> {:error, Exception.message(e)}

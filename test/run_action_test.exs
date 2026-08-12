@@ -3,7 +3,7 @@ defmodule ReactiveDag.RunActionTest do
   `run :action` — the Ash-NATIVE escape hatch: the node's recompute is a
   GENERIC action on its own resource. The action gets only the arguments it
   declares (`keys` — nil for whole-cell — and `cell_id`), does its own domain
-  writes, and returns the changed keys; the library `Op.put`s each.
+  writes, and returns the changed keys — which are what propagates.
   """
   use ExUnit.Case, async: false
 
@@ -84,29 +84,15 @@ defmodule ReactiveDag.RunActionTest do
     end
   end
 
-  defmodule CapturingWriter do
-    @behaviour ReactiveDag.CoordinationWriter
-    @impl true
-    def put(cell_id, key, opts), do: send(self(), {:put, cell_id, key, opts}) && :ok
-    @impl true
-    def delete(_cell_id, _keys), do: :ok
-  end
-
-  setup do
-    prev = Application.get_env(:reactive_dag, :coordination_writer)
-    Application.put_env(:reactive_dag, :coordination_writer, CapturingWriter)
-    on_exit(fn -> Application.put_env(:reactive_dag, :coordination_writer, prev) end)
-    :ok
-  end
-
-  test "the action receives the scoped keys + cell id, and its returned keys are Op.put" do
+  test "the action receives the scoped keys + cell id, and returns the changed keys" do
     cell = ReactiveDag.Node.to_cell(Extractor)
 
     {:ok, changed} = Recompute.recompute(cell, ["k1", "k2"])
+
+    # what the action returns IS the changed set — it did its own domain writes,
+    # and nothing further is asked of it
     assert changed == ["e1", "e2"]
     assert_received {:ran, ["k1", "k2"], "extractor"}
-    assert_received {:put, "extractor", "e1", _}
-    assert_received {:put, "extractor", "e2", _}
   end
 
   test "a whole-cell claim arrives as nil keys (the scope contract)" do

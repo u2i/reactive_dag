@@ -26,7 +26,7 @@ defmodule ReactiveDag.Node do
           # ASH-FIRST: `recompute_by` names the UNIT a change invalidates (and
           # supplies the edge + the claim rule); the library reads :dmr_rows,
           # folds each group, and upserts the row by its Ash IDENTITY with the
-          # coordination Op.put. No `read:`, no `key:`, no key column, no
+          # payload write. No `read:`, no `key:`, no key column, no
           # `upsert:` — each slot has an escape hatch when the shape outgrows
           # attributes.
           recompute_by :plant, to: :dmr_rows, from: :plant
@@ -95,13 +95,11 @@ defmodule ReactiveDag.Node do
   ## Config
 
       config :reactive_dag,
-        repo:                MyApp.Repo,        # REQUIRED (raises if unset)
-        tuple_table:         "my_tuple",        # coordination spine table (must match your migration)
-        dirty_table:         "my_dirty",        # frontier table (must match your migration)
-        coordination_writer: MyApp.Writer       # optional; a spine-only default ships
+        repo:        MyApp.Repo,   # REQUIRED (raises if unset)
+        dirty_table: "my_dirty"    # frontier table (must match your migration)
 
-  `tuple_table`/`dirty_table` default silently, so a name that doesn't match your
-  migration yields empty results with no error — set them explicitly.
+  `dirty_table` defaults silently, so a name that doesn't match your migration
+  yields empty results with no error — set it explicitly.
   """
 
   defmodule Ref do
@@ -417,7 +415,7 @@ defmodule ReactiveDag.Node do
         type: {:fun, 2},
         required: false,
         doc:
-          "OPTIONAL override `(key, row -> boolean)` — write the row's payload + return true iff CHANGED. OMIT it for the common case: the library writes `into`'s row into the node's OWN resource (`ReactiveDag.Node.Payload`) and does the `Op.put`. Supply `upsert:` only to write somewhere other than the node itself."
+          "OPTIONAL override `(key, row -> boolean)` — write the row's payload + return true iff CHANGED. OMIT it for the common case: the library writes `into`'s row into the node's OWN resource (`ReactiveDag.Node.Payload`). Supply `upsert:` only to write somewhere other than the node itself."
       ]
     ]
   }
@@ -601,13 +599,14 @@ defmodule ReactiveDag.Node do
             "whose name matches an input field."
       ],
       fingerprint: [
-        type: {:list, :atom},
+        type: {:or, [{:fun, 1}, {:list, :atom}]},
         required: false,
         doc:
-          "input fields the result depends on. Their hash is stored on the output row " <>
-            "(`fingerprint_attribute`, default `:fingerprint`); a recompute whose hash " <>
-            "matches SKIPS the action entirely and reports the key unchanged. Omit to " <>
-            "call every time."
+          "what the result depends on: input fields (their hash), or `(row -> value)` " <>
+            "when \"the same input\" is not a plain field comparison. Stored on the " <>
+            "output row (`fingerprint_attribute`, default `:fingerprint`); a recompute " <>
+            "whose value matches SKIPS the action entirely and reports the key " <>
+            "unchanged. Omit to call every time."
       ],
       fingerprint_attribute: [
         type: :atom,
@@ -778,10 +777,8 @@ defmodule ReactiveDag.Node do
     `[]` for none). The library passes only the arguments the action declares —
     `keys` (`{:array, :string}`, allow_nil — nil means whole-cell) and
     `cell_id` (`:string`; generator instances need it, since one resource
-    expands to many cells) — and does the coordination `Op.put` for each
-    returned key (an action has no `%Cell{}` to put through; the library
-    closes the coordination loop, as in the payload loop). The action owns its
-    DOMAIN writes. `coordination_opts` does not apply (there is no row).
+    expands to many cells). The returned keys are what propagates. The action owns its
+    DOMAIN writes.
     """
     defstruct [:action, :__identifier__, :__spark_metadata__]
   end
@@ -793,7 +790,7 @@ defmodule ReactiveDag.Node do
     describe:
       "Ash-native escape hatch: this node's recompute is the named GENERIC action on its " <>
         "own resource — `(keys, cell_id) -> changed keys`; the action writes its domain, " <>
-        "the library Op.puts the returned keys.",
+        "the returned keys are what propagates.",
     schema: [
       action: [
         type: :atom,
@@ -931,6 +928,23 @@ defmodule ReactiveDag.Node do
             "Ash dispatches notifications after commit.) Opt-in, and not implied by " <>
             "`leaf?` — a leaf fed by a `ReactiveDag.Source` poll would double-trigger."
       ],
+      fingerprint: [
+        type: {:or, [{:fun, 1}, {:list, :atom}]},
+        required: false,
+        doc:
+          "for a SOURCE-FED LEAF: the one value that decides whether an observation " <>
+            "moved — input fields (their hash), or `(row -> value)` for a computed " <>
+            "digest. `ReactiveDag.Node.Rows.reconcile/3` compares it instead of every " <>
+            "attribute, so a row's `last_seen_at`/`etag` moving does not fire the " <>
+            "cascade. Stored in `fingerprint_attribute` (default `:fingerprint`). " <>
+            "Without it a re-observed row compares on ALL its attributes, which for a " <>
+            "leaf reports a change on every poll."
+      ],
+      fingerprint_attribute: [
+        type: :atom,
+        required: false,
+        doc: "the attribute a leaf's `fingerprint` is stored in (default `:fingerprint`)."
+      ],
       payload_key: [
         type: :atom,
         doc:
@@ -945,11 +959,6 @@ defmodule ReactiveDag.Node do
         type: :atom,
         default: :upsert,
         doc: "the Ash upsert action used to write the node's own payload (default `:upsert`)."
-      ],
-      coordination_opts: [
-        type: {:fun, 2},
-        doc:
-          "`(key, row -> keyword)` — extra opts for the coordination write when the payload loop `Op.put`s a changed key, so a host `CoordinationWriter` can write EXTENSION COLUMNS (e.g. `source_ref`, a fingerprint) during a `reduce`/`join`. Without it, the loop writes spine columns only. (Retain-if-vanish/tombstone is a LEAF concern — reconcile a source-fed leaf via `ReactiveDag.Tuple.reconcile`, not here.)"
       ],
       source: [
         type: :atom,
@@ -1569,7 +1578,8 @@ defmodule ReactiveDag.Node do
         over: Ext.get_opt(resource, [:reactive], :over, nil),
         payload_key: Ext.get_opt(resource, [:reactive], :payload_key, nil) || derived_payload_key(resource),
         payload_action: Ext.get_opt(resource, [:reactive], :payload_action, nil),
-        coordination_opts: Ext.get_opt(resource, [:reactive], :coordination_opts, nil),
+        fingerprint: Ext.get_opt(resource, [:reactive], :fingerprint, nil),
+        fingerprint_attribute: Ext.get_opt(resource, [:reactive], :fingerprint_attribute, nil),
         identity_fields: identity_fields(resource),
         context_inputs: context_inputs(resource)
       }

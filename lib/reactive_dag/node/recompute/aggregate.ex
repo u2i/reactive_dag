@@ -11,7 +11,7 @@ defmodule ReactiveDag.Node.Recompute.Aggregate do
        names (`Ash.Query.aggregate(q, tmp, kind, over, field: src)`),
     2. for each row, projects the loaded aggregates onto the resource's own
        attributes (the `dest` in each mapping), upserts the row (via
-       `ReactiveDag.Node.Payload`), and `Op.put`s the changed keys.
+       `ReactiveDag.Node.Payload`), and returns the changed keys.
 
   It is a WHOLE-CELL recompute: a `GROUP BY` reprices every group, so the changed
   set is every group whose aggregate value actually moved (Payload's change-
@@ -34,12 +34,8 @@ defmodule ReactiveDag.Node.Recompute.Aggregate do
       payload = project(row, key_attr, identity_fields(cell), loads)
 
       case write(resource, cell, key_attr, cell_key, payload, action) do
-        :changed ->
-          ReactiveDag.Op.put(cell, cell_key)
-          [cell_key]
-
-        :unchanged ->
-          []
+        :changed -> [cell_key]
+        :unchanged -> []
       end
     end)
   end
