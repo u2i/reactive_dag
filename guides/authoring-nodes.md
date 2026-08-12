@@ -204,8 +204,30 @@ read that isn't Ash at all belongs on the `run`/`compute` rungs.
 
 Two shapes have their own slots instead of `into:`:
 
-- **verdict** (`verdict? true`) — declare `status:` (`(group, items -> status
-  | {status, strength})`); the verdict IS the result, keys derive as usual.
+- **verdict** — declare `status:` (`(group, items -> status | {status,
+  strength})`). With a `:status` attribute on the resource it writes that
+  column, so the node is an **ordinary payload node** whose row happens to be a
+  verdict — and may carry other columns beside it:
+
+  ```elixir
+  attributes do
+    attribute :key, :string, primary_key?: true
+    attribute :status, :string
+    attribute :headroom, :float      # why a table is worth having
+  end
+
+  reduce over: :category_totals, group_by: :key,
+         status: fn _k, [r | _] -> if r.total < 1000.0, do: "present", else: "failing" end
+  ```
+
+  "What is failing?" is then `filter(status == "failing")` — an ordinary Ash
+  read, with policies, joins and loads.
+
+  `verdict? true` remains for a node that genuinely wants **no table**: the
+  result lives in the coordination tuple, and the node needs no attributes, no
+  actions and no migration. The trade is that the tuple's schema is fixed, so
+  such a node can never carry a `headroom` — reach for it when the answer really
+  is one word, and declare a `:status` column otherwise.
 - **expand** — declare `expand:` (`(group, items -> [row])`, each row carrying
   its own `:key`, since one group fans out to many keys).
 
