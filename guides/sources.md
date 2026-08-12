@@ -148,6 +148,50 @@ Order sources so that ones which only observe the world run before any source
 that derives from other cells' results — a deriving source that runs first
 computes against a stale model.
 
+## Declaring the scanner: `scan`
+
+A leaf says which scanner feeds it:
+
+```elixir
+reactive do
+  id :agenda_docs
+  leaf? true
+  scan MuniWatch.Crawler
+end
+```
+
+That makes the scanner↔leaf pairing **a fact of the graph**, which buys two
+things:
+
+- **`Node.graph/2` verifies it.** The module must implement `ReactiveDag.Source`,
+  and its own `leaf_cells/1` must claim this leaf. A scanner refactored to feed
+  `"agenda_docs_v2"` while a resource still declares `scan` fails at assembly,
+  rather than polling into a cell nobody reads. No `verify!/2` call needed.
+- **`Source.poll_all/2` finds scanners from the plan**, not from a list kept
+  alongside it:
+
+```elixir
+plan = MyApp.Dag.plan()
+{:ok, _results} = ReactiveDag.Source.poll_all(plan)   # poll phase
+{:ok, report} = ReactiveDag.Drain.run(plan, opts)     # then drain
+```
+
+A source feeding many leaves is polled **once**, however many leaves name it.
+One scanner failing is reported (`{:error, [{module, reason}]}`) rather than
+cancelling the others or looking like success.
+
+Polling still happens **outside the drain** — external I/O has no business
+inside a depth-ordered recompute. `scan` changes where the binding is
+*declared*, not when fetching happens.
+
+### When not to use it
+
+`scan` is the **single-leaf** spelling. A source that feeds many leaves — one per
+discovered kind, or a generator's expanded instances — implements
+`leaf_cells/1` and is passed to `verify!/2` directly. That callback takes the
+lowered graph precisely because those leaves come from live data, which no
+declaration can name ahead of time.
+
 ## `dirties_on` vs a `Source`: which trigger?
 
 Two ways a leaf becomes dirty, and they are not alternatives — they cover
