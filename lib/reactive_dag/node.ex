@@ -1821,6 +1821,26 @@ defmodule ReactiveDag.Node do
           %{}
 
         %Attested{over: over, requirement: req, mode: mode} ->
+          # An attested view's result is an ADMISSION — whether each of `over`'s
+          # rows currently counts — written to the coordination tuple by
+          # `ReactiveDag.Attestation.Op`, which never touches this resource.
+          # Payload attributes here would silently never be written, the same
+          # half-state `verdict?` refuses at compile time.
+          case payload_attributes(resource) do
+            [] ->
+              :ok
+
+            extra ->
+              raise """
+              reactive_dag: node #{inspect(resource)} is an `attested` view but declares \
+              payload attribute(s) #{inspect(extra)}. An attested view's result is the \
+              ADMISSION (which of #{inspect(over)}'s rows currently count), written to \
+              the coordination tuple — those attributes would never be written. Drop \
+              them (use `data_layer: Ash.DataLayer.Simple`, no attributes), and read \
+              the admitted rows by joining back to #{inspect(over)} on the key.
+              """
+          end
+
           %{attested: %{over: to_string(over), requirement: req, mode: mode || :require}}
       end
 

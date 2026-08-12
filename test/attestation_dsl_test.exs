@@ -408,4 +408,45 @@ defmodule ReactiveDag.AttestationDslTest do
     assert p.cells[id].op == :attested
     assert id in p.cells["inner"].inputs
   end
+  test "an attested view declaring payload attributes raises at assembly" do
+    # the same half-state `verdict?` refuses: Attestation.Op writes the
+    # ADMISSION to the coordination tuple and never touches this resource, so
+    # these columns would silently stay empty forever.
+    defmodule AttestedWithColumns do
+      use Ash.Resource,
+        domain: ReactiveDag.AttestationDslTest.Domain,
+        data_layer: Ash.DataLayer.Ets,
+        extensions: [ReactiveDag.Node]
+
+      ets do
+      end
+
+      attributes do
+        attribute :key, :string, primary_key?: true, allow_nil?: false, public?: true
+        attribute :serial, :string, public?: true
+      end
+
+      actions do
+        defaults [:read]
+      end
+
+      reactive do
+    id(:attested_with_columns)
+    attested(over: :machines, requirement: :ownership)
+      end
+    end
+
+    # raised at ASSEMBLY (extra_meta), like verdict?'s equivalent guard
+    err =
+      assert_raise RuntimeError, fn ->
+        ReactiveDag.Node.graph([Machines, MachineHolders, AttestedWithColumns])
+      end
+
+    msg = Exception.message(err)
+
+    assert msg =~ ":serial"
+    assert msg =~ "never be written"
+    # says what to do instead, rather than only refusing
+    assert msg =~ "joining back to"
+  end
 end
