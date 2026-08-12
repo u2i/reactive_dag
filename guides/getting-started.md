@@ -69,8 +69,9 @@ below. The TUPLE table stays yours either way (extension columns).
 
 ```elixir
 def change do
-  # the coordination tuple: one row per (cell, key), carrying the verdict +
-  # freshness. A cell IS its set of these rows.
+  # the coordination tuple: one row per (cell, key), carrying freshness and the
+  # coordination bookkeeping. A node's RESULTS live in its own resource — this
+  # table is the spine that tracks them, not where you query them.
   create table(:my_tuple, primary_key: false) do
     add :cell_id, :string, null: false
     add :key, :string, null: false
@@ -207,14 +208,28 @@ empty estate.
 
 ## Reading results
 
+A node's results are **its own rows**, so the first answer is an ordinary Ash
+read — with policies, filters, loads and joins:
+
 ```elixir
-ReactiveDag.Tuple.status_histogram("budget_rollups")  # %{"present" => 12}
-ReactiveDag.Tuple.rows("budget_rollups")              # [%{key:, status:, observed_at:}]
-ReactiveDag.Verdict.for_cell("budget_rollups")        # a rolled verdict + failing sample
+MyApp.BudgetRollups |> Ash.Query.filter(status == "failing") |> Ash.read!()
 ```
 
-Payload (the typed values) stays in each node's own resource; the tuple carries
-only the verdict and freshness, joined back by `key`.
+When you want the same rows addressed by *cell key* rather than by the
+resource's primary key — which is how the DAG talks about them — go through the
+cell:
+
+```elixir
+cell = plan.cells["budget_rollups"]
+
+ReactiveDag.Node.Rows.all(cell)              # [%{key:, status:, record:}]
+ReactiveDag.Node.Rows.status_histogram(cell) # %{"present" => 12}
+ReactiveDag.Verdict.for_cell(cell)           # a rolled verdict + failing sample
+ReactiveDag.Insights.cell_status(plan, "budget_rollups")
+```
+
+The coordination tuple is not in this path. It carries freshness and the
+frontier's bookkeeping; results live where you can query them.
 
 ## Where next
 

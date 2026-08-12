@@ -1095,6 +1095,41 @@ defmodule ReactiveDag.Node do
     Enum.map(cells, &resolve_read_cell(&1, by_id))
   end
 
+  # a UNION reads its inputs' ROWS, so like a declarative read it needs each
+  # input's resource and key derivation — cross-node facts, resolved here.
+  defp resolve_read_cell(%{meta: %{union: %{from: from}}} = cell, by_id) do
+    sources =
+      Map.new(from, fn input ->
+        id = to_string(input)
+        source = by_id[id]
+
+        resource = source && source.meta[:resource]
+
+        # a union reads ROWS, so an input needs somewhere to keep them. A node
+        # with a resource but no attributes has a table in name only — that is
+        # the tableless-verdict shape, and it would silently union nothing.
+        if is_nil(resource) || Ash.Resource.Info.attributes(resource) == [] do
+          raise ArgumentError,
+                "reactive_dag: #{cell.id} unions over #{inspect(input)}, " <>
+                  if(is_nil(source),
+                    do: "which is not a cell in this graph.",
+                    else: "which has no rows to read — a union reads its inputs' rows, " <>
+                            "and #{inspect(resource)} declares no attributes."
+                  ) <>
+                  " Point `from:` at nodes with payload attributes."
+        end
+
+        {id,
+         %{
+           resource: source.meta[:resource],
+           payload_key: source.meta[:payload_key],
+           identity_fields: source.meta[:identity_fields]
+         }}
+      end)
+
+    %{cell | meta: Map.put(cell.meta, :union_sources, sources)}
+  end
+
   defp resolve_read_cell(cell, by_id) do
     spec = cell.meta[:reduce] || cell.meta[:join] || per_key_read_spec(cell)
 
@@ -1113,13 +1148,6 @@ defmodule ReactiveDag.Node do
                     " — a combinator read is an Ash read of the over node's resource. " <>
                     "Point `over:` at a resource-backed node, or use `run`/`compute` " <>
                     "for a non-Ash read."
-
-          over.meta[:verdict] ->
-            raise ArgumentError,
-                  "reactive_dag: #{cell.id} reads over #{inspect(spec.over)}, a VERDICT " <>
-                    "node — its result lives in the coordination tuple, not a payload " <>
-                    "table, so there are no rows to read. Point `over:` at a payload " <>
-                    "node, or use `run`/`compute` to read the tuple."
 
           Ash.Resource.Info.attributes(resource) == [] ->
             raise ArgumentError,

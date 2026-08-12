@@ -4,10 +4,15 @@ defmodule ReactiveDag.Insights do
   cell is in, and what the last drains actually did.
 
   Everything here is a READ. Nothing new is computed — the plan already carries
-  the structure and depths, the coordination tuple already carries per-key
-  status and freshness, and `ReactiveDag.Drain.Report` is already a complete
-  causal trace. This module is those three assembled into the shape a human (or
-  a dashboard, a mix task, an alerting check) actually asks for.
+  the structure and depths, each cell's own resource already carries its rows,
+  and `ReactiveDag.Drain.Report` is already a complete causal trace. This module
+  is those three assembled into the shape a human (or a dashboard, a mix task,
+  an alerting check) actually asks for.
+
+  Per-cell state is read through `ReactiveDag.Node.Rows`, which reads the node's
+  resource under the DAG's own cell keys. A node with no `:status` column
+  reports its keys with a `nil` status — the count is still the truth about how
+  many units the cell holds.
 
   Deliberately UI-free: no Phoenix, no rendering, no assumptions about a web
   layer. `reactive_dag_dashboard` renders this; a host with no web layer at all
@@ -28,7 +33,7 @@ defmodule ReactiveDag.Insights do
   that needs history stores the report where its runs already live.
   """
 
-  alias ReactiveDag.{Drain.Report, Frontier, Plan, Tuple}
+  alias ReactiveDag.{Drain.Report, Frontier, Node.Rows, Plan}
 
   @default_keep 20
   @failing_sample 10
@@ -40,9 +45,8 @@ defmodule ReactiveDag.Insights do
           inputs: [String.t()],
           leaf?: boolean(),
           op: atom() | nil,
-          statuses: %{String.t() => non_neg_integer()},
+          statuses: %{(String.t() | nil) => non_neg_integer()},
           key_count: non_neg_integer(),
-          last_observed_at: DateTime.t() | nil,
           failing_sample: [String.t()]
         }
 
@@ -93,7 +97,7 @@ defmodule ReactiveDag.Insights do
   end
 
   defp build_status(cell, depth) do
-    statuses = safe(fn -> Tuple.status_histogram(cell.id) end, %{})
+    statuses = safe(fn -> Rows.status_histogram(cell) end, %{})
 
     %{
       id: cell.id,
@@ -105,19 +109,19 @@ defmodule ReactiveDag.Insights do
       op: cell.op,
       statuses: statuses,
       key_count: statuses |> Map.values() |> Enum.sum(),
-      last_observed_at: safe(fn -> Tuple.max_observed_at([cell.id]) end, nil),
-      failing_sample: failing_sample(cell.id, statuses)
+      failing_sample: failing_sample(cell, statuses)
     }
   end
 
-  # only pay for the sample when something is actually failing
-  defp failing_sample(cell_id, statuses) do
-    failing = Map.keys(statuses) -- ["present"]
+  # only pay for the sample when something is actually failing. A nil status is
+  # "this node has no status column", not a failure, so it never samples.
+  defp failing_sample(cell, statuses) do
+    failing = Map.keys(statuses) -- ["present", nil]
 
     if failing == [] do
       []
     else
-      safe(fn -> Tuple.keys_by_status(cell_id, failing, limit: @failing_sample) end, [])
+      safe(fn -> Rows.keys_by_status(cell, failing, limit: @failing_sample) end, [])
     end
   end
 

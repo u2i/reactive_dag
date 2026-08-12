@@ -111,7 +111,8 @@ defmodule ReactiveDag.Node.Recompute do
   # here where a cross-node join was not.
   def recompute(%Cell{meta: %{union: %{} = spec}} = cell, keys) do
     claimed = scope(keys)
-    {pairs, meta} = ReactiveDag.Node.Recompute.Union.pairs(spec, claimed)
+    {pairs, meta} =
+      ReactiveDag.Node.Recompute.Union.pairs(spec, cell.meta[:union_sources] || %{}, claimed)
 
     {:ok, materialize(cell, pairs, nil, claimed), meta}
   end
@@ -403,22 +404,27 @@ defmodule ReactiveDag.Node.Recompute do
   # a payload node's OWN ROWS are the truth about which units it currently
   # holds — the coordination table is the host's, may be written by a different
   # writer, and is not what a consumer queries.
+  #
+  # A node that keeps no rows here (no resource, or an attribute-less one whose
+  # `compute`/custom `upsert:` writes elsewhere) leaves the coordination table as
+  # the only place that knows what it holds — the one read of the tuple spine
+  # that survives. Note the difference between an empty list and `nil`: `[]`
+  # would claim the node holds nothing and retire every key it has.
   defp current_keys(%Cell{meta: meta, id: id}) do
-    case meta[:resource] do
-      nil ->
-        tuple_keys(id)
-
-      resource ->
-        key_of =
-          case meta[:identity_fields] do
-            fields when is_list(fields) -> Declarative.identity_key_fn(fields, nil)
-            _ -> &(&1 |> Map.fetch!(meta[:payload_key] || :key) |> to_string())
-          end
-
-        resource |> Ash.read!() |> Enum.map(key_of)
+    if holds_rows?(meta) do
+      %Cell{id: id, meta: meta} |> ReactiveDag.Node.Rows.all() |> Enum.map(& &1.key)
+    else
+      tuple_keys(id)
     end
   rescue
     _ -> nil
+  end
+
+  defp holds_rows?(meta) do
+    case meta[:resource] do
+      nil -> false
+      resource -> Ash.Resource.Info.attributes(resource) != []
+    end
   end
 
   defp tuple_keys(id) do

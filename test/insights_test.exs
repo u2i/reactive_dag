@@ -248,18 +248,38 @@ defmodule ReactiveDag.InsightsTest do
       assert Insights.pending(plan()) == []
     end
 
-    test "status reads degrade rather than crash when the tuple table is unavailable" do
-      # a dashboard should render STRUCTURE even where coordination isn't configured
-      Application.put_env(:reactive_dag, :repo, __MODULE__.NoSuchRepo)
+    test "status reads degrade rather than crash when a node's rows are unreadable" do
+      # a dashboard should render STRUCTURE even where a read fails — a resource
+      # whose data layer isn't up, a policy that forbids the read, a dropped table.
+      defmodule Unreadable do
+        use Ash.Resource,
+          domain: ReactiveDag.InsightsTest.Domain,
+          data_layer: Ash.DataLayer.Simple,
+          extensions: [ReactiveDag.Node]
 
-      status = Insights.cell_status(plan(), "category_totals")
+        attributes do
+          attribute :key, :string, primary_key?: true, allow_nil?: false, public?: true
+        end
+
+        # no :read action, so Ash.read! raises
+        actions do
+        end
+
+        reactive do
+          id(:unreadable)
+          leaf?(true)
+        end
+      end
+
+      plan = ReactiveDag.Node.graph([Unreadable])
+      status = Insights.cell_status(plan, "unreadable")
 
       assert status.statuses == %{}
       assert status.key_count == 0
-      assert status.last_observed_at == nil
       assert status.failing_sample == []
       # ...and the declaration is still there, which is the point
-      assert status.inputs == ["expenses"]
+      assert status.id == "unreadable"
+      assert status.leaf?
     end
   end
 

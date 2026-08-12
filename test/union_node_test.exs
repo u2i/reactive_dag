@@ -3,10 +3,13 @@ defmodule ReactiveDag.UnionNodeTest do
   `union from: [...]` — the graph-wide roll-up as a node.
 
   A verdict-shaped node answers one question about one cell. Asking "what is
-  failing ANYWHERE?" today means scanning every cell separately
-  (`Insights.summary/1` does exactly that, one query per cell). A union node
-  makes that roll-up a NODE: one indexed table, maintained incrementally — a
-  verdict flips, that key propagates, one row updates.
+  failing ANYWHERE?" means scanning every cell separately (`Insights.summary/1`
+  does exactly that, one query per cell). A union node makes that roll-up a
+  NODE: one indexed table, maintained incrementally — a verdict flips, that key
+  propagates, one row updates.
+
+  It reads its inputs' ROWS (each input's own resource, via
+  `ReactiveDag.Node.Rows`), so it can project any column an input has.
 
   It is also the first N-input combinator, and the reason it is sound where the
   cross-node join was not (reverted in #36): a join CORRELATES its inputs, so a
@@ -28,12 +31,29 @@ defmodule ReactiveDag.UnionNodeTest do
     end
   end
 
-  # two verdict-shaped inputs, whose results live in the coordination tuple
+  # two verdict-shaped inputs — ordinary nodes, each with a :status column
   defmodule CategoryHealth do
     use Ash.Resource,
       domain: Domain,
-      data_layer: Ash.DataLayer.Simple,
+      data_layer: Ash.DataLayer.Ets,
       extensions: [ReactiveDag.Node]
+
+    ets do
+    end
+
+    attributes do
+      attribute :key, :string, primary_key?: true, allow_nil?: false, public?: true
+      attribute :status, :string, public?: true
+    end
+
+    actions do
+      defaults [:read, :destroy]
+
+      create :upsert do
+        upsert?(true)
+        accept([:key, :status])
+      end
+    end
 
     reactive do
       id(:category_health)
@@ -44,8 +64,27 @@ defmodule ReactiveDag.UnionNodeTest do
   defmodule FundBalance do
     use Ash.Resource,
       domain: Domain,
-      data_layer: Ash.DataLayer.Simple,
+      data_layer: Ash.DataLayer.Ets,
       extensions: [ReactiveDag.Node]
+
+    ets do
+    end
+
+    attributes do
+      attribute :key, :string, primary_key?: true, allow_nil?: false, public?: true
+      attribute :status, :string, public?: true
+      # a column the tuple never had room for — the union can project it
+      attribute :headroom, :float, public?: true
+    end
+
+    actions do
+      defaults [:read, :destroy]
+
+      create :upsert do
+        upsert?(true)
+        accept([:key, :status, :headroom])
+      end
+    end
 
     reactive do
       id(:fund_balance)
@@ -86,45 +125,6 @@ defmodule ReactiveDag.UnionNodeTest do
     end
   end
 
-  # a real tuple table, since a union READS tuples
-  defmodule FakeRepo do
-    def start_link, do: Agent.start_link(fn -> %{} end, name: __MODULE__)
-
-    def put(cell, key, status),
-      do: Agent.update(__MODULE__, &Map.put(&1, {cell, key}, status))
-
-    def query!("SELECT key, status, observed_at FROM " <> _, [cell | _]) do
-      rows =
-        Agent.get(__MODULE__, & &1)
-        |> Enum.filter(fn {{c, _k}, _s} -> c == cell end)
-        |> Enum.map(fn {{_c, k}, s} -> [k, s, nil] end)
-        |> Enum.sort()
-
-      %{rows: rows}
-    end
-
-    def query!("INSERT INTO " <> _, params) do
-      params
-      |> Enum.chunk_every(5)
-      |> Enum.each(fn [cell, key, _r, _t, _prior] -> put(cell, key, "present") end)
-
-      %{rows: []}
-    end
-
-    def query!("DELETE FROM " <> _, [cell]) do
-      keys =
-        Agent.get_and_update(__MODULE__, fn m ->
-          {mine, rest} = Enum.split_with(m, fn {{c, _}, _} -> c == cell end)
-          {Enum.map(mine, fn {{_, k}, _} -> k end), Map.new(rest)}
-        end)
-
-      %{rows: Enum.map(keys, &[&1, nil])}
-    end
-
-    def query!("SELECT COUNT" <> _, _), do: %{rows: [[Agent.get(__MODULE__, &map_size/1)]]}
-    def query!("SELECT DISTINCT cell_id" <> _, _), do: %{rows: []}
-  end
-
   defmodule NullWriter do
     @behaviour ReactiveDag.CoordinationWriter
     @impl true
@@ -133,24 +133,24 @@ defmodule ReactiveDag.UnionNodeTest do
     def delete(_c, _k), do: :ok
   end
 
+  defp seed(resource, attrs) do
+    resource |> Ash.Changeset.for_create(:upsert, attrs) |> Ash.create!()
+  end
+
   setup do
-    start_supervised!(%{id: FakeRepo, start: {FakeRepo, :start_link, []}})
-    prev_repo = Application.get_env(:reactive_dag, :repo)
     prev_writer = Application.get_env(:reactive_dag, :coordination_writer)
-    Application.put_env(:reactive_dag, :repo, FakeRepo)
     Application.put_env(:reactive_dag, :coordination_writer, NullWriter)
 
-    on_exit(fn ->
-      Application.put_env(:reactive_dag, :repo, prev_repo)
-      Application.put_env(:reactive_dag, :coordination_writer, prev_writer)
-    end)
+    on_exit(fn -> Application.put_env(:reactive_dag, :coordination_writer, prev_writer) end)
 
-    AllVerdicts |> Ash.read!() |> Enum.each(&Ash.destroy!/1)
+    for r <- [AllVerdicts, CategoryHealth, FundBalance],
+        row <- Ash.read!(r),
+        do: Ash.destroy!(row)
 
-    # two inputs' verdicts, in the tuple
-    FakeRepo.put("category_health", "travel", "failing")
-    FakeRepo.put("category_health", "meals", "present")
-    FakeRepo.put("fund_balance", "gf", "present")
+    # two inputs' verdicts, as rows in their own tables
+    seed(CategoryHealth, %{key: "travel", status: "failing"})
+    seed(CategoryHealth, %{key: "meals", status: "present"})
+    seed(FundBalance, %{key: "gf", status: "present", headroom: 250.0})
 
     :ok
   end
@@ -188,7 +188,7 @@ defmodule ReactiveDag.UnionNodeTest do
     {:ok, _, _} = Recompute.recompute(cell(), ["*"])
 
     # fund_balance flips; the claim names it, so category_health is not read
-    FakeRepo.put("fund_balance", "gf", "failing")
+    seed(FundBalance, %{key: "gf", status: "failing", headroom: 0.0})
 
     {:ok, changed, meta} = Recompute.recompute(cell(), ["fund_balance|gf"])
 
@@ -214,5 +214,96 @@ defmodule ReactiveDag.UnionNodeTest do
     {:ok, changed, _} = Recompute.recompute(cell(), ["*"])
 
     assert changed == []
+  end
+
+  test "a union projects any column its inputs have, not just a status" do
+    # the point of reading ROWS: fund_balance carries a headroom, which the
+    # coordination tuple's fixed schema had nowhere to put.
+    defmodule WithHeadroom do
+      use Ash.Resource,
+        domain: ReactiveDag.UnionNodeTest.Domain,
+        data_layer: Ash.DataLayer.Ets,
+        extensions: [ReactiveDag.Node]
+
+      ets do
+      end
+
+      attributes do
+        attribute :check, :string, primary_key?: true, allow_nil?: false, public?: true
+        attribute :subject, :string, primary_key?: true, allow_nil?: false, public?: true
+        attribute :status, :string, public?: true
+        attribute :headroom, :float, public?: true
+      end
+
+      actions do
+        defaults [:read, :destroy]
+
+        create :upsert do
+          upsert?(true)
+          accept([:check, :subject, :status, :headroom])
+        end
+      end
+
+      reactive do
+        id(:with_headroom)
+
+        union from: [:fund_balance],
+              into: [check: :cell, subject: :key, status: :status, headroom: :headroom]
+      end
+    end
+
+    plan = ReactiveDag.Node.graph([FundBalance, WithHeadroom])
+    {:ok, _, _} = Recompute.recompute(plan.cells["with_headroom"], ["*"])
+
+    assert [%{check: "fund_balance", subject: "gf", status: "present", headroom: 250.0}] =
+             Ash.read!(WithHeadroom)
+  end
+
+  test "a union over a node with no resource raises at ASSEMBLY, naming the input" do
+    defmodule Tableless do
+      use Ash.Resource,
+        domain: ReactiveDag.UnionNodeTest.Domain,
+        data_layer: Ash.DataLayer.Simple,
+        extensions: [ReactiveDag.Node]
+
+      reactive do
+        id(:tableless)
+        leaf?(true)
+      end
+    end
+
+    defmodule OverTableless do
+      use Ash.Resource,
+        domain: ReactiveDag.UnionNodeTest.Domain,
+        data_layer: Ash.DataLayer.Ets,
+        extensions: [ReactiveDag.Node]
+
+      ets do
+      end
+
+      attributes do
+        attribute :check, :string, primary_key?: true, allow_nil?: false, public?: true
+        attribute :subject, :string, primary_key?: true, allow_nil?: false, public?: true
+      end
+
+      actions do
+        defaults [:read, :destroy]
+        create :upsert, upsert?: true
+      end
+
+      reactive do
+        id(:over_tableless)
+        union from: [:tableless], into: [check: :cell, subject: :key]
+      end
+    end
+
+    err =
+      assert_raise ArgumentError, fn ->
+        ReactiveDag.Node.graph([Tableless, OverTableless])
+      end
+
+    assert Exception.message(err) =~ ":tableless"
+    assert Exception.message(err) =~ "reads its inputs' rows"
+    assert Exception.message(err) =~ "declares no attributes"
   end
 end
