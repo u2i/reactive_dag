@@ -184,6 +184,26 @@ Polling still happens **outside the drain** — external I/O has no business
 inside a depth-ordered recompute. `scan` changes where the binding is
 *declared*, not when fetching happens.
 
+### A scanner is not required to be `leaf? true`…
+
+…but it must not be a node that **computes**. Nothing about `Source` inspects
+`leaf?`, and hosts legitimately direct-write cells that aren't strictly leaves
+(a companion store cell, for instance). What is a contradiction is declaring a
+scanner *and* a computation on one node:
+
+```elixir
+reactive do
+  id :category_totals
+  scan MyApp.Crawler                 # writes tuples from outside…
+  reduce into: [sum: [amount: :total]]   # …and derives them from inputs
+end
+```
+
+A scanner writes this cell's tuples from outside the graph; a combinator derives
+them from its inputs. Declared together, the poll and the drain overwrite each
+other — the drain reprices from inputs and discards whatever the poll wrote,
+which surfaces as data that mysteriously reverts. `graph/2` raises on it.
+
 ### When not to use it
 
 `scan` is the **single-leaf** spelling. A source that feeds many leaves — one per

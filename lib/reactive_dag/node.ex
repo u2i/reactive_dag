@@ -1140,10 +1140,31 @@ defmodule ReactiveDag.Node do
   # final (a generator's instances only exist after expansion).
   defp verify_scans!(%ReactiveDag.Plan{} = plan) do
     for {id, cell} <- plan.cells, mod = cell.meta[:scan] do
+      # A scanner writes a cell's tuples from OUTSIDE the graph; a combinator
+      # computes them from its inputs. Declaring both on one node means the poll
+      # and the drain overwrite each other — the drain reprices from inputs and
+      # discards whatever the poll wrote. That is never intended, so it fails
+      # here rather than as data that mysteriously reverts.
+      if computation = cell.meta[:reduce] || cell.meta[:join] || cell.meta[:per_key] ||
+                         cell.meta[:aggregate] || cell.meta[:run] || cell.meta[:compute] do
+        raise ArgumentError,
+              "reactive_dag: cell #{inspect(id)} declares `scan #{inspect(mod)}` AND a " <>
+                "computation (#{inspect(kind_of(computation, cell))}). A scanner writes " <>
+                "this cell's tuples from outside the graph; a computation derives them " <>
+                "from its inputs — declared together, the poll and the drain overwrite " <>
+                "each other. Keep the scan (making this a leaf), or drop it and let the " <>
+                "node compute."
+      end
+
       ReactiveDag.Source.verify_scan!(mod, id, plan)
     end
 
     plan
+  end
+
+  # which computation a cell declares, for the error above
+  defp kind_of(_value, cell) do
+    Enum.find([:reduce, :join, :per_key, :aggregate, :run, :compute], &cell.meta[&1])
   end
 
   # ── declarative-read resolution (graph assembly) ────────────────────────────

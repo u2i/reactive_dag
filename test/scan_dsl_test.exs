@@ -261,4 +261,70 @@ defmodule ReactiveDag.ScanDslTest do
       assert {:ok, %{}} = Source.poll_all(plan)
     end
   end
+  test "a scanner AND a computation on one node is a contradiction, and fails" do
+    # a scanner writes tuples from outside; a combinator derives them from
+    # inputs. Together the poll and the drain overwrite each other.
+    defmodule Src do
+      use Ash.Resource,
+        domain: ReactiveDag.ScanDslTest.Domain,
+        data_layer: Ash.DataLayer.Ets,
+        extensions: [ReactiveDag.Node]
+
+      ets do
+      end
+
+      attributes do
+        attribute :key, :string, primary_key?: true, allow_nil?: false, public?: true
+        attribute :cat, :string, public?: true
+      end
+
+      actions do
+        defaults [:read]
+      end
+
+      reactive do
+        id(:other)
+        leaf?(true)
+      end
+    end
+
+    defmodule Both do
+      use Ash.Resource,
+        domain: ReactiveDag.ScanDslTest.Domain,
+        data_layer: Ash.DataLayer.Ets,
+        extensions: [ReactiveDag.Node]
+
+      ets do
+      end
+
+      attributes do
+        attribute :key, :string, primary_key?: true, allow_nil?: false, public?: true
+        attribute :n, :integer, public?: true
+      end
+
+      actions do
+        defaults [:read]
+
+        create :upsert do
+          upsert?(true)
+          accept([:key, :n])
+        end
+      end
+
+      reactive do
+        id(:agenda_docs)
+        scan(ReactiveDag.ScanDslTest.Crawler)
+        recompute_by :key, to: :other, from: :cat
+        reduce into: [count: :n]
+      end
+    end
+
+    err = assert_raise ArgumentError, fn -> ReactiveDag.Node.graph([Src, Both]) end
+    msg = Exception.message(err)
+
+    assert msg =~ "AND a computation"
+    assert msg =~ ":reduce"
+    # says what to do about it, not merely that it's wrong
+    assert msg =~ "Keep the scan"
+  end
 end
