@@ -98,7 +98,11 @@ defmodule ReactiveDag.AttestationScopeBasisTest do
       # %{key: "x"} and %{key: "x", status: "present"} digested identically —
       # a caller passing hand-built rows got a basis asserting a status
       # nobody observed.
-      assert_raise KeyError, fn -> Basis.digest([%{key: "x"}]) end
+      err = assert_raise ArgumentError, fn -> Basis.digest([%{key: "x"}]) end
+
+      # names the field and what the row DID have, rather than a bare KeyError
+      assert Exception.message(err) =~ ":status"
+      assert Exception.message(err) =~ "[:key]"
     end
 
     test "a record from an unknown (future) scheme degrades to re-ask, not to a crash" do
