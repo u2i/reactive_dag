@@ -23,6 +23,23 @@ edges, with propagation identical to any other input.
 - **Force** — whether a stance currently counts: a read-time predicate, never
   a stored status.
 
+## What attestations read
+
+An attestation asks three questions, and all three are **"which keys does that
+cell have?"** — the raw rows a requirement is about, the eligibility set of who
+may sign, and the subset a set-level scope selects. None of them look at status
+or freshness.
+
+`ReactiveDag.Node.Keys` answers that from wherever the cell's rows actually
+live: a **payload node's own table**, or the coordination tuple for a tableless
+verdict or a source-fed leaf. So a requirement declared on a node that
+materialises rows reads that node's table, not the spine.
+
+That also collapses a documented hazard. Set-level scopes used to be evaluated
+twice — once in SQL (`key LIKE …`, `split_part(…)`) and once in memory, with a
+comment warning the two "MUST select the same keys ... or signing and evaluating
+see different sets". There is now one predicate, applied to a key list.
+
 ## Declaring a requirement
 
 Policy is declared **once**, on the node that owns the raw data:

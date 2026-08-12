@@ -38,6 +38,7 @@ defmodule ReactiveDag.Attestation.Op do
 
   alias ReactiveDag.{Attestation, Op, Tuple}
   alias ReactiveDag.Attestation.{Evaluation, Requirement, Scope}
+  alias ReactiveDag.Node.Keys
 
   @impl true
   def recompute(cell, _keys) do
@@ -45,9 +46,15 @@ defmodule ReactiveDag.Attestation.Op do
     %{over: over, requirement: %Requirement{} = req} = meta
     mode = Map.get(meta, :mode, :require)
 
-    raw_rows = Tuple.rows(over)
+    sources = cell.meta[:attested_sources] || %{}
+
+    # WHICH KEYS do these cells have? Asked of ReactiveDag.Node.Keys rather than
+    # the tuple, so a raw cell that materialises rows is read from its own table
+    # — attestations never needed anything but the key set (nothing here touches
+    # status or freshness), which is why the coupling was avoidable.
+    raw_rows = keys_as_rows(sources[:raw], to_string(over))
     stances = Attestation.stances(over)
-    eligibility = Tuple.all_keys(to_string(req.signers))
+    eligibility = Keys.current(sources[:eligibility], to_string(req.signers))
     statuses = Requirement.statuses(req)
     now = DateTime.utc_now()
 
@@ -140,6 +147,15 @@ defmodule ReactiveDag.Attestation.Op do
   def spine_status(:pending, :require, statuses), do: statuses.pending
   def spine_status(:pending, :annotate, statuses), do: statuses.unsigned
   def spine_status(:refused, _mode, statuses), do: statuses.refused
+
+  # Evaluation and Scope both work on ROWS but only ever read `.key` — so a key
+  # set is all the information they need, wrapped in the shape they expect.
+  defp keys_as_rows(source, cell_id) do
+    case Keys.current(source, cell_id) do
+      nil -> []
+      keys -> Enum.map(keys, &%{key: &1})
+    end
+  end
 
   defp attested_meta(%{meta: %{attested: a}}), do: a
 

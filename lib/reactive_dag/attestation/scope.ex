@@ -76,18 +76,39 @@ defmodule ReactiveDag.Attestation.Scope do
 
   @doc "Read the rows a scope selects for `cell_id` straight from the spine."
   @spec select_db(t(), String.t()) :: [map()]
-  def select_db({:key, key}, cell_id),
-    do: cell_id |> Tuple.rows() |> Enum.filter(&(&1.key == key))
+  def select_db(scope, cell_id), do: select_db(scope, cell_id, nil)
 
-  def select_db({:filter, key_scope}, cell_id),
-    do: Tuple.rows(cell_id, key_scope: key_scope)
+  @doc """
+  `select_db/2` against a KNOWN cell — so a raw cell that materialises rows is
+  read from its own table rather than the coordination tuple. Pass `nil` when
+  the cell is not in hand and the tuple is the only source.
+  """
+  @spec select_db(t(), String.t(), ReactiveDag.Cell.t() | nil) :: [map()]
+  def select_db({:key, key}, cell_id, cell) do
+    cell |> keys(cell_id, nil) |> Enum.filter(&(&1.key == key))
+  end
 
-  # the in-memory mirror of Tuple.key_scope_clause — MUST select the same keys
-  # the SQL predicate would, or signing and evaluating see different sets.
-  defp matches?({:prefix, pat}, key), do: like?(pat, key)
-  defp matches?({:exact_or_prefix, k, pat}, key), do: key == k or like?(pat, key)
+  def select_db({:filter, key_scope}, cell_id, cell) do
+    keys(cell, cell_id, key_scope)
+  end
 
-  defp matches?({:segment, i, sep, v}, key) do
+  defp keys(cell, cell_id, key_scope) do
+    case ReactiveDag.Node.Keys.scoped(cell, cell_id, key_scope) do
+      nil -> []
+      keys -> Enum.map(keys, &%{key: &1})
+    end
+  end
+
+  @doc """
+  Does `key` fall in `key_scope`? THE key-scope predicate — `ReactiveDag.Node.Keys`
+  filters key sets with it too, so there is one implementation rather than an
+  in-memory one and a SQL one obliged to agree.
+  """
+  @spec matches?(term(), String.t()) :: boolean()
+  def matches?({:prefix, pat}, key), do: like?(pat, key)
+  def matches?({:exact_or_prefix, k, pat}, key), do: key == k or like?(pat, key)
+
+  def matches?({:segment, i, sep, v}, key) do
     # split_part semantics: 1-indexed, "" when out of range.
     key |> String.split(sep) |> Enum.at(i - 1, "") == v
   end

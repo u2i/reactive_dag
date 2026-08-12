@@ -434,35 +434,7 @@ defmodule ReactiveDag.Node.Recompute do
   defp vanished_baseline(cell, ["*"]), do: current_keys(cell)
   defp vanished_baseline(_cell, claimed) when is_list(claimed), do: claimed
 
-  # a payload node's OWN ROWS are the truth about which units it currently
-  # holds — the coordination table is the host's, may be written by a different
-  # writer, and is not what a consumer queries. A verdict node has no rows, so
-  # its tuple keys are the only baseline there is.
-  defp current_keys(%Cell{meta: %{verdict: true}, id: id}), do: tuple_keys(id)
-
-  defp current_keys(%Cell{meta: meta, id: id}) do
-    case meta[:resource] do
-      nil ->
-        tuple_keys(id)
-
-      resource ->
-        key_of =
-          case meta[:identity_fields] do
-            fields when is_list(fields) -> Declarative.identity_key_fn(fields, nil)
-            _ -> &(&1 |> Map.fetch!(meta[:payload_key] || :key) |> to_string())
-          end
-
-        resource |> Ash.read!() |> Enum.map(key_of)
-    end
-  rescue
-    _ -> nil
-  end
-
-  defp tuple_keys(id) do
-    ReactiveDag.Tuple.all_keys(id)
-  rescue
-    _ -> nil
-  end
+  defp current_keys(cell), do: ReactiveDag.Node.Keys.current(cell)
 
   defp coord_opts(nil, _key, _row), do: []
   defp coord_opts(fun, key, row) when is_function(fun, 2), do: fun.(key, row)

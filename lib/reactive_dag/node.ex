@@ -1430,6 +1430,10 @@ defmodule ReactiveDag.Node do
       store = ReactiveDag.Attestation.leaf_cell()
 
       resolved = Enum.map(cells, &resolve_attested_cell(&1, reqs, store))
+      # the attested Op receives only its own cell, so the cells it READS —
+      # the raw one and the eligibility one — are stamped here, where the whole
+      # list is in hand. Same reason `over_source` is resolved at assembly.
+      resolved = Enum.map(resolved, &stamp_attested_sources(&1, resolved))
 
       interposed =
         Enum.map(gated, fn {over, gate, mode} ->
@@ -1490,6 +1494,21 @@ defmodule ReactiveDag.Node do
   end
 
   defp resolve_attested_cell(cell, _reqs, _store), do: cell
+
+  # so ReactiveDag.Node.Keys can answer "which keys does that cell have?" from
+  # wherever that cell's rows actually live, rather than the Op assuming a table.
+  defp stamp_attested_sources(%{meta: %{attested: %{over: over, requirement: req}}} = cell, all) do
+    by_id = Map.new(all, &{&1.id, &1})
+
+    sources = %{
+      raw: by_id[to_string(over)],
+      eligibility: by_id[to_string(req.signers)]
+    }
+
+    %{cell | meta: Map.put(cell.meta, :attested_sources, sources)}
+  end
+
+  defp stamp_attested_sources(cell, _all), do: cell
 
   # the anonymous attested cell a `gate:` lowers to — same shape as a declared
   # `attested` node, at a reserved id (`<over>@<requirement>`, with an
