@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.17.0-rc.4](https://github.com/u2i/reactive_dag/compare/v0.17.0-rc.3...v0.17.0-rc.4) (2026-08-12)
+
+
+### ⚠ BREAKING CHANGES
+
+* `Verdict.for_cell/2` takes a `%ReactiveDag.Cell{}` rather than a cell id string (get one from `plan.cells[id]`), and no longer accepts `:key_scope` — filter the resource and use `Verdict.rollup/2` instead. `Insights.cell_status/2` drops `:last_observed_at`; freshness is a tuple column with no resource equivalent, and nothing read it. A `union` over a node with no payload attributes now raises at assembly instead of silently unioning nothing.
+* `verdict? true` and the `status:` slot on `reduce`/`join` are removed, along with `Insights.cell_status/2`'s `verdict?` field. A tableless verdict node becomes a payload node: give it a table with a `:status` column, an `:upsert` action, and rewrite `status: fn g, items -> "present" end` as
+
+### Features
+
+* read results from resources, not the coordination tuple ([98f23f5](https://github.com/u2i/reactive_dag/commit/98f23f590abcf61fb63a5d9c7890937954fdfca1))
+* verdicts are rows — drop the tableless verdict node ([29f7133](https://github.com/u2i/reactive_dag/commit/29f7133279b96a96e477f50c7d0b8a6d356f8f7c))
+
 ## [0.17.0-rc.3](https://github.com/u2i/reactive_dag/compare/v0.17.0-rc.2...v0.17.0-rc.3) (2026-08-12)
 
 
