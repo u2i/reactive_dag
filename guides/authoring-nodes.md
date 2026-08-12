@@ -22,7 +22,7 @@ Authoring is **Ash-first**: start from what Ash can express declaratively and
 work outward — each step down the ladder trades declarativeness for power, and
 you take only the steps your shape needs. Every form reads its input, computes
 the result set, writes it (into the node's own resource by default), and
-`Op.put`s **only the changed keys**, so downstream work is proportional to
+reports **only the changed keys**, so downstream work is proportional to
 real change.
 
 | rung | you write | when |
@@ -164,11 +164,11 @@ unit whose input rows have all gone produces nothing, so without this its last
 computed value would linger forever, and a stale derived row is
 indistinguishable from a live one.
 
-Retirement covers both sides of the node: the **payload row** is destroyed (so
-the derived table stops showing the unit) and the **coordination tuple** is
-deleted (so the retirement propagates downstream as a changed key). A node that
-can retire therefore needs a destroy action — `defaults [:destroy]`, or name
-one with `payload_destroy`.
+Retirement destroys the **payload row**, so the derived table stops showing the
+unit, and reports its key as changed, so the retirement propagates downstream.
+The row is the unit — there is no second place a stale copy could survive. A
+node that can retire therefore needs a destroy action — `defaults [:destroy]`,
+or name one with `payload_destroy`.
 
 What a pass may retire is bounded by its **claim**: a whole-cell pass reconciles
 everything the node holds, a scoped pass only the units it claimed. Reconciling
@@ -222,8 +222,8 @@ Two shapes are worth calling out:
   read, with policies, joins and loads.
 
   There used to be a tableless shape for this (`verdict? true`, writing the
-  status straight into the coordination tuple). It saved a migration when the
-  answer was one word, and cost a ceiling: the tuple's schema is fixed, so the
+  status straight into a coordination table). It saved a migration when the
+  answer was one word, and cost a ceiling: that table's schema was fixed, so the
   moment a verdict wanted a `headroom` the shape had nothing to offer. A row
   costs a migration and answers every later question.
 
@@ -376,7 +376,7 @@ The Ash-native escape hatch — one step less escape than a module, because the
 computation stays a first-class action: arguments, policies, testable with
 `Ash.run_action`. The library passes only the arguments the action declares
 (`keys`, `cell_id` — declare neither for a whole-cell recompute), the action
-does its own domain writes, and the library `Op.put`s each returned key. The
+does its own domain writes, and the keys it returns are what propagates. The
 action must exist and be generic — verified at compile time.
 
 An **LLM node** is this rung with an [ash_ai](https://hexdocs.pm/ash_ai)
@@ -392,7 +392,7 @@ compute MyApp.Ops.EventsExtract   # implements ReactiveDag.Op
 
 For recompute that outgrows Ash entirely: an LLM call, an external fetch, a
 bespoke multi-input recompute. The op receives `(cell, dirty_keys)`, reads its
-inputs however it likes, writes via `ReactiveDag.Op.put/3`, and returns the
+inputs however it likes, writes its rows however it likes, and returns the
 keys that actually changed.
 
 ## Input edges

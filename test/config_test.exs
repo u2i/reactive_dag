@@ -16,22 +16,12 @@ defmodule ReactiveDag.ConfigTest do
 
   @keys [
     :repo,
-    :coordination_writer,
     :dirty_table,
-    :tuple_table,
     :insights_keep
   ]
 
   defmodule GoodRepo do
     def query!(_sql, _params), do: %{rows: []}
-  end
-
-  defmodule GoodWriter do
-    @behaviour ReactiveDag.CoordinationWriter
-    @impl true
-    def put(_c, _k, _o), do: :ok
-    @impl true
-    def delete(_c, _k), do: :ok
   end
 
   defmodule NotAWriter do
@@ -98,26 +88,6 @@ defmodule ReactiveDag.ConfigTest do
     end
   end
 
-  describe ":coordination_writer" do
-    test "the default is sound" do
-      assert Config.problems() == []
-    end
-
-    test "a valid custom writer passes" do
-      Application.put_env(:reactive_dag, :coordination_writer, GoodWriter)
-      assert Config.problems() == []
-    end
-
-    test "a module missing the callbacks names which ones" do
-      Application.put_env(:reactive_dag, :coordination_writer, NotAWriter)
-
-      assert [problem] = Config.problems()
-      assert problem =~ "does not implement"
-      assert problem =~ "put/3"
-      assert problem =~ "delete/2"
-    end
-  end
-
   describe "table names" do
     test "a name that isn't a SQL identifier" do
       Application.put_env(:reactive_dag, :dirty_table, "my dirty")
@@ -128,15 +98,14 @@ defmodule ReactiveDag.ConfigTest do
     end
 
     test "a name starting with a digit" do
-      Application.put_env(:reactive_dag, :tuple_table, "2tuples")
+      Application.put_env(:reactive_dag, :dirty_table, "2dirty")
 
       assert [problem] = Config.problems()
-      assert problem =~ ":tuple_table"
+      assert problem =~ ":dirty_table"
     end
 
-    test "a legal custom name passes — this is how a host keeps its tables" do
+    test "a legal custom name passes — this is how a host keeps its table" do
       Application.put_env(:reactive_dag, :dirty_table, "my_existing_dirty")
-      Application.put_env(:reactive_dag, :tuple_table, "my_existing_tuples")
 
       assert Config.problems() == []
     end
@@ -168,20 +137,18 @@ defmodule ReactiveDag.ConfigTest do
   end
 
   describe "validate!/0" do
-    test "reports EVERY problem at once — one deploy to fix, not three" do
+    test "reports EVERY problem at once — one deploy to fix, not two" do
       Application.delete_env(:reactive_dag, :repo)
-      Application.put_env(:reactive_dag, :coordination_writer, NotAWriter)
       Application.put_env(:reactive_dag, :dirty_table, "my dirty")
 
       err = assert_raise Config.Error, fn -> Config.validate!() end
       msg = Exception.message(err)
 
       assert msg =~ "`:repo` is not set"
-      assert msg =~ "does not implement"
       assert msg =~ "not a valid SQL identifier"
 
       # …and reads as a list, not one run-on sentence
-      assert length(String.split(msg, "\n  * ")) == 4
+      assert length(String.split(msg, "\n  * ")) == 3
     end
 
     test "raises nothing when sound" do

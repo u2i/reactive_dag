@@ -175,4 +175,66 @@ defmodule ReactiveDag.RowsTest do
 
     assert ReactiveDag.Verdict.for_cell(cell(Health)).status == :unknown
   end
+
+  describe "reconcile/3 — the leaf-write skeleton" do
+    test "retires what vanished, and propagates both sides" do
+      # the scan found travel + a new one; meals and lodging are gone
+      {:ok, changed} =
+        Rows.reconcile(cell(Health), ["travel", "parking"],
+          upsert: fn key -> key == "parking" end
+        )
+
+      # parking was written; meals + lodging vanished. travel was re-seen unchanged.
+      assert Enum.sort(changed) == ["lodging", "meals", "parking"]
+
+      # ...and the vanished rows are actually gone from the resource
+      assert Rows.keys_by_status(cell(Health), ["failing", "present"]) == ["travel"]
+    end
+
+    test "a retire fun replaces destruction — the retain-if-vanish policy" do
+      test_pid = self()
+
+      {:ok, changed} =
+        Rows.reconcile(cell(Health), ["travel"],
+          upsert: fn _ -> false end,
+          retire: fn keys -> send(test_pid, {:tombstoned, Enum.sort(keys)}) end
+        )
+
+      assert Enum.sort(changed) == ["lodging", "meals"]
+      assert_received {:tombstoned, ["lodging", "meals"]}
+
+      # ...and nothing was destroyed
+      assert length(Ash.read!(Health)) == 3
+    end
+
+    test "an explicit :current narrows the baseline — already-retired keys stay put" do
+      {:ok, changed} =
+        Rows.reconcile(cell(Health), ["travel"],
+          upsert: fn _ -> false end,
+          current: ["travel", "meals"]
+        )
+
+      # lodging was not in the baseline, so it is neither retired nor reported
+      assert changed == ["meals"]
+      assert "lodging" in Enum.map(Rows.all(cell(Health)), & &1.key)
+    end
+
+    test "nothing vanished → nothing retired, only real upserts propagate" do
+      {:ok, changed} =
+        Rows.reconcile(cell(Health), ["travel", "meals", "lodging"],
+          upsert: fn key -> key == "meals" end
+        )
+
+      assert changed == ["meals"]
+      assert length(Ash.read!(Health)) == 3
+    end
+
+    test "an identity-keyed leaf reconciles on its serialized keys" do
+      {:ok, changed} =
+        Rows.reconcile(cell(Rollup), ["gf|2025"], upsert: fn _ -> false end)
+
+      assert changed == ["water|2025"]
+      assert Enum.map(Rows.all(cell(Rollup)), & &1.key) == ["gf|2025"]
+    end
+  end
 end

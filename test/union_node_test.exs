@@ -125,23 +125,13 @@ defmodule ReactiveDag.UnionNodeTest do
     end
   end
 
-  defmodule NullWriter do
-    @behaviour ReactiveDag.CoordinationWriter
-    @impl true
-    def put(_c, _k, _o), do: :ok
-    @impl true
-    def delete(_c, _k), do: :ok
-  end
 
   defp seed(resource, attrs) do
     resource |> Ash.Changeset.for_create(:upsert, attrs) |> Ash.create!()
   end
 
   setup do
-    prev_writer = Application.get_env(:reactive_dag, :coordination_writer)
-    Application.put_env(:reactive_dag, :coordination_writer, NullWriter)
 
-    on_exit(fn -> Application.put_env(:reactive_dag, :coordination_writer, prev_writer) end)
 
     for r <- [AllVerdicts, CategoryHealth, FundBalance],
         row <- Ash.read!(r),

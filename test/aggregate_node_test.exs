@@ -16,15 +16,6 @@ defmodule ReactiveDag.AggregateNodeTest do
     end
   end
 
-  defmodule NullWriter do
-    @behaviour ReactiveDag.CoordinationWriter
-    @impl true
-    def put(_c, _k, _o), do: :ok
-    @impl true
-    def tombstone(_c, _k), do: :ok
-    @impl true
-    def delete(_c, _k), do: :ok
-  end
 
   # a fine-grained input for the identity-keyed aggregate below
   defmodule FundLine do
@@ -97,9 +88,6 @@ defmodule ReactiveDag.AggregateNodeTest do
   end
 
   setup do
-    prev = Application.get_env(:reactive_dag, :coordination_writer)
-    Application.put_env(:reactive_dag, :coordination_writer, NullWriter)
-    on_exit(fn -> Application.put_env(:reactive_dag, :coordination_writer, prev) end)
 
     # two groups; readings belong to them by pm_key.
     for k <- ["north|2024-01", "south|2024-01"],

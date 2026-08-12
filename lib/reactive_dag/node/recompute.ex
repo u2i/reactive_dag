@@ -130,11 +130,8 @@ defmodule ReactiveDag.Node.Recompute do
 
   # the ASH-NATIVE escape hatch: a GENERIC action on the node's own resource
   # (`run :recompute_keys`). The action does its own DOMAIN writes and returns
-  # the changed keys; the library passes only the arguments the action declares
-  # (keys / cell_id) and closes the coordination loop with Op.put — an action
-  # has no %Cell{} to put through, so coordination stays the library's job,
-  # exactly as in the payload loop. MUST precede the compute-nil clause: a run
-  # node's meta carries compute: nil too.
+  # the changed keys, which are what propagates. MUST precede the compute-nil
+  # clause: a run node's meta carries compute: nil too.
   def recompute(%Cell{meta: %{run: action, resource: resource}} = cell, keys)
       when is_atom(action) and not is_nil(action) and not is_nil(resource) do
     params =
@@ -143,7 +140,6 @@ defmodule ReactiveDag.Node.Recompute do
 
     case resource |> Ash.ActionInput.for_action(action, params) |> Ash.run_action() do
       {:ok, changed} when is_list(changed) ->
-        Enum.each(changed, &ReactiveDag.Op.put(cell, &1))
         {:ok, changed}
 
       {:ok, other} ->
@@ -328,26 +324,14 @@ defmodule ReactiveDag.Node.Recompute do
     raise "reactive_dag: #{cell_id}: `expand:` must return a LIST of rows, got #{inspect(other)}"
   end
 
-  # write each {key, row}, Op.put the changed keys, return them. Shared by
+  # write each {key, row} and return the changed keys. Shared by
   # reduce/expand + join. Three write modes, in precedence order:
   #   * host `upsert:` callback (override) — `(key, row) -> changed?`.
   #   * the LIB closing the loop into the node's OWN resource (`meta.resource`).
   defp materialize(cell, pairs, upsert, claimed) do
     write = writer_fn(cell, upsert)
-    coord = cell.meta[:coordination_opts]
 
-    changed =
-      Enum.flat_map(pairs, fn {key, row} ->
-        if write.(key, row) do
-          # the coordination write goes through Op.put → the host CoordinationWriter,
-          # so extension columns (source_ref, fingerprint, …) a node declares via
-          # `coordination_opts:` are applied in the payload loop — not just the spine.
-          ReactiveDag.Op.put(cell, key, coord_opts(coord, key, row))
-          [key]
-        else
-          []
-        end
-      end)
+    changed = Enum.flat_map(pairs, fn {key, row} -> if write.(key, row), do: [key], else: [] end)
 
     changed ++ retire_vanished(cell, Enum.map(pairs, &elem(&1, 0)), claimed, upsert)
   end
@@ -360,9 +344,8 @@ defmodule ReactiveDag.Node.Recompute do
   # `want` is what this pass produced. The baseline it is subtracted from is the
   # CLAIM: a whole-cell pass reconciles every key the cell has, a scoped pass
   # only the units it claimed (reconciling wider would retire live units that
-  # simply weren't visited). Retirement covers BOTH sides of the node — the
-  # coordination tuple (so propagation carries it downstream) and the payload
-  # row (so the derived table stops showing it).
+  # simply weren't visited). Destroying the row IS the retirement — the key is
+  # returned as changed, so propagation carries it downstream.
   defp retire_vanished(_cell, _want, _claimed, upsert) when is_function(upsert, 2), do: []
 
   defp retire_vanished(%Cell{meta: meta} = cell, want, claimed, _upsert) do
@@ -388,7 +371,6 @@ defmodule ReactiveDag.Node.Recompute do
               )
             end
 
-            ReactiveDag.Op.delete(cell, vanished)
             vanished
         end
     end
@@ -401,40 +383,20 @@ defmodule ReactiveDag.Node.Recompute do
   defp vanished_baseline(cell, ["*"]), do: current_keys(cell)
   defp vanished_baseline(_cell, claimed) when is_list(claimed), do: claimed
 
-  # a payload node's OWN ROWS are the truth about which units it currently
-  # holds — the coordination table is the host's, may be written by a different
-  # writer, and is not what a consumer queries.
+  # a node's OWN ROWS are the truth about which units it currently holds.
   #
-  # A node that keeps no rows here (no resource, or an attribute-less one whose
-  # `compute`/custom `upsert:` writes elsewhere) leaves the coordination table as
-  # the only place that knows what it holds — the one read of the tuple spine
-  # that survives. Note the difference between an empty list and `nil`: `[]`
-  # would claim the node holds nothing and retire every key it has.
+  # `nil` means "cannot enumerate — do not reconcile", and is NOT the same as
+  # `[]`, which would claim the node holds nothing and retire every key it has.
+  # Only a node that reconciles reaches here, and a reconciling node always has
+  # rows of its own: `retire_vanished` returns early for a custom `upsert:`, and
+  # a node with neither a resource nor an `upsert:` cannot write at all
+  # (`writer_fn` raises). So the rescue is the guard that matters — an
+  # unreadable resource must not be read as an empty one.
   defp current_keys(%Cell{meta: meta, id: id}) do
-    if holds_rows?(meta) do
-      %Cell{id: id, meta: meta} |> ReactiveDag.Node.Rows.all() |> Enum.map(& &1.key)
-    else
-      tuple_keys(id)
-    end
+    %Cell{id: id, meta: meta} |> ReactiveDag.Node.Rows.all() |> Enum.map(& &1.key)
   rescue
     _ -> nil
   end
-
-  defp holds_rows?(meta) do
-    case meta[:resource] do
-      nil -> false
-      resource -> Ash.Resource.Info.attributes(resource) != []
-    end
-  end
-
-  defp tuple_keys(id) do
-    ReactiveDag.Tuple.all_keys(id)
-  rescue
-    _ -> nil
-  end
-
-  defp coord_opts(nil, _key, _row), do: []
-  defp coord_opts(fun, key, row) when is_function(fun, 2), do: fun.(key, row)
 
   # `(key, row) -> changed?`. An explicit `upsert:` wins; otherwise the row is
   # written into the node's own resource (the unified "resource IS payload" shape).

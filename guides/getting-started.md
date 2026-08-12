@@ -29,31 +29,21 @@ a standalone framework.
 
 ```elixir
 config :reactive_dag,
-  repo: MyApp.Repo,                    # REQUIRED — raises if unset
-  tuple_table: "my_tuple",             # the coordination spine
-  dirty_table: "my_dirty",             # the frontier
-  coordination_writer: MyApp.Writer    # OPTIONAL — a spine-only default ships
+  repo: MyApp.Repo,        # REQUIRED — raises if unset
+  dirty_table: "my_dirty"  # the frontier (optional; defaults silently)
 ```
 
 Only `:repo` is required. Every key the library reads — with its default, what
 reads it, and when you would change it — is in
 [Configuration](configuration.html).
 
-`tuple_table` / `dirty_table` **default silently** (`reactive_dag_tuple` /
-`reactive_dag_dirty`); a name that doesn't match your migration yields empty
-results with no error, so set them explicitly.
+`dirty_table` **defaults silently** to `reactive_dag_dirty`; a name that doesn't
+match your migration yields empty results with no error, so set it explicitly if
+you are adopting an existing table.
 
-## Migrations (the host owns the tuple; the lib offers the frontier)
+## Migrations
 
-The library defines the columns it needs and is their only reader/writer, but
-the physical tables live in *your* migrations — that's what lets a host add its
-own extension columns beside the spine.
-
-The dirty frontier has no extension columns, so the library can own its DDL —
-`ReactiveDag.Migration.up/1` / `down/1` create it for you, resolving the table
-name exactly as the runtime does (`config :reactive_dag, dirty_table:`, with an
-explicit `dirty_table:` option overriding), so the migrated table and the
-queried table can't silently diverge:
+The library owns exactly one table — the dirty frontier — and offers its DDL:
 
 ```elixir
 defmodule MyApp.Repo.Migrations.AddReactiveDag do
@@ -64,36 +54,31 @@ defmodule MyApp.Repo.Migrations.AddReactiveDag do
 end
 ```
 
-Hand-write it only if you want to co-locate it with the tuple migration, as
-below. The TUPLE table stays yours either way (extension columns).
+It resolves the table name exactly as the runtime does (`config :reactive_dag,
+dirty_table:`, with an explicit `dirty_table:` option overriding), so the
+migrated table and the queried table cannot silently diverge.
+
+Hand-write it only if you want it beside your own migrations:
 
 ```elixir
 def change do
-  # the coordination spine: one row per (cell, key), recording WHICH units a
-  # cell holds. A node's RESULTS live in its own resource — this table tracks
-  # them, it is not where you query them.
-  create table(:my_tuple, primary_key: false) do
-    add :cell_id, :string, null: false
-    add :key, :string, null: false
-    add :updated_at, :utc_datetime_usec
-    # ... your extension columns here (source_ref, tombstoned_at, …) — the
-    # library neither reads nor writes them; see the "Seams" guide.
-  end
-
-  create unique_index(:my_tuple, [:cell_id, :key])
-
-  # the dirty frontier: pending recompute work, claimed-as-deleted by the drain.
+  # pending recompute work, claimed-as-deleted by the drain
   create table(:my_dirty, primary_key: false) do
     add :cell_id, :string, null: false
     add :key, :string, null: false
     add :reason, :string
     add :enqueued_at, :utc_datetime_usec
+    add :prior, :map
   end
 
   # UNIQUE is load-bearing: mark_dirty coalesces via ON CONFLICT (cell_id, key).
   create unique_index(:my_dirty, [:cell_id, :key])
 end
 ```
+
+**Everything else is your own resources.** A node's results live in the node's
+resource, with that resource's migration — there is no second table shadowing
+them, and nothing to keep in sync.
 
 ## A first graph
 
@@ -179,19 +164,37 @@ as actually changed. An empty frontier is a no-op.
 
 ## Feeding the leaf
 
-Data enters through a **source** — anything that writes a leaf's tuples and
-marks its parents dirty. The typical shape:
+A leaf is an ordinary resource. Data enters by writing rows to it, and the
+cascade starts when those writes are marked dirty.
+
+**The simple case — `dirties_on`.** Declare it on the leaf and ordinary Ash
+writes trigger the cascade themselves:
 
 ```elixir
-# 1. write the leaf's tuples (reconcile computes what changed/vanished)
-{:ok, changed} =
-  ReactiveDag.Tuple.reconcile("fiscal_lines", keys,
-    upsert: fn key -> ReactiveDag.Tuple.put("fiscal_lines", key) == :ok end
-  )
+reactive do
+  id :fiscal_lines
+  leaf? true
+  dirties_on [:create, :update, :destroy]
+end
+```
 
+Now `Ash.create!/1` on that resource marks its key dirty *inside the write's
+transaction* — a rolled-back write leaves no dirty key, a committed one always
+leaves one. Nothing else to call:
+
+```elixir
+MyApp.FiscalLines |> Ash.Changeset.for_create(:create, attrs) |> Ash.create!()
+ReactiveDag.Drain.run(plan, recompute: ..., key_rule: ...)
+```
+
+**The scanner case.** When the data comes from outside — a fleet API, a repo, an
+LLM — the fetch is effectful and fallible, so it stays outside the drain. Write
+the leaf's rows, then mark what changed:
+
+```elixir
+# 1. write the leaf's rows (your resource, your upsert)
 # 2. mark the changed keys dirty upward
 ReactiveDag.Graph.dirty_parents(plan, "fiscal_lines", changed, ReactiveDag.Node.KeyRule)
-
 # 3. drain
 ReactiveDag.Drain.run(plan, recompute: ..., key_rule: ...)
 ```

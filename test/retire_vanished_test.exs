@@ -142,48 +142,12 @@ defmodule ReactiveDag.RetireVanishedTest do
     def query!("SELECT COUNT" <> _, _params), do: %{rows: [[Agent.get(__MODULE__, &MapSet.size/1)]]}
   end
 
-  # the coordination side: records what the library PUT and DELETED, so the
-  # tests can assert retirement propagates, not just that a row vanished.
-  defmodule RecordingWriter do
-    @behaviour ReactiveDag.CoordinationWriter
-
-    def start_link, do: Agent.start_link(fn -> %{present: MapSet.new(), deleted: []} end, name: __MODULE__)
-
-    @impl true
-    def put(cell_id, key, _opts) do
-      Agent.update(__MODULE__, &%{&1 | present: MapSet.put(&1.present, {cell_id, key})})
-      :ok
-    end
-
-    @impl true
-    def delete(cell_id, keys) do
-      Agent.update(__MODULE__, fn s ->
-        %{
-          s
-          | deleted: s.deleted ++ Enum.map(keys, &{cell_id, &1}),
-            present: Enum.reduce(keys, s.present, &MapSet.delete(&2, {cell_id, &1}))
-        }
-      end)
-
-      :ok
-    end
-
-    def deleted, do: Agent.get(__MODULE__, & &1.deleted)
-    def present, do: Agent.get(__MODULE__, & &1.present) |> MapSet.to_list()
-  end
-
   setup do
     start_supervised!(%{id: FakeRepo, start: {FakeRepo, :start_link, []}})
-    start_supervised!(%{id: RecordingWriter, start: {RecordingWriter, :start_link, []}})
     prev_repo = Application.get_env(:reactive_dag, :repo)
-    prev_writer = Application.get_env(:reactive_dag, :coordination_writer)
     Application.put_env(:reactive_dag, :repo, FakeRepo)
-    Application.put_env(:reactive_dag, :coordination_writer, RecordingWriter)
 
-    on_exit(fn ->
-      Application.put_env(:reactive_dag, :repo, prev_repo)
-      Application.put_env(:reactive_dag, :coordination_writer, prev_writer)
-    end)
+    on_exit(fn -> Application.put_env(:reactive_dag, :repo, prev_repo) end)
 
     for {k, cat, amt} <- [{"e1", "travel", 100.0}, {"e2", "meals", 40.0}] do
       Expenses
@@ -214,11 +178,10 @@ defmodule ReactiveDag.RetireVanishedTest do
     # the vanished unit is REPORTED as changed, so parents recompute
     assert "meals" in changed
 
-    # ...its payload row is gone (the derived table shows only live units)
+    # ...and its payload row is gone (the derived table shows only live units).
+    # The destroy IS the retirement: the row is the unit, so there is no second
+    # place a stale copy could survive.
     assert rows() == [{"travel", 100.0, 1}]
-
-    # ...and its coordination tuple was deleted
-    assert {"category_totals", "meals"} in RecordingWriter.deleted()
   end
 
   test "a scoped pass only retires within its CLAIM — live units are untouched" do
@@ -231,7 +194,6 @@ defmodule ReactiveDag.RetireVanishedTest do
     {:ok, _} = Recompute.recompute(c, ["travel"])
 
     assert rows() == [{"meals", 40.0, 1}, {"travel", 100.0, 1}]
-    assert RecordingWriter.deleted() == []
   end
 
   test "a scoped pass DOES retire a claimed unit that produced nothing" do
@@ -245,7 +207,6 @@ defmodule ReactiveDag.RetireVanishedTest do
 
     assert changed == ["meals"]
     assert rows() == [{"travel", 100.0, 1}]
-    assert {"category_totals", "meals"} in RecordingWriter.deleted()
   end
 
   test "an input MOVING between units: the destination is exact, the ORIGIN needs a whole-cell pass" do
@@ -314,6 +275,5 @@ defmodule ReactiveDag.RetireVanishedTest do
 
     # only what the pass produced; nothing retired on the host's behalf
     assert Enum.sort(changed) == ["meals", "travel"]
-    assert RecordingWriter.deleted() == []
   end
 end

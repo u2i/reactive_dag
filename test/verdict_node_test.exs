@@ -33,18 +33,8 @@ defmodule ReactiveDag.VerdictNodeTest do
   # offer, because the coordination tuple has nowhere to put them. A node with
   # a :status column is an ordinary payload node whose row happens to be a
   # verdict, so it carries whatever it likes.
-  defmodule NullWriter do
-    @behaviour ReactiveDag.CoordinationWriter
-    @impl true
-    def put(_c, _k, _o), do: :ok
-    @impl true
-    def delete(_c, _k), do: :ok
-  end
 
   setup do
-    prev = Application.get_env(:reactive_dag, :coordination_writer)
-    Application.put_env(:reactive_dag, :coordination_writer, NullWriter)
-    on_exit(fn -> Application.put_env(:reactive_dag, :coordination_writer, prev) end)
     :ok
   end
 

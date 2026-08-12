@@ -105,7 +105,7 @@ defmodule ReactiveDag.Node.Recompute.PerKey do
     |> Ash.Changeset.for_create(cell.meta[:payload_action] || :upsert, attrs)
     |> Ash.create!()
 
-    ReactiveDag.Op.put(cell, key)
+    :ok
   end
 
   # the row's fields → the action's arguments. An explicit `args:` maps them

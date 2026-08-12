@@ -82,21 +82,8 @@ defmodule ReactiveDag.PayloadLoopTest do
   end
 
   # a no-op coordination writer — this test exercises the PAYLOAD loop; the
-  # coordination write (Op.put) is proven separately in coordination_writer_test.
-  defmodule NullWriter do
-    @behaviour ReactiveDag.CoordinationWriter
-    @impl true
-    def put(_cell_id, _key, _opts), do: :ok
-    @impl true
-    def tombstone(_cell_id, _keys), do: :ok
-    @impl true
-    def delete(_cell_id, _keys), do: :ok
-  end
 
   setup do
-    prev = Application.get_env(:reactive_dag, :coordination_writer)
-    Application.put_env(:reactive_dag, :coordination_writer, NullWriter)
-    on_exit(fn -> Application.put_env(:reactive_dag, :coordination_writer, prev) end)
 
     for {p, m, f, i} <- [{"north", "2024-01", 1.0, "a"}, {"north", "2024-01", 3.0, "b"}, {"south", "2024-01", 2.0, "c"}] do
       DmrRow |> Ash.Changeset.for_create(:create, %{id: i, plant: p, month: m, flow: f}) |> Ash.create!()

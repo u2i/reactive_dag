@@ -80,12 +80,12 @@ defmodule ReactiveDag.Insights do
   # ── per-cell state ──────────────────────────────────────────────────────────
 
   @doc """
-  One cell's observable state: its declaration (depth, inputs, shape) plus its
-  live coordination state (status histogram, key count, freshness, and a small
-  sample of failing keys for the drawer).
+  One cell's observable state: its declaration (depth, inputs, shape) plus what
+  it currently holds (status histogram, key count, and a small sample of failing
+  keys for the drawer).
 
-  The status read hits the tuple table, so this is a query per cell — call it
-  for the cells being displayed, not the whole graph, unless the graph is small
+  Reads the node's own resource, so this is a query per cell — call it for the
+  cells being displayed, not the whole graph, unless the graph is small
   (`summary/1` does exactly that, with the same caveat).
   """
   @spec cell_status(Plan.t(), String.t()) :: cell_status() | nil
@@ -142,8 +142,8 @@ defmodule ReactiveDag.Insights do
   @doc """
   Cell ids with dirty keys waiting — what the NEXT drain would work on.
 
-  Reads the frontier rather than the tuple table: a cell is pending because
-  something dirtied it, whether or not its tuples have changed yet.
+  Reads the frontier rather than the nodes themselves: a cell is pending because
+  something dirtied it, whether or not its rows have changed yet.
   """
   @spec pending(Plan.t()) :: [String.t()]
   def pending(%Plan{cells: cells}) do
@@ -253,9 +253,9 @@ defmodule ReactiveDag.Insights do
     :ok
   end
 
-  # the coordination tables belong to the host and may not be configured (or
-  # migrated) in every context this is called from — a dashboard should degrade
-  # to "structure only" rather than crash the page.
+  # a node's resource may be unreadable in the context this is called from (a
+  # policy, an unmigrated table, a data layer that isn't up) — a dashboard
+  # should degrade to "structure only" rather than crash the page.
   defp safe(fun, default) do
     fun.()
   rescue

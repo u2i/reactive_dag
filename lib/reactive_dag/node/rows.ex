@@ -102,6 +102,67 @@ defmodule ReactiveDag.Node.Rows do
     |> take(opts[:limit])
   end
 
+  @doc """
+  Reconcile a leaf's rows against the key set a scan found — the algorithm every
+  leaf driver otherwise hand-rolls.
+
+      current  = the cell's current keys (read from its resource)
+      want     = `want_keys`, what the scan found
+      upsert   each want key   → the host writes the row, returns true iff CHANGED
+      vanished = current − want → retired
+      ⇒ changed_upserts ++ vanished    (the keys to propagate)
+
+  Both variation points stay the host's, because both are domain logic:
+
+    * `:upsert` — `(key -> boolean)`, called per want-key. WHAT a row contains
+      and WHAT counts as changed cannot be guessed from the key alone.
+    * `:retire` — how vanished keys leave. Defaults to destroying the row via
+      the node's `payload_destroy` action; a host with a retain-if-vanish policy
+      passes a `(keys -> any)` fun and marks its own rows instead.
+    * `:current` — the baseline `vanished` is computed against. Defaults to the
+      cell's current keys. A host whose *live* set is narrower than all its rows
+      passes it explicitly — a retain-if-vanish leaf passes its non-tombstoned
+      keys, so already-retired keys are neither re-retired nor reported as newly
+      vanished.
+
+  Vanished keys always propagate: something disappearing is a change.
+
+  > #### The honest gap {: .warning}
+  >
+  > Call this only with a want-set you actually observed. An upstream you could
+  > not reach must write NOTHING — handing an empty `want_keys` to a scan that
+  > failed retires every key the cell has, and a downstream rollup over an empty
+  > set typically reads as vacuously fine. A scan that couldn't look must never
+  > render as a scan that found nothing.
+  """
+  @spec reconcile(Cell.t(), [String.t()] | MapSet.t(), keyword()) :: {:ok, [String.t()]}
+  def reconcile(%Cell{meta: meta} = cell, want_keys, opts) do
+    upsert = Keyword.fetch!(opts, :upsert)
+    want_set = MapSet.new(want_keys)
+
+    changed_up = want_set |> MapSet.to_list() |> Enum.filter(&(upsert.(&1) == true))
+
+    current = Keyword.get_lazy(opts, :current, fn -> Enum.map(all(cell), & &1.key) end)
+    vanished = Enum.reject(current, &MapSet.member?(want_set, &1))
+
+    retire(vanished, Keyword.get(opts, :retire), meta)
+
+    {:ok, changed_up ++ vanished}
+  end
+
+  defp retire([], _how, _meta), do: :ok
+  defp retire(keys, fun, _meta) when is_function(fun, 1), do: fun.(keys)
+
+  defp retire(keys, _nil, meta) do
+    ReactiveDag.Node.Payload.retire(
+      meta[:resource],
+      meta[:payload_key] || :key,
+      meta[:identity_fields],
+      keys,
+      meta[:payload_destroy] || :destroy
+    )
+  end
+
   defp take(keys, nil), do: keys
   defp take(keys, limit), do: Enum.take(keys, limit)
 

@@ -8,10 +8,10 @@ when the outside world is unreachable.
 ## The two phases: poll, then drain
 
 ```
-1. POLL   — each source fetches → writes its leaf tuples → returns changed keys.
+1. POLL   — each source fetches → writes its leaf's rows → returns changed keys.
             Effectful, non-deterministic, fallible. OUTSIDE the drain.
 2. DRAIN  — the engine recomputes everything downstream of the dirty frontier.
-            Pure set/graph computation over tuples already present.
+            Pure set/graph computation over rows already written.
             Deterministic, re-runnable, never fails on a network outage.
 ```
 
@@ -41,7 +41,7 @@ defmodule MyApp.Sources.FleetScan do
       keys = Enum.map(hosts, & &1.serial)
 
       {:ok, changed} =
-        ReactiveDag.Tuple.reconcile("machines", keys,
+        ReactiveDag.Node.Rows.reconcile(cell, keys,
           upsert: fn key -> write_row(key) end
         )
 
@@ -75,21 +75,25 @@ instead of a scanner silently writing rows nothing reads.
 
 ## Reconcile: the leaf-write skeleton
 
-`ReactiveDag.Tuple.reconcile/3` is the one algorithm every leaf driver
+`ReactiveDag.Node.Rows.reconcile/3` is the one algorithm every leaf driver
 otherwise hand-rolls:
 
 ```
-current  = the cell's current keys
+current  = the cell's current keys (read from its own resource)
 want     = what the scan found
 upsert   each want key    → host writes the row; returns true iff CHANGED
-vanished = current − want → retired (delete, or a host tombstone policy)
+vanished = current − want → retired (destroyed, or a host tombstone policy)
 ⇒ changed_upserts ++ vanished   (the keys to propagate)
 ```
 
-The host supplies the two variation points — `upsert:` (what a row contains and
-what counts as changed is domain logic) and `retire:` (`:delete` by default; a
+The host supplies the variation points — `upsert:` (what a row contains and
+what counts as changed is domain logic) and `retire:` (destroy by default; a
 retain-if-vanished host passes a tombstone function). Vanished keys always
 propagate: something disappearing is a change.
+
+A leaf written by ordinary Ash actions rather than a scan does not need this at
+all: declare `dirties_on [:create, :update, :destroy]` and each write marks its
+own key dirty, inside the write's transaction.
 
 ## The honest-gap discipline
 
@@ -102,10 +106,10 @@ dutifully retire every machine — and every downstream guarantee will see an
 estate with no members, which typically rolls up as *vacuously green*. A scan
 that couldn't look must never render as a scan that found nothing.
 
-So on failure: write no tuples, retire nothing, and report the outage in the
-poll result (`unreachable:`) so the host can surface it. The stale rows that
-remain are the *truthful* state: last known, aging, and visibly so through the
-spine's `observed_at`.
+So on failure: write nothing, retire nothing, and report the outage in the poll
+result (`unreachable:`) so the host can surface it. The stale rows that remain
+are the *truthful* state: last known, and aging — put a `last_seen_at` column on
+the leaf's resource if you want that visible.
 
 Corollary: when a source feeds several leaves and only some upstreams fail,
 write the leaves you could observe and skip the ones you couldn't — never let
@@ -194,12 +198,12 @@ scanner *and* a computation on one node:
 ```elixir
 reactive do
   id :category_totals
-  scan MyApp.Crawler                 # writes tuples from outside…
+  scan MyApp.Crawler                 # writes this cell's rows from outside…
   reduce into: [sum: [amount: :total]]   # …and derives them from inputs
 end
 ```
 
-A scanner writes this cell's tuples from outside the graph; a combinator derives
+A scanner writes this cell's rows from outside the graph; a combinator derives
 them from its inputs. Declared together, the poll and the drain overwrite each
 other — the drain reprices from inputs and discards whatever the poll wrote,
 which surfaces as data that mysteriously reverts. `graph/2` raises on it.

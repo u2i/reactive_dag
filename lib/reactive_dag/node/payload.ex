@@ -16,13 +16,13 @@ defmodule ReactiveDag.Node.Payload do
   defaults to `:key`; a resource whose primary key is named otherwise declares
   `payload_key :flow_key` in its `reactive` block. The row is written with that
   attribute set to the cell key; a `:key` field on the row itself is dropped (it's
-  the coordination key, not a payload column).
+  the cell key, not a payload column).
 
   ## Change detection
 
   `upsert/5` reads the existing row first and compares the writable attributes; it
   returns `:changed` only when a create or a real value change happened, so the
-  drain's `Op.put`/parent-dirty only fires for genuine changes (a no-op recompute
+  drain's parent-dirty only fires for genuine changes (a no-op recompute
   stays a no-op). Requires an upsert action on the resource — by default the
   action named `:upsert` with `upsert?: true`; override with `payload_action`.
   """

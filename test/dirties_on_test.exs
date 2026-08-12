@@ -202,24 +202,14 @@ defmodule ReactiveDag.DirtiesOnTest do
     def dirty, do: Agent.get(__MODULE__, &Map.keys/1) |> Enum.sort()
   end
 
-  defmodule NullWriter do
-    @behaviour ReactiveDag.CoordinationWriter
-    @impl true
-    def put(_cell_id, _key, _opts), do: :ok
-    @impl true
-    def delete(_cell_id, _keys), do: :ok
-  end
 
   setup do
     start_supervised!(%{id: FakeRepo, start: {FakeRepo, :start_link, []}})
     prev_repo = Application.get_env(:reactive_dag, :repo)
-    prev_writer = Application.get_env(:reactive_dag, :coordination_writer)
     Application.put_env(:reactive_dag, :repo, FakeRepo)
-    Application.put_env(:reactive_dag, :coordination_writer, NullWriter)
 
     on_exit(fn ->
       Application.put_env(:reactive_dag, :repo, prev_repo)
-      Application.put_env(:reactive_dag, :coordination_writer, prev_writer)
     end)
 
     # the ETS tables are shared (not `private?`, since writes may come from

@@ -1,8 +1,9 @@
 # reactive_dag
 
 A domain-agnostic **reactive DAG engine** for Elixir/Ash apps: a dirty frontier
-+ depth-ordered incremental drain + change propagation, plus the coordination
-tuple, leaf-reconcile, and nested-expression lowering that go with it. Extracted
++ depth-ordered incremental drain + change propagation, plus leaf-reconcile and
+nested-expression lowering. Every node's results are ordinary Ash rows in that
+node's own resource; the library owns one table, the frontier. Extracted
 from two apps that independently grew the same engine (the Red Hook `cascade`
 pipeline and the u2i compliance portal's `model_eval`), and now shared by both.
 
@@ -26,9 +27,6 @@ decides *how* or *what a value means*. Each host brings its domain at the seams:
   create/update/destroy on a leaf resource marks that record's key dirty,
   inside the write's own transaction. Opt-in; without it the host calls
   `Frontier.mark_dirty/3` itself.
-- **`ReactiveDag.CoordinationWriter`** — how a cell's coordination tuples are
-  written (the host writes its spine + extension columns in one atomic upsert).
-  A default spine-only writer ships; hosts with extension columns supply their own.
 
 ## What the library owns
 
@@ -39,11 +37,10 @@ decides *how* or *what a value means*. Each host brings its domain at the seams:
 | Graph math | `ReactiveDag.Graph` | `build/1` (validate + parent edges + longest-path depths + cycle check); `dirty_parents/4` (propagation via the host `KeyRule`). |
 | Dirty frontier | `ReactiveDag.Frontier` | claim-as-delete over the host's dirty table; `mark_dirty / next_cell / claim / empty?`. |
 | Drain loop | `ReactiveDag.Drain` | depth-ordered incremental propagation; `run/2` parameterized by the two seams, returning `{:ok, %Drain.Report{}}` — the processing trace (per-step cell/claimed/changed/`triggered_by`/`duration_us` + totals). An optional `:on_step` hook streams the same fields live. |
-| Result reads | `ReactiveDag.Node.Rows` | a cell's own rows addressed by CELL KEY (`all/1`, `status_histogram/1`, `keys_by_status/3`) — the read side of what the payload loop writes, and what `Insights`, `Verdict` and `union` are built on. A node's results are ordinary Ash rows; this just keys them the way the DAG does. |
-| Coordination spine | `ReactiveDag.Tuple` | a PRESENCE SET of `(cell_id, key)` over the host's tuple table: `put / delete / all_keys / counts / reconcile / reconcile_set` + a `:key_scope` selector. It records which units a cell holds when the library cannot enumerate them itself — a source-fed leaf, a node whose `upsert:` writes elsewhere. It holds no results; those are read from each node's resource (see above). |
+| Result reads | `ReactiveDag.Node.Rows` | a cell's own rows addressed by CELL KEY (`all/1`, `status_histogram/1`, `keys_by_status/3`, `reconcile/3`) — the read side of what the payload loop writes, and what `Insights`, `Verdict` and `union` are built on. A node's results are ordinary Ash rows; this just keys them the way the DAG does. |
 | Nested-expr lowering | `ReactiveDag.Lowering` | `walk/3` — the nested op-expression → flat-cell recursion both DSLs grew, parameterized by host callbacks (id grammar, ref resolution, cell construction). |
 | Compile pipeline | `ReactiveDag.Dsl` | `compile / validate_cells` — resolve → structural-validate, with a domain-validation hook. |
-| Op contract | `ReactiveDag.Op` | the behaviour a cell's compute module implements (`recompute(cell, keys) -> {:ok, changed}`) + the write API ops call (`put / tombstone / delete`, routed to the `CoordinationWriter`). |
+| Op contract | `ReactiveDag.Op` | the behaviour a cell's compute module implements (`recompute(cell, keys) -> {:ok, changed}`). An op writes its rows and returns its changed keys; nothing else is asked of it. |
 | **Node authoring** | `ReactiveDag.Node` | the authoring surface — an **Ash resource extension**: a resource declares its op + dependencies + computation in a `reactive do … end` block. The resource *is* the node **and** its own payload table. `ReactiveDag.Node.graph/2` assembles the `Plan` from the node resources. |
 | **Payload loop** | `ReactiveDag.Node.Payload` | writes a combinator's row into the node's own resource (the default; omit `upsert:`). |
 | **Config validation** | `ReactiveDag.Config` | `validate!/0` at boot, reporting EVERY problem at once (missing `:repo`, a writer that doesn't implement the behaviour, a table name that isn't a SQL identifier) instead of raising at the first query, possibly a long way into a deploy. The host calls it; the library starts no application of its own. |
@@ -53,11 +50,10 @@ decides *how* or *what a value means*. Each host brings its domain at the seams:
 | **Scanner declaration** | `scan Mod` | a leaf names the `ReactiveDag.Source` that feeds it, making the scanner↔leaf pairing a fact of the graph: `Node.graph/2` verifies the module implements the behaviour AND that its own `leaf_cells/1` claims this leaf, and `Source.poll_all/2` finds every scanner from the plan instead of a hand-kept list. Single-leaf; a multi-leaf source uses `leaf_cells/1` + `verify!/2`. |
 | **Scanner seam** | `ReactiveDag.Source` | the behaviour a scanner implements (`id / leaf_cells / poll`) — reads external state into a leaf in a *poll* phase outside the drain; `verify!/2` checks every declared leaf resolves to a real cell. |
 
-The host owns its **physical tables** (dirty + tuple, named via config), its
-**op algebra**, its **recompute executor**, and any **extension columns** on the
-tuple (the portal's `strength` modality, cascade's tombstone/fingerprint
-policy). The library owns the spine and the schedule; the domain differences sit
-on named seams, not forks.
+The host owns its **resources** (every node's results are its own rows), its
+**op algebra**, and its **recompute executor**. The library owns the schedule
+and one table — the dirty frontier. Domain differences sit on named seams, not
+forks.
 
 ## Authoring a node
 
@@ -84,7 +80,7 @@ defmodule MyApp.BudgetRollups do
   reactive do
     op :fold
     # ASH-FIRST: the library reads :fiscal_lines, groups by the attributes,
-    # folds each group, upserts the row by its Ash IDENTITY, and Op.puts only
+    # folds each group, upserts the row by its Ash IDENTITY, and reports only
     # the changed keys. `recompute_by` names the UNIT a change invalidates —
     # it supplies the edge, the grouping and the claim rule. Every slot has an
     # escape hatch when the shape outgrows attributes.
@@ -102,7 +98,7 @@ uses the `compute Module` escape hatch.
 
 Authoring is **Ash-first** — start from what Ash expresses declaratively and
 step outward only as far as the shape demands. Each form writes the result set
-(into the node's resource, or a custom `upsert:`) and `Op.put`s only the
+(into the node's resource, or a custom `upsert:`) and reports only the
 changed keys:
 
 - **`aggregate`** — the datastore does it: group + aggregate a relationship
@@ -133,7 +129,7 @@ changed keys:
   nils (the gap is information). fn escapes for computed side keys/columns.
 - **`run :action`** — the Ash-native escape hatch: the recompute is a GENERIC
   action on the node's own resource (`(keys, cell_id) -> changed keys`; the
-  action writes its domain, the library `Op.put`s). Arguments, policies,
+  action writes its domain, its returned keys propagate). Arguments, policies,
   `Ash.run_action` testability — the computation stays a first-class action.
 
 Beyond Ash entirely — an LLM call, a PDF/Tigris fetch, a bespoke multi-input
@@ -191,9 +187,7 @@ plan = ReactiveDag.Node.graph([BudgetRollups, FiscalLines, …], for_each: &fetc
 # config
 config :reactive_dag,
   repo: MyApp.Repo,
-  dirty_table: "my_dirty",
-  tuple_table: "my_tuple",
-  coordination_writer: MyApp.Writer   # optional; a spine-only default ships
+  dirty_table: "my_dirty"
 ```
 
 A host can also assemble cells by hand and bring its own strategy/key_rule —
@@ -249,8 +243,8 @@ queue. A deferred/approval-gated write — where a change genuinely waits, unapp
 for a human — is the case that would justify bringing it back.
 
 Status: **both hosts run on the substrate** — the shared engine spans a per-key
-Elixir recompute (cascade) and a set-based SQL recompute (the portal), all
-coordination writes routed through the seam, proven by both suites green. Cascade
+Elixir recompute (cascade) and a set-based SQL recompute (the portal), proven by
+both suites green. Cascade
 authors several ops via the `Node` `reduce`/`join` combinators; the standalone
 compliance app consumes tagged releases. See
 [ADR-001](https://hexdocs.pm/reactive_dag/adr-001-reactive-dag-library.html)

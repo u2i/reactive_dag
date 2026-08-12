@@ -109,19 +109,9 @@ defmodule ReactiveDag.JoinExpandCombinatorTest do
     end
   end
 
-  defmodule NullWriter do
-    @behaviour ReactiveDag.CoordinationWriter
-    @impl true
-    def put(_cell_id, _key, _opts), do: :ok
-    @impl true
-    def delete(_cell_id, _keys), do: :ok
-  end
 
   setup do
     Process.register(self(), ReactiveDag.JoinExpandCombinatorTest)
-    prev = Application.get_env(:reactive_dag, :coordination_writer)
-    Application.put_env(:reactive_dag, :coordination_writer, NullWriter)
-    on_exit(fn -> Application.put_env(:reactive_dag, :coordination_writer, prev) end)
 
     for {k, kind, acct, amount, fy} <- [
           {"b1", "budget", "A1010", 100.0, 2025},
