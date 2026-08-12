@@ -41,6 +41,109 @@ defmodule ReactiveDag.Node.KeyRule do
 
   def rule(_parent, _child, changed), do: {:keys, changed}
 
+  @doc """
+  `rule/3` with the SNAPSHOTS the changed keys were marked with — the child rows
+  as they were, which `ReactiveDag.Frontier` captured at mark time.
+
+  A snapshot survives its row, so a `:group` claim stays precise in the two
+  cases a live lookup cannot handle:
+
+    * the row was **deleted** — nothing to read, but the snapshot still names
+      the unit it belonged to;
+    * the row **moved** between units — the live row names where it landed, the
+      snapshot names where it came from, and BOTH need repricing.
+
+  Keys with no snapshot (a source-fed leaf has no Ash row behind it) fall back
+  to `rule/3` exactly as before, so the two paths coexist.
+  """
+  @spec rule(Cell.t(), Cell.id(), [String.t()], %{String.t() => map()}) ::
+          ReactiveDag.KeyRule.result()
+  def rule(parent, child, changed, priors) when map_size(priors) == 0,
+    do: rule(parent, child, changed)
+
+  def rule(%Cell{meta: %{key_rule: :group} = meta} = parent, child, changed, priors) do
+    spec = meta[:reduce] || meta[:join]
+
+    case snapshot_claims(spec, meta, changed, priors) do
+      :none ->
+        rule(parent, child, changed)
+
+      {:ok, from_snapshots} ->
+        # The snapshot names where each row WAS; the live lookup names where it
+        # is NOW. A move needs both, so the live path still runs over every
+        # changed key and the two sets are unioned.
+        #
+        # The live lookup degrading to :all no longer forces :all overall: that
+        # degradation means "a row vanished and I cannot name its group", which
+        # is exactly what the snapshot just answered.
+        case rule(parent, child, changed) do
+          :all -> {:keys, from_snapshots}
+          {:keys, looked_up} -> {:keys, Enum.uniq(from_snapshots ++ looked_up)}
+        end
+    end
+  end
+
+  def rule(parent, child, changed, _priors), do: rule(parent, child, changed)
+
+  # Derive each snapshotted key's unit by running the combinator's own grouping
+  # against the stored row. Returns the keys derived, plus the changed keys that
+  # had no snapshot (which still need the live path).
+  defp snapshot_claims(nil, _meta, _changed, _priors), do: :none
+
+  defp snapshot_claims(spec, meta, changed, priors) do
+    alias ReactiveDag.Node.Recompute.Declarative
+
+    with %ReactiveDag.Node.Reduce{} = r <- spec,
+         plan when is_list(plan) <- meta[:over_source][:group_key_plan] do
+      key_fn = Declarative.key_fn(Map.get(r, :key), Map.get(r, :key_prefix))
+      snapshotted = Enum.filter(changed, &Map.has_key?(priors, &1))
+
+      keys =
+        snapshotted
+        |> Enum.map(&unit_from_snapshot(plan, priors[&1], key_fn))
+        |> Enum.reject(&(&1 == :error))
+
+      # a snapshot we cannot derive from is no better than none: fall back
+      # wholesale rather than claim a partial set
+      if length(keys) < length(snapshotted), do: :none, else: {:ok, keys}
+    else
+      _ -> :none
+    end
+  end
+
+  # The snapshot is jsonb, so its keys are STRINGS and a Calendar bucket's
+  # source is a date that round-tripped as a string — parse it back through the
+  # calculation rather than comparing the wrong thing.
+  defp unit_from_snapshot(plan, prior, key_fn) do
+    values =
+      Enum.map(plan, fn
+        {:attr, name, _string?} ->
+          Map.get(prior, to_string(name), :error)
+
+        {:calendar, kind, of} ->
+          case Map.get(prior, to_string(of)) do
+            nil -> :error
+            raw -> calendar_label(kind, raw)
+          end
+
+        {:calc, _name} ->
+          # an opaque calculation cannot be evaluated from stored attributes
+          :error
+      end)
+
+    if :error in values, do: :error, else: key_fn.(List.to_tuple(values))
+  end
+
+  defp calendar_label(kind, raw) when is_binary(raw) do
+    case Date.from_iso8601(raw) do
+      {:ok, date} -> ReactiveDag.Calendar.label(kind, date)
+      _ -> :error
+    end
+  end
+
+  defp calendar_label(kind, %Date{} = date), do: ReactiveDag.Calendar.label(kind, date)
+  defp calendar_label(_kind, _raw), do: :error
+
   defp group_claims(nil, _source, _changed), do: :all
   defp group_claims(_spec, nil, _changed), do: :all
 

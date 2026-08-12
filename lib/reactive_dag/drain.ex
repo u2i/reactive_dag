@@ -111,8 +111,13 @@ defmodule ReactiveDag.Drain do
         # test `keys == ["*"]` to mean "recompute the whole cell", so a stray "*"
         # riding alongside real keys must collapse — otherwise the whole-cell branch
         # is missed and the specific keys are processed as if "*" were a real key.
-        claimed = Frontier.claim(cell_id)
+        entries = Frontier.claim_with_priors(cell_id)
+        claimed = Enum.map(entries, &elem(&1, 0))
         keys = if "*" in claimed, do: ["*"], else: claimed
+
+        # the snapshot each claimed key was marked with, so this cell's parents
+        # can derive their claims from a row that may no longer exist
+        priors = for {k, p} <- entries, not is_nil(p), into: %{}, do: {k, p}
 
         {cause, steps} =
           cond do
@@ -142,7 +147,7 @@ defmodule ReactiveDag.Drain do
               # a vanished key in the parent. So escalate downstream when the claim was
               # whole, regardless of the per-parent key_rule.
               prop = if "*" in keys, do: :all, else: changed
-              parents = propagate(plan, cell_id, prop, opts)
+              parents = propagate(plan, cell_id, prop, opts, priors)
 
               step = %{
                 claimed: keys,
@@ -198,19 +203,19 @@ defmodule ReactiveDag.Drain do
 
   # Each clause returns the list of parent cell_ids it dirtied (so the drain can
   # record them as triggered-by this cell).
-  defp propagate(_plan, _cell_id, [], _opts), do: []
+  defp propagate(_plan, _cell_id, [], _opts, _priors), do: []
 
   # :all — the cell was claimed whole; every parent recomputes whole too.
-  defp propagate(plan, cell_id, :all, _opts) do
+  defp propagate(plan, cell_id, :all, _opts, _priors) do
     parents = Map.get(plan.parents, cell_id, [])
     Enum.each(parents, &Frontier.mark_dirty(&1, ["*"], "propagated (all) from #{cell_id}"))
     parents
   end
 
-  defp propagate(plan, cell_id, changed, opts) do
+  defp propagate(plan, cell_id, changed, opts, priors) do
     key_rule = opts[:key_rule] || ReactiveDag.KeyRule
 
-    parents = Graph.dirty_parents(plan, cell_id, changed, key_rule)
+    parents = Graph.dirty_parents(plan, cell_id, changed, key_rule, priors)
 
     Enum.each(parents, fn {parent_id, keys} ->
       Frontier.mark_dirty(parent_id, keys, "propagated from #{cell_id}")

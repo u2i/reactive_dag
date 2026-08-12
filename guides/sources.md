@@ -244,6 +244,20 @@ mark.)
 It is **opt-in and not implied by `leaf?`** — a leaf fed by a `Source` poll
 would otherwise double-trigger, marking itself on the write the poll just made.
 
+**The mark carries a snapshot of the row as it was.** `after_action` fires after
+the change is applied, so the *result* names where a row went — but a parent
+also needs to know where it came FROM. The changeset's pre-change data is
+recorded alongside the key, which is the only thing that survives:
+
+| case | without a snapshot | with one |
+|---|---|---|
+| a row is **deleted** | nothing to read → the claim degrades to whole-cell | the snapshot still names its unit |
+| a row **moves** between units | only the destination is claimed; the origin silently keeps counting it | both units are claimed |
+
+Coalescing keeps the **first** snapshot (`ON CONFLICT DO NOTHING`): if a row is
+written twice before a drain, the oldest prior state is the one that names the
+unit it was in when the graph last settled.
+
 Keys derive exactly as the payload loop's do: a composite primary key
 serializes in primary-key order (`"gf|2025"`), otherwise the payload key
 attribute. A record with no derivable key escalates to a whole-cell claim

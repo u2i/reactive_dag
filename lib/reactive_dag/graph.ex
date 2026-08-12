@@ -26,23 +26,38 @@ defmodule ReactiveDag.Graph do
   (whole-cell recompute, the `"*"` wildcard) or `{:keys, mapped}`.
 
   Returns `[{parent_id, [key]}]`. `key_rule` defaults to identity mapping.
+
+  `priors` maps a changed key to the child row AS IT WAS when marked dirty (see
+  `ReactiveDag.Frontier`). A rule that implements `rule/4` receives it and can
+  derive a claim from a row that no longer exists; one implementing only
+  `rule/3` is called exactly as before, so a host's own KeyRule keeps working
+  untouched.
   """
-  @spec dirty_parents(Plan.t(), Cell.id(), [String.t()], module()) ::
+  @spec dirty_parents(Plan.t(), Cell.id(), [String.t()], module(), map()) ::
           [{Cell.id(), [String.t()]}]
-  def dirty_parents(%Plan{} = plan, child_id, keys, key_rule \\ ReactiveDag.KeyRule) do
+  def dirty_parents(%Plan{} = plan, child_id, keys, key_rule \\ ReactiveDag.KeyRule, priors \\ %{}) do
     plan.parents
     |> Map.get(child_id, [])
     |> Enum.map(fn parent_id ->
       parent = Map.fetch!(plan.cells, parent_id)
 
-      case apply_rule(key_rule, parent, child_id, keys) do
+      case apply_rule(key_rule, parent, child_id, keys, priors) do
         :all -> {parent_id, ["*"]}
         {:keys, mapped} -> {parent_id, mapped}
       end
     end)
   end
 
-  defp apply_rule(mod, parent, child, keys), do: mod.rule(parent, child, keys)
+  # rule/4 when the module has it, rule/3 otherwise — the seam is public and
+  # hosts implement it, so widening the callback would break them for a feature
+  # they have not asked for.
+  defp apply_rule(mod, parent, child, keys, priors) do
+    if function_exported?(mod, :rule, 4) do
+      mod.rule(parent, child, keys, priors)
+    else
+      mod.rule(parent, child, keys)
+    end
+  end
 
   # ---- parents: inverse of each cell's inputs, EXCLUDING context edges ----
   # A cell's `inputs` are every edge — used for validation + depth ordering +

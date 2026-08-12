@@ -107,8 +107,8 @@ defmodule ReactiveDag.UnionNodeTest do
 
     def query!("INSERT INTO " <> _, params) do
       params
-      |> Enum.chunk_every(4)
-      |> Enum.each(fn [cell, key, _r, _t] -> put(cell, key, "present") end)
+      |> Enum.chunk_every(5)
+      |> Enum.each(fn [cell, key, _r, _t, _prior] -> put(cell, key, "present") end)
 
       %{rows: []}
     end
@@ -120,7 +120,7 @@ defmodule ReactiveDag.UnionNodeTest do
           {Enum.map(mine, fn {{_, k}, _} -> k end), Map.new(rest)}
         end)
 
-      %{rows: Enum.map(keys, &[&1])}
+      %{rows: Enum.map(keys, &[&1, nil])}
     end
 
     def query!("SELECT COUNT" <> _, _), do: %{rows: [[Agent.get(__MODULE__, &map_size/1)]]}

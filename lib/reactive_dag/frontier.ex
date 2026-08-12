@@ -26,32 +26,50 @@ defmodule ReactiveDag.Frontier do
 
   @type key :: String.t()
 
-  @doc "Mark `keys` of `cell` dirty, coalesced (idempotent per (cell,key))."
-  @spec mark_dirty(String.t(), [key()], String.t() | nil) :: :ok
+  @doc """
+  Mark `keys` of `cell` dirty, coalesced (idempotent per `(cell, key)`).
+
+  `keys` is a list of key strings, or of `{key, prior}` pairs where `prior` is
+  the row AS IT WAS when marked — a map the parent can derive its claim from
+  without reading the live row.
+
+  That snapshot is what makes a claim survive its subject. A deleted row cannot
+  say which unit it belonged to, and a row that MOVED between units cannot say
+  where it came from; the snapshot answers both, so a claim stays precise where
+  it would otherwise degrade to a whole-cell recompute.
+
+  Coalescing keeps the FIRST snapshot (`ON CONFLICT DO NOTHING`), which is
+  deliberate: if a row is written twice before a drain, the oldest prior state
+  is the one that names the unit it started in.
+  """
+  @spec mark_dirty(String.t(), [key() | {key(), map() | nil}], String.t() | nil) :: :ok
   def mark_dirty(_cell, [], _reason), do: :ok
 
   def mark_dirty(cell, keys, reason) do
-    keys = Enum.uniq(keys)
+    entries = keys |> Enum.map(&normalize_entry/1) |> Enum.uniq_by(&elem(&1, 0))
     now = DateTime.utc_now()
 
     placeholders =
-      keys
+      entries
       |> Enum.with_index()
-      |> Enum.map_join(", ", fn {_k, i} ->
-        b = i * 4
-        "($#{b + 1}, $#{b + 2}, $#{b + 3}, $#{b + 4})"
+      |> Enum.map_join(", ", fn {_e, i} ->
+        b = i * 5
+        "($#{b + 1}, $#{b + 2}, $#{b + 3}, $#{b + 4}, $#{b + 5})"
       end)
 
-    params = Enum.flat_map(keys, fn k -> [cell, k, reason, now] end)
+    params = Enum.flat_map(entries, fn {k, prior} -> [cell, k, reason, now, prior] end)
 
     query!(
-      "INSERT INTO #{dirty()} (cell_id, key, reason, enqueued_at) VALUES #{placeholders} " <>
-        "ON CONFLICT (cell_id, key) DO NOTHING",
+      "INSERT INTO #{dirty()} (cell_id, key, reason, enqueued_at, prior) " <>
+        "VALUES #{placeholders} ON CONFLICT (cell_id, key) DO NOTHING",
       params
     )
 
     :ok
   end
+
+  defp normalize_entry({key, prior}) when is_map(prior) or is_nil(prior), do: {key, prior}
+  defp normalize_entry(key), do: {key, nil}
 
   @doc """
   Every cell with dirty keys waiting — what the next drain would work on.
@@ -76,9 +94,21 @@ defmodule ReactiveDag.Frontier do
 
   @doc "Atomically claim (delete-returning) all dirty keys for `cell`."
   @spec claim(String.t()) :: [key()]
-  def claim(cell) do
-    %{rows: rows} = query!("DELETE FROM #{dirty()} WHERE cell_id = $1 RETURNING key", [cell])
-    Enum.map(rows, fn [k] -> k end)
+  def claim(cell), do: claim_with_priors(cell) |> Enum.map(&elem(&1, 0))
+
+  @doc """
+  `claim/1`, but returning `{key, prior}` pairs — the snapshot each key was
+  marked with (`nil` for a source-fed key, which has no row behind it).
+
+  The drain uses this so a parent can derive its claim from what the row WAS,
+  which is the only thing that survives a delete.
+  """
+  @spec claim_with_priors(String.t()) :: [{key(), map() | nil}]
+  def claim_with_priors(cell) do
+    %{rows: rows} =
+      query!("DELETE FROM #{dirty()} WHERE cell_id = $1 RETURNING key, prior", [cell])
+
+    Enum.map(rows, fn [k, prior] -> {k, prior} end)
   end
 
   @doc "True when nothing is dirty."
