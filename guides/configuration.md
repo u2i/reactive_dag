@@ -21,8 +21,6 @@ config :reactive_dag,
 | [`:dirty_table`](#dirty_table-tuple_table) | `"reactive_dag_dirty"` | no | `Frontier`, `Migration` |
 | [`:tuple_table`](#dirty_table-tuple_table) | `"reactive_dag_tuple"` | no | `Tuple` |
 | [`:coordination_writer`](#coordination_writer) | `ReactiveDag.Tuple.Writer` | no | `CoordinationWriter` |
-| [`:attestation_resource`](#attestation_resource-attestation_cell) | — | only with attestations | `Attestation` |
-| [`:attestation_cell`](#attestation_resource-attestation_cell) | `"attestations"` | no | `Attestation` |
 | [`:set_op_templates`](#set_op_templates) | `%{}` | only with `SetOp` | `SetOp` |
 | [`:insights_keep`](#insights_keep) | `20` | no | `Insights` |
 
@@ -86,22 +84,6 @@ be a pure spine call.
 A writer may also report a **changed** boolean from `put/3` (true iff the row's
 verdict actually flipped), which the payload loop uses to scope propagation to
 real changes. Returning `:ok` is correct too — just less scoped.
-
-### `:attestation_resource`, `:attestation_cell`
-
-Only relevant to hosts using [attestations](attestations.html) — human sign-off
-as a first-class DAG input.
-
-```elixir
-config :reactive_dag,
-  attestation_resource: MyApp.Attestation.Record,
-  attestation_cell: "attestations"
-```
-
-`:attestation_resource` has **no default** and raises with a full example
-resource when attestation code runs without it. `:attestation_cell` names the
-store leaf the library injects into the graph; change it only if `"attestations"`
-collides with one of your own cell ids.
 
 ### `:set_op_templates`
 

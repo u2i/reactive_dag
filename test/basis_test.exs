@@ -116,12 +116,6 @@ defmodule ReactiveDag.BasisTest do
     end
   end
 
-  test "the attestation Basis is this one with its fields fixed" do
-    rows = [%{key: "a", status: "present"}]
-
-    assert ReactiveDag.Attestation.Basis.digest(rows) ==
-             Basis.digest(rows, fields: [:key, :status])
-  end
   describe "how an attestable row emerges" do
     # The row and its basis come from the SAME `into:`. That matters: a basis
     # computed anywhere else could describe a different moment than the row it

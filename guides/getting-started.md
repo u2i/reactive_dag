@@ -98,10 +98,6 @@ def change do
 end
 ```
 
-(If you use attestations, the record store is different: it is an **Ash
-resource you define**, with generated migrations — see the
-[Attestations](attestations.md) guide.)
-
 ## A first graph
 
 Two nodes: a leaf fed from outside, and a derived rollup over it.
@@ -225,6 +221,5 @@ only the verdict and freshness, joined back by `key`.
 - [Authoring nodes](authoring-nodes.md) — every node shape and combinator.
 - [Sources and scanning](sources.md) — the poll/drain split and the
   honest-gap discipline.
-- [Attestations](attestations.md) — human sign-off as a first-class input.
 - [The seams](seams.md) — custom recompute strategies, key rules, extension
   columns, and hand-assembled graphs.

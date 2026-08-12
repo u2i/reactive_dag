@@ -73,8 +73,7 @@ defmodule ReactiveDag.Config do
         &repo/0,
         &coordination_writer/0,
         &table_names/0,
-        &insights_keep/0,
-        &attestation/0
+        &insights_keep/0
       ],
       & &1.()
     )
@@ -152,38 +151,6 @@ defmodule ReactiveDag.Config do
       nil -> []
       n when is_integer(n) and n > 0 -> []
       other -> ["`:insights_keep` must be a positive integer, got #{inspect(other)}"]
-    end
-  end
-
-  # Attestations are opt-in: a host not using them sets neither key, and that is
-  # not a problem. But a resource that IS set must be a real one, and a cell id
-  # must be a string — half-configured is worse than unconfigured.
-  defp attestation do
-    resource_problems() ++ cell_problems()
-  end
-
-  defp resource_problems do
-    case Application.get_env(:reactive_dag, :attestation_resource) do
-      nil ->
-        []
-
-      resource when is_atom(resource) ->
-        if Code.ensure_loaded?(resource) do
-          []
-        else
-          ["`:attestation_resource` is #{inspect(resource)}, which is not a loadable module"]
-        end
-
-      other ->
-        ["`:attestation_resource` must be a module, got #{inspect(other)}"]
-    end
-  end
-
-  defp cell_problems do
-    case Application.get_env(:reactive_dag, :attestation_cell) do
-      nil -> []
-      cell when is_binary(cell) -> []
-      other -> ["`:attestation_cell` must be a string, got #{inspect(other)}"]
     end
   end
 
