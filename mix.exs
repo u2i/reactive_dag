@@ -5,7 +5,7 @@ defmodule ReactiveDag.MixProject do
 
   # release-please manages this version (and the tag/CHANGELOG) via the
   # annotation below — bump it by merging the release PR, not by hand.
-  @version "0.17.0-rc.2" # x-release-please-version
+  @version "0.17.0-rc.3" # x-release-please-version
 
   def project do
     [

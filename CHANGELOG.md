@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.17.0-rc.3](https://github.com/u2i/reactive_dag/compare/v0.17.0-rc.2...v0.17.0-rc.3) (2026-08-12)
+
+
+### ⚠ BREAKING CHANGES
+
+* remove attestations from the library
+
+### Features
+
+* remove attestations from the library ([c2bf45e](https://github.com/u2i/reactive_dag/commit/c2bf45e68dfd882ff15c72374cb330f174529424))
+
 ## [0.17.0-rc.2](https://github.com/u2i/reactive_dag/compare/v0.17.0-rc.1...v0.17.0-rc.2) (2026-08-12)
 
 
