@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.17.0-rc.5](https://github.com/u2i/reactive_dag/compare/v0.17.0-rc.4...v0.17.0-rc.5) (2026-08-12)
+
+
+### ⚠ BREAKING CHANGES
+
+* the modules and config keys listed above are removed. A host with a coordination-tuple table can drop it; nothing reads or writes it. A host with a custom `CoordinationWriter` moves its extension columns (`source_ref`, `last_seen_at`, `tombstoned_at`, `strength`) onto the node's own resource, where the rest of the row already is. A leaf driver calling `Tuple.reconcile/3` calls `ReactiveDag.Node.Rows.reconcile/3` with the cell instead of the cell id. `Tuple.reconcile_set/3` has no replacement: it batched the spine write, and there is no spine to batch.
+* the six functions above are removed. A caller wanting a node's statuses uses `ReactiveDag.Node.Rows` (which reads the resource, with policies and filters); a caller wanting freshness reads a column on the node's own resource. `ReactiveDag.Tuple.Writer.put/3` returns `:ok` rather than a boolean, which the CoordinationWriter contract already allowed and reads as "assume changed".
+
+### Features
+
+* fingerprint — what counts as the same observation ([#73](https://github.com/u2i/reactive_dag/issues/73)) ([f631a1b](https://github.com/u2i/reactive_dag/commit/f631a1b5f836f95b52071f7746b6a7e87ee62f7f))
+* remove the coordination tuple entirely ([ae23687](https://github.com/u2i/reactive_dag/commit/ae2368799ad2fa7676800e780907c189d0122c1c))
+* the coordination spine is a presence set ([fb45d39](https://github.com/u2i/reactive_dag/commit/fb45d39659b54927cbae6fb92551f988eca3c16b))
+
 ## [0.17.0-rc.4](https://github.com/u2i/reactive_dag/compare/v0.17.0-rc.3...v0.17.0-rc.4) (2026-08-12)
 
 
