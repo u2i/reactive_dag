@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.17.0-rc.1](https://github.com/u2i/reactive_dag/compare/v0.17.0-rc...v0.17.0-rc.1) (2026-08-11)
+
+
+### Bug Fixes
+
+* **ci:** publish to hex from release-please's own run ([5f2b266](https://github.com/u2i/reactive_dag/commit/5f2b266fe9eae8642a7b6170b74e8cd82bcd55a4))
+* **ci:** publish to hex from release-please's own run ([dba486c](https://github.com/u2i/reactive_dag/commit/dba486c341e427d9806e5a1a72019ef2cf813eeb))
+
 ## [0.17.0-rc](https://github.com/u2i/reactive_dag/compare/v0.16.0...v0.17.0-rc) (2026-08-11)
 
 
