@@ -29,19 +29,42 @@ defmodule ReactiveDag.Node.Payload do
 
   require Ash.Query
 
+  alias ReactiveDag.Node.Fingerprint
+
   @doc """
   Upsert `row` into `resource` under `cell_key` (written to `key_attr`), via
   `action`. Returns `:changed` (created, or a writable attr differs) or
   `:unchanged`. `row`'s `:key` field is dropped before writing.
+
+  ## Options
+
+    * `:fingerprint` — compare ONE value instead of every attribute: a field
+      list (hashed) or `(row -> value)`. The value is written to
+      `:fingerprint_attribute` (default `:fingerprint`), so the next call has
+      something to compare against.
+
+      This is what a SOURCE-FED LEAF needs. Comparing every attribute is right
+      for a derived node, where every attribute is part of the result — but a
+      leaf's row carries fields that move on every observation without the
+      observation having changed: a `last_seen_at` by definition, an `etag` a
+      server may re-issue for identical bytes. Comparing those reports a change
+      on every poll and re-runs the whole cascade.
+
+    * `:fingerprint_attribute` — where the value is stored (default
+      `:fingerprint`).
   """
-  @spec upsert(module(), atom(), String.t(), map(), atom()) :: :changed | :unchanged
-  def upsert(resource, key_attr, cell_key, row, action \\ :upsert) do
-    attrs = row |> Map.drop([:key]) |> Map.put(key_attr, cell_key)
+  @spec upsert(module(), atom(), String.t(), map(), atom(), keyword()) :: :changed | :unchanged
+  def upsert(resource, key_attr, cell_key, row, action \\ :upsert, opts \\ []) do
+    attrs =
+      row
+      |> Map.drop([:key])
+      |> Map.put(key_attr, cell_key)
+      |> stamp_fingerprint(row, resource, opts)
 
     changed? =
       case existing(resource, key_attr, cell_key) do
         nil -> true
-        record -> differs?(record, attrs)
+        record -> moved?(record, attrs, opts)
       end
 
     {:ok, _} =
@@ -57,16 +80,17 @@ defmodule ReactiveDag.Node.Payload do
   its identity fields, the upsert conflicts on the primary key (Ash's default
   for `upsert? true`), and no key column exists — the cell key is the
   identity's serialization, derived elsewhere. Returns `:changed` | `:unchanged`
-  with the same read-compare change detection as `upsert/5`.
+  with the same read-compare change detection as `upsert/6`, and the same
+  `:fingerprint` / `:fingerprint_attribute` options.
   """
-  @spec upsert_identity(module(), [atom()], map(), atom()) :: :changed | :unchanged
-  def upsert_identity(resource, identity_fields, row, action \\ :upsert) do
-    attrs = Map.drop(row, [:key])
+  @spec upsert_identity(module(), [atom()], map(), atom(), keyword()) :: :changed | :unchanged
+  def upsert_identity(resource, identity_fields, row, action \\ :upsert, opts \\ []) do
+    attrs = row |> Map.drop([:key]) |> stamp_fingerprint(row, resource, opts)
 
     changed? =
       case existing_by(resource, Map.take(attrs, identity_fields)) do
         nil -> true
-        record -> differs?(record, attrs)
+        record -> moved?(record, attrs, opts)
       end
 
     {:ok, _} =
@@ -158,5 +182,46 @@ defmodule ReactiveDag.Node.Payload do
   # a writable attr differs between the stored record and the row we'd write.
   defp differs?(record, attrs) do
     Enum.any?(attrs, fn {attr, value} -> Map.get(record, attr) != value end)
+  end
+
+  # a declared fingerprint REPLACES the all-attribute comparison rather than
+  # adding to it — the point is to ignore the fields that move on their own.
+  #
+  # A nil fingerprint (the node declares none, or a `(row -> value)` fn returned
+  # nil because the source could not determine it) falls back to comparing
+  # everything. That is the safe direction: it may report a change that did not
+  # happen, where trusting a nil would miss one that did.
+  defp moved?(record, attrs, opts) do
+    case fingerprint_attr(opts, attrs) do
+      {attr, value} when not is_nil(value) -> Map.get(record, attr) != value
+      _ -> differs?(record, attrs)
+    end
+  end
+
+  defp fingerprint_attr(opts, attrs) do
+    case opts[:fingerprint] do
+      nil ->
+        nil
+
+      _ ->
+        attr = opts[:fingerprint_attribute] || Fingerprint.default_attribute()
+        {attr, Map.get(attrs, attr)}
+    end
+  end
+
+  defp stamp_fingerprint(attrs, row, resource, opts) do
+    case opts[:fingerprint] do
+      nil ->
+        attrs
+
+      spec ->
+        Fingerprint.put(
+          attrs,
+          opts[:fingerprint_attribute] || Fingerprint.default_attribute(),
+          Fingerprint.of(spec, row),
+          resource,
+          "fingerprint:"
+        )
+    end
   end
 end

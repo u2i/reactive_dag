@@ -53,8 +53,8 @@ What you write is the *action* and the mapping.
 
 ## Fingerprinting: not paying twice for the same answer
 
-`fingerprint:` names the input fields the result depends on. Their hash is
-stored on the output row; a recompute whose hash matches **does not call the
+`fingerprint:` names what the result depends on — input fields, whose hash is
+stored on the output row. A recompute whose hash matches **does not call the
 action at all**:
 
 ```
@@ -62,6 +62,18 @@ whole-cell claim, nothing changed  →  %{called: 0, skipped: 2}
 one transcript's :body edited      →  %{called: 1, skipped: 1}
 a field NOT in the fingerprint     →  %{called: 0, skipped: 2}
 ```
+
+It also takes a function, `(row -> value)`, for when "the same input" is not a
+plain field comparison — a normalized body, a hash of a hash, a version folded
+into a digest:
+
+```elixir
+fingerprint fn row -> :crypto.hash(:md5, normalize(row.body)) end
+```
+
+The same vocabulary declares what counts as a changed *observation* on a
+source-fed leaf (see [Sources and scanning](sources.html)): one concept, one
+implementation, at both rungs.
 
 That counts map rides on the drain's `%Report{}` step, so the saving is
 visible rather than assumed (`Report.total(report, :skipped)`).

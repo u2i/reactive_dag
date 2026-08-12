@@ -81,19 +81,79 @@ otherwise hand-rolls:
 ```
 current  = the cell's current keys (read from its own resource)
 want     = what the scan found
-upsert   each want key    → host writes the row; returns true iff CHANGED
+upsert   each want key    → the row you observed; the library writes it
 vanished = current − want → retired (destroyed, or a host tombstone policy)
 ⇒ changed_upserts ++ vanished   (the keys to propagate)
 ```
 
-The host supplies the variation points — `upsert:` (what a row contains and
-what counts as changed is domain logic) and `retire:` (destroy by default; a
-retain-if-vanished host passes a tombstone function). Vanished keys always
-propagate: something disappearing is a change.
+With a `fingerprint` on the leaf, a poll is fetch → build rows → reconcile:
 
-A leaf written by ordinary Ash actions rather than a scan does not need this at
-all: declare `dirties_on [:create, :update, :destroy]` and each write marks its
-own key dirty, inside the write's transaction.
+```elixir
+def poll(_opts) do
+  with {:ok, docs} <- Crawler.fetch() do
+    {:ok, changed} =
+      ReactiveDag.Node.Rows.reconcile(cell, Enum.map(docs, & &1.url),
+        upsert: fn url -> Map.get(by_url, url) end     # the row, or nil
+      )
+
+    {:ok, %{changed: changed, unreachable: []}}
+  end
+end
+```
+
+Returning `nil` for a key means *I could not observe this one*: nothing is
+written and the key is not reported. That is the honest gap (below) expressed in
+a return value rather than a rule you have to remember.
+
+`upsert:` also accepts `(key -> boolean)` — write the row yourself and say
+whether it moved — for a leaf whose write is not an upsert into its own
+resource. `retire:` is destroy by default; a retain-if-vanished host passes a
+tombstone function. Vanished keys always propagate: something disappearing is a
+change.
+
+A leaf written by ordinary Ash actions rather than a scan needs none of this:
+declare `dirties_on [:create, :update, :destroy]` and each write marks its own
+key dirty, inside the write's transaction.
+
+## `fingerprint`: what counts as the same observation
+
+A leaf's row carries fields that move on **every** observation without the
+observation having changed anything — a `last_seen_at` by definition, an `etag`
+a server may re-issue for identical bytes. The library's default change
+detection compares every attribute, so those fields report a change on every
+poll, and everything downstream recomputes. For a graph whose downstream work is
+LLM extraction over PDFs, that is the entire cost the engine exists to avoid.
+
+Name the one value that decides instead:
+
+```elixir
+reactive do
+  id :agenda_docs
+  leaf? true
+  scan MyApp.Sources.AgendaCenter
+
+  fingerprint [:content_md5]        # hashed and stored on the row
+end
+```
+
+Or compute it, when "the same observation" is not a plain field comparison:
+
+```elixir
+  # a re-titled meeting re-fires its shell, even though the PDF has not moved
+  fingerprint fn row -> "#{row.content_md5}|#{:erlang.phash2(row.title)}" end
+  fingerprint_attribute :digest     # default is :fingerprint
+```
+
+The value is written to the row, so the next pass has something to compare
+against — the resource needs that column, and you get a raise naming it if it is
+missing rather than a fingerprint that silently never matches.
+
+**What counts is yours to decide.** Usually it is the content digest;
+deliberately not always. The library only needs somewhere to put the answer.
+
+This is the same `fingerprint` vocabulary `per_key` uses to skip an expensive
+action when its inputs have not moved — one concept, one implementation, at two
+rungs of the ladder.
 
 ## The honest-gap discipline
 
@@ -107,7 +167,10 @@ estate with no members, which typically rolls up as *vacuously green*. A scan
 that couldn't look must never render as a scan that found nothing.
 
 So on failure: write nothing, retire nothing, and report the outage in the poll
-result (`unreachable:`) so the host can surface it. The stale rows that remain
+result (`unreachable:`) so the host can surface it. Within a partially-successful
+scan, returning `nil` from `upsert:` for the keys you could not observe does the
+same thing per-key — but a scan that failed entirely must not reach `reconcile`
+with an empty want-set at all, because *every* key would then read as vanished. The stale rows that remain
 are the *truthful* state: last known, and aging — put a `last_seen_at` column on
 the leaf's resource if you want that visible.
 

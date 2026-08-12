@@ -599,13 +599,14 @@ defmodule ReactiveDag.Node do
             "whose name matches an input field."
       ],
       fingerprint: [
-        type: {:list, :atom},
+        type: {:or, [{:fun, 1}, {:list, :atom}]},
         required: false,
         doc:
-          "input fields the result depends on. Their hash is stored on the output row " <>
-            "(`fingerprint_attribute`, default `:fingerprint`); a recompute whose hash " <>
-            "matches SKIPS the action entirely and reports the key unchanged. Omit to " <>
-            "call every time."
+          "what the result depends on: input fields (their hash), or `(row -> value)` " <>
+            "when \"the same input\" is not a plain field comparison. Stored on the " <>
+            "output row (`fingerprint_attribute`, default `:fingerprint`); a recompute " <>
+            "whose value matches SKIPS the action entirely and reports the key " <>
+            "unchanged. Omit to call every time."
       ],
       fingerprint_attribute: [
         type: :atom,
@@ -926,6 +927,23 @@ defmodule ReactiveDag.Node do
             "and a committed one always leaves one. (A NOTIFIER cannot promise that: " <>
             "Ash dispatches notifications after commit.) Opt-in, and not implied by " <>
             "`leaf?` — a leaf fed by a `ReactiveDag.Source` poll would double-trigger."
+      ],
+      fingerprint: [
+        type: {:or, [{:fun, 1}, {:list, :atom}]},
+        required: false,
+        doc:
+          "for a SOURCE-FED LEAF: the one value that decides whether an observation " <>
+            "moved — input fields (their hash), or `(row -> value)` for a computed " <>
+            "digest. `ReactiveDag.Node.Rows.reconcile/3` compares it instead of every " <>
+            "attribute, so a row's `last_seen_at`/`etag` moving does not fire the " <>
+            "cascade. Stored in `fingerprint_attribute` (default `:fingerprint`). " <>
+            "Without it a re-observed row compares on ALL its attributes, which for a " <>
+            "leaf reports a change on every poll."
+      ],
+      fingerprint_attribute: [
+        type: :atom,
+        required: false,
+        doc: "the attribute a leaf's `fingerprint` is stored in (default `:fingerprint`)."
       ],
       payload_key: [
         type: :atom,
@@ -1560,6 +1578,8 @@ defmodule ReactiveDag.Node do
         over: Ext.get_opt(resource, [:reactive], :over, nil),
         payload_key: Ext.get_opt(resource, [:reactive], :payload_key, nil) || derived_payload_key(resource),
         payload_action: Ext.get_opt(resource, [:reactive], :payload_action, nil),
+        fingerprint: Ext.get_opt(resource, [:reactive], :fingerprint, nil),
+        fingerprint_attribute: Ext.get_opt(resource, [:reactive], :fingerprint_attribute, nil),
         identity_fields: identity_fields(resource),
         context_inputs: context_inputs(resource)
       }

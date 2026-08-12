@@ -112,10 +112,16 @@ defmodule ReactiveDag.Node.Rows do
       vanished = current − want → retired
       ⇒ changed_upserts ++ vanished    (the keys to propagate)
 
-  Both variation points stay the host's, because both are domain logic:
+  `:upsert` is called once per want-key, in either of two forms:
 
-    * `:upsert` — `(key -> boolean)`, called per want-key. WHAT a row contains
-      and WHAT counts as changed cannot be guessed from the key alone.
+    * `(key -> row | nil)` — the common case. Return the row you observed and
+      the library writes it, deciding `changed?` against the node's declared
+      `fingerprint` (or every attribute, if it declares none). Return `nil` for
+      a key you could not observe: nothing is written and the key is not
+      reported, which is how a partial outage stays honest.
+    * `(key -> boolean)` — full control. Write the row yourself and say whether
+      it moved. Use this when the write is not an upsert into the node's own
+      resource.
     * `:retire` — how vanished keys leave. Defaults to destroying the row via
       the node's `payload_destroy` action; a host with a retain-if-vanish policy
       passes a `(keys -> any)` fun and marks its own rows instead.
@@ -126,6 +132,10 @@ defmodule ReactiveDag.Node.Rows do
       vanished.
 
   Vanished keys always propagate: something disappearing is a change.
+
+  A leaf declaring `fingerprint` needs no `:upsert` at all for the row-returning
+  form to be worth using — that is the point: `poll/1` becomes fetch, build
+  rows, call reconcile.
 
   > #### The honest gap {: .warning}
   >
@@ -140,7 +150,11 @@ defmodule ReactiveDag.Node.Rows do
     upsert = Keyword.fetch!(opts, :upsert)
     want_set = MapSet.new(want_keys)
 
-    changed_up = want_set |> MapSet.to_list() |> Enum.filter(&(upsert.(&1) == true))
+    changed_up =
+      want_set
+      |> MapSet.to_list()
+      |> Enum.sort()
+      |> Enum.filter(&(observe(&1, upsert, meta) == true))
 
     current = Keyword.get_lazy(opts, :current, fn -> Enum.map(all(cell), & &1.key) end)
     vanished = Enum.reject(current, &MapSet.member?(want_set, &1))
@@ -148,6 +162,44 @@ defmodule ReactiveDag.Node.Rows do
     retire(vanished, Keyword.get(opts, :retire), meta)
 
     {:ok, changed_up ++ vanished}
+  end
+
+  # the host either wrote the row itself and told us whether it moved, or handed
+  # us what it observed and let the library decide.
+  defp observe(key, upsert, meta) do
+    case upsert.(key) do
+      changed? when is_boolean(changed?) -> changed?
+      nil -> false
+      row when is_map(row) -> write(key, row, meta) == :changed
+    end
+  end
+
+  defp write(key, row, meta) do
+    opts = [
+      fingerprint: meta[:fingerprint],
+      fingerprint_attribute: meta[:fingerprint_attribute]
+    ]
+
+    case meta[:identity_fields] do
+      fields when is_list(fields) ->
+        ReactiveDag.Node.Payload.upsert_identity(
+          meta[:resource],
+          fields,
+          row,
+          meta[:payload_action] || :upsert,
+          opts
+        )
+
+      _ ->
+        ReactiveDag.Node.Payload.upsert(
+          meta[:resource],
+          meta[:payload_key] || :key,
+          key,
+          row,
+          meta[:payload_action] || :upsert,
+          opts
+        )
+    end
   end
 
   defp retire([], _how, _meta), do: :ok
