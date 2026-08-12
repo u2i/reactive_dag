@@ -204,10 +204,8 @@ read that isn't Ash at all belongs on the `run`/`compute` rungs.
 
 Two shapes have their own slots instead of `into:`:
 
-- **verdict** — declare `status:` (`(group, items -> status | {status,
-  strength})`). With a `:status` attribute on the resource it writes that
-  column, so the node is an **ordinary payload node** whose row happens to be a
-  verdict — and may carry other columns beside it:
+- **verdict** — a verdict is a **column**, so a node with a table writes one
+  with `into:` like any other:
 
   ```elixir
   attributes do
@@ -217,17 +215,24 @@ Two shapes have their own slots instead of `into:`:
   end
 
   reduce over: :category_totals, group_by: :key,
-         status: fn _k, [r | _] -> if r.total < 1000.0, do: "present", else: "failing" end
+         into: fn _k, [r | _] ->
+           %{status: if(r.total < 1000.0, do: "present", else: "failing"),
+             headroom: 1000.0 - r.total}
+         end
   ```
 
   "What is failing?" is then `filter(status == "failing")` — an ordinary Ash
   read, with policies, joins and loads.
 
-  `verdict? true` remains for a node that genuinely wants **no table**: the
-  result lives in the coordination tuple, and the node needs no attributes, no
-  actions and no migration. The trade is that the tuple's schema is fixed, so
-  such a node can never carry a `headroom` — reach for it when the answer really
-  is one word, and declare a `:status` column otherwise.
+  **`status:` is the TABLELESS node's slot** (`verdict? true`), and only that.
+  It exists because the coordination tuple has exactly two result columns —
+  `status` and `strength` — so something must name them. A node with a table has
+  no such constraint, and two spellings for one write would be one too many.
+
+  Reach for `verdict? true` when the answer really is one word and a migration
+  would be ceremony; declare a `:status` column otherwise. The tuple's schema is
+  fixed, so a tableless verdict can never carry a `headroom`.
+
 - **expand** — declare `expand:` (`(group, items -> [row])`, each row carrying
   its own `:key`, since one group fans out to many keys).
 

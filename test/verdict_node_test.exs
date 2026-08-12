@@ -263,9 +263,17 @@ defmodule ReactiveDag.VerdictNodeTest do
       reactive do
         id(:health)
 
+        # a verdict WITH a table is an ordinary payload node: the status is a
+        # column, written by `into:` like any other. `status:` is the tableless
+        # node's slot and has no business here.
         reduce over: :totals,
                group_by: :key,
-               status: fn _k, [r | _] -> if r.total < 1000.0, do: "present", else: "failing" end
+               into: fn _k, [r | _] ->
+                 %{
+                   status: if(r.total < 1000.0, do: "present", else: "failing"),
+                   headroom: 1000.0 - r.total
+                 }
+               end
       end
     end
 
@@ -280,7 +288,7 @@ defmodule ReactiveDag.VerdictNodeTest do
       :ok
     end
 
-    test "`status:` writes the :status column — no verdict? needed" do
+    test "a verdict is an ordinary column — no verdict? needed" do
       plan = ReactiveDag.Node.graph([Totals, Health])
 
       {:ok, changed} = Recompute.recompute(plan.cells["health"], ["*"])
@@ -306,7 +314,7 @@ defmodule ReactiveDag.VerdictNodeTest do
       assert cell.meta[:resource] == Health
     end
 
-    test "`status:` with no :status column says what to add" do
+    test "`status:` on a table-backed node points at `into:` instead" do
       alias ReactiveDag.Node.Verifiers.VerifyReactive
 
       defmodule NoStatusColumn do
@@ -335,9 +343,10 @@ defmodule ReactiveDag.VerdictNodeTest do
       assert {:error, %Spark.Error.DslError{message: msg}} =
                VerifyReactive.verify(NoStatusColumn.spark_dsl_config())
 
-      assert msg =~ "attribute :status, :string"
-      # …and points at the tableless alternative rather than only refusing
-      assert msg =~ "verdict? true"
+      # `status:` belongs to the tableless shape; this node has a table
+      assert msg =~ "TABLELESS verdict node"
+      # …and is told the ordinary way to write a verdict column
+      assert msg =~ "into: fn"
     end
   end
 end
