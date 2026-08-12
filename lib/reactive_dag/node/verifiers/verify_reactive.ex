@@ -345,19 +345,21 @@ defmodule ReactiveDag.Node.Verifiers.VerifyReactive do
             "row, so there is no `into:` row to build"
         )
 
-      # `status:` on a node WITH a table is fine: the verdict is a column like
-      # any other, so the node is an ordinary payload node whose row happens to
-      # be one status. That is the shape to reach for when the verdict wants
-      # company — a `headroom`, a `breached_at` — which a tableless verdict node
-      # cannot carry at all.
-      not verdict? and not is_nil(status) and not has_status_attribute?(dsl) ->
+      # `status:` is the TABLELESS verdict node's slot, and only that. It exists
+      # because the coordination tuple has exactly two result columns
+      # (status/strength), so something must name them — a table-backed node has
+      # no such constraint and writes its verdict with `into:` like any other
+      # column. Two spellings for one write would be one too many.
+      not verdict? and not is_nil(status) ->
         error(
           dsl,
-          "`status:` writes a `:status` column, but this resource has no such " <>
-            "attribute. Add `attribute :status, :string` (then the verdict is an " <>
-            "ordinary row, and may carry other columns beside it), or mark the node " <>
-            "`verdict? true` for a tableless verdict whose result lives in the " <>
-            "coordination tuple."
+          "`status:` is the slot of a TABLELESS verdict node (`verdict? true`), whose " <>
+            "result lives in the coordination tuple. This node has a table, so write " <>
+            "the verdict as an ordinary column:\n\n" <>
+            "    attribute :status, :string\n" <>
+            "    into: fn group, rows -> %{status: …} end\n\n" <>
+            "which can carry other columns beside it — a headroom, a breached_at — as " <>
+            "the tuple's fixed schema never could."
         )
 
       not verdict? and declared == [] ->
@@ -374,9 +376,6 @@ defmodule ReactiveDag.Node.Verifiers.VerifyReactive do
         :ok
     end
   end
-
-  defp has_status_attribute?(dsl),
-    do: not is_nil(Ash.Resource.Info.attribute(dsl, :status))
 
   # the combinator's key_rule: is the preferred home (the claim grain and the
   # computation it must agree with, in one unit) — a NON-DEFAULT block-level
