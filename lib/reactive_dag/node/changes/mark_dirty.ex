@@ -31,8 +31,8 @@ defmodule ReactiveDag.Node.Changes.MarkDirty do
 
   @impl true
   def change(changeset, opts, _context) do
-    Ash.Changeset.after_action(changeset, fn _changeset, result ->
-      mark(result, opts)
+    Ash.Changeset.after_action(changeset, fn cs, result ->
+      mark(result, prior_of(cs, result), opts)
       {:ok, result}
     end)
   end
@@ -43,7 +43,21 @@ defmodule ReactiveDag.Node.Changes.MarkDirty do
   @impl true
   def atomic(changeset, opts, context), do: {:ok, change(changeset, opts, context)}
 
-  defp mark(record, opts) do
+  # The row AS IT WAS. `after_action` runs after the change is applied, so
+  # `result` is the NEW row — for an update that moved between units, that names
+  # where it went, which the live lookup already knows. The prior state is on
+  # the changeset (`data`), and it is the only thing that names where it came
+  # FROM.
+  #
+  # A create has no prior; an action that did not load the original gets
+  # %OriginalDataNotAvailable{}. Both fall back to the result, which is correct
+  # for a create and no worse than today for the rest.
+  defp prior_of(%Ash.Changeset{data: %Ash.Changeset.OriginalDataNotAvailable{}}, result), do: result
+  defp prior_of(%Ash.Changeset{action_type: :create}, result), do: result
+  defp prior_of(%Ash.Changeset{data: %{__struct__: _} = data}, _result), do: data
+  defp prior_of(_changeset, result), do: result
+
+  defp mark(record, prior, opts) do
     cell = Keyword.fetch!(opts, :cell)
 
     case key_of(record, opts) do
@@ -54,8 +68,30 @@ defmodule ReactiveDag.Node.Changes.MarkDirty do
         ReactiveDag.Frontier.mark_dirty(cell, ["*"], "written (no key)")
 
       key ->
-        ReactiveDag.Frontier.mark_dirty(cell, [key], "written")
+        ReactiveDag.Frontier.mark_dirty(cell, [{key, snapshot(prior)}], "written")
     end
+  end
+
+  # The row as it was, so a parent can derive its claim without reading back —
+  # which is the only thing that works once the row is deleted, or has moved to
+  # a different unit.
+  #
+  # PUBLIC attributes only: calculations are not loaded at after_action time
+  # (loading them would be a query per write, on the hot path), and private
+  # fields have no business in a table hosts can read.
+  #
+  # dump_to_embedded/3 per attribute is load-bearing. A %Date{} that reaches
+  # jsonb unprepared comes back as a string, and the calendar derivations that
+  # motivate snapshots would silently start comparing the wrong thing.
+  defp snapshot(record) do
+    record.__struct__
+    |> Ash.Resource.Info.public_attributes()
+    |> Enum.reduce(%{}, fn attr, acc ->
+      case Ash.Type.dump_to_embedded(attr.type, Map.get(record, attr.name), attr.constraints) do
+        {:ok, value} -> Map.put(acc, to_string(attr.name), value)
+        _ -> acc
+      end
+    end)
   end
 
   # the same derivation the payload loop uses: identity fields serialized in

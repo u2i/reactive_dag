@@ -49,6 +49,10 @@ defmodule ReactiveDag.DirtiesOnTest do
       update :revise do
         accept([:amount])
       end
+
+      update :recategorise do
+        accept([:category])
+      end
     end
 
     reactive do
@@ -163,35 +167,39 @@ defmodule ReactiveDag.DirtiesOnTest do
   end
 
   defmodule FakeRepo do
-    def start_link, do: Agent.start_link(fn -> MapSet.new() end, name: __MODULE__)
+    def start_link, do: Agent.start_link(fn -> %{} end, name: __MODULE__)
 
+    # stores the PRIOR too, so claim can return it — the whole point of #60
     def query!("INSERT INTO " <> _, params) do
       params
-      |> Enum.chunk_every(4)
-      |> Enum.each(fn [cell, key, _r, _t] -> Agent.update(__MODULE__, &MapSet.put(&1, {cell, key})) end)
+      |> Enum.chunk_every(5)
+      |> Enum.each(fn [cell, key, _r, _t, prior] ->
+        # ON CONFLICT DO NOTHING: the FIRST snapshot wins
+        Agent.update(__MODULE__, fn m -> Map.put_new(m, {cell, key}, prior) end)
+      end)
 
       %{rows: []}
     end
 
     def query!("SELECT DISTINCT cell_id" <> _, _params) do
-      ids = Agent.get(__MODULE__, & &1) |> Enum.map(&elem(&1, 0)) |> Enum.uniq()
+      ids = Agent.get(__MODULE__, & &1) |> Map.keys() |> Enum.map(&elem(&1, 0)) |> Enum.uniq()
       %{rows: Enum.map(ids, &[&1])}
     end
 
     def query!("DELETE FROM " <> _, [cell]) do
-      keys =
-        Agent.get_and_update(__MODULE__, fn set ->
-          {mine, rest} = Enum.split_with(set, fn {c, _} -> c == cell end)
-          {Enum.map(mine, &elem(&1, 1)), MapSet.new(rest)}
+      rows =
+        Agent.get_and_update(__MODULE__, fn m ->
+          {mine, rest} = Enum.split_with(m, fn {{c, _}, _} -> c == cell end)
+          {Enum.map(mine, fn {{_c, k}, prior} -> [k, prior] end), Map.new(rest)}
         end)
 
-      %{rows: Enum.map(keys, &[&1])}
+      %{rows: rows}
     end
 
-    def query!("SELECT COUNT" <> _, _params), do: %{rows: [[Agent.get(__MODULE__, &MapSet.size/1)]]}
+    def query!("SELECT COUNT" <> _, _params), do: %{rows: [[Agent.get(__MODULE__, &map_size/1)]]}
 
     # what the frontier currently holds, for assertions
-    def dirty, do: Agent.get(__MODULE__, &MapSet.to_list/1) |> Enum.sort()
+    def dirty, do: Agent.get(__MODULE__, &Map.keys/1) |> Enum.sort()
   end
 
   defmodule NullWriter do
@@ -303,5 +311,92 @@ defmodule ReactiveDag.DirtiesOnTest do
     assert steps["category_totals"].claimed == ["travel"]
 
     assert (CategoryTotals |> Ash.get!("travel")).total == 100.0
+  end
+  defp drain(plan),
+    do: Drain.run(plan, recompute: ReactiveDag.Node.Recompute, key_rule: ReactiveDag.Node.KeyRule)
+
+  describe "frontier snapshots (#60)" do
+    # `dirties_on` records the row AS IT WAS at mark time, so a parent derives
+    # its claim from what the row was — the only thing that survives a delete,
+    # and the only thing that names where a moved row came from.
+    test "the snapshot rides on the frontier row" do
+      Expenses
+      |> Ash.Changeset.for_create(:create, %{key: "e1", category: "travel", amount: 10.0})
+      |> Ash.create!()
+
+      assert [{"e1", prior}] = Frontier.claim_with_priors("expenses")
+
+      # jsonb, so string keys — and every public attribute, not just the unit's
+      assert prior["category"] == "travel"
+      assert prior["amount"] == 10.0
+      assert prior["key"] == "e1"
+    end
+
+    test "a DELETED row still names its unit — the claim stays precise" do
+      plan = ReactiveDag.Node.graph([Expenses, CategoryTotals])
+
+      Expenses
+      |> Ash.Changeset.for_create(:create, %{key: "e1", category: "travel", amount: 100.0})
+      |> Ash.create!()
+
+      {:ok, _} = drain(plan)
+      assert (CategoryTotals |> Ash.get!("travel")).total == 100.0
+
+      Expenses |> Ash.get!("e1") |> Ash.destroy!()
+      {:ok, report} = drain(plan)
+
+      steps = Map.new(report.steps, &{&1.cell, &1})
+
+      # a live lookup could not name the group of a row that is gone; the
+      # snapshot can, so this is ["travel"] rather than the ["*"] degradation
+      assert steps["category_totals"].claimed == ["travel"]
+    end
+
+    test "a MOVED row claims BOTH units — where it went AND where it came from" do
+      plan = ReactiveDag.Node.graph([Expenses, CategoryTotals])
+
+      Expenses
+      |> Ash.Changeset.for_create(:create, %{key: "e1", category: "meals", amount: 40.0})
+      |> Ash.create!()
+
+      {:ok, _} = drain(plan)
+      assert (CategoryTotals |> Ash.get!("meals")).total == 40.0
+
+      # the live row says "travel"; only the snapshot says "meals", and meals is
+      # the one that would otherwise silently keep counting a row it no longer has
+      Expenses
+      |> Ash.get!("e1")
+      |> Ash.Changeset.for_update(:recategorise, %{category: "travel"})
+      |> Ash.update!()
+
+      {:ok, report} = drain(plan)
+      steps = Map.new(report.steps, &{&1.cell, &1})
+
+      assert Enum.sort(steps["category_totals"].claimed) == ["meals", "travel"]
+      assert (CategoryTotals |> Ash.get!("travel")).total == 40.0
+    end
+
+    test "coalescing keeps the OLDEST snapshot — the unit the row started in" do
+      plan = ReactiveDag.Node.graph([Expenses, CategoryTotals])
+
+      Expenses
+      |> Ash.Changeset.for_create(:create, %{key: "e1", category: "meals", amount: 40.0})
+      |> Ash.create!()
+
+      {:ok, _} = drain(plan)
+
+      # two writes before the next drain: meals -> travel -> lodging
+      e = Expenses |> Ash.get!("e1")
+      e = e |> Ash.Changeset.for_update(:recategorise, %{category: "travel"}) |> Ash.update!()
+      e |> Ash.Changeset.for_update(:recategorise, %{category: "lodging"}) |> Ash.update!()
+
+      {:ok, report} = drain(plan)
+      claimed = Map.new(report.steps, &{&1.cell, &1})["category_totals"].claimed
+
+      # meals is the unit it was in when the drain last settled — the
+      # intermediate "travel" never existed as far as any settled state knows
+      assert "meals" in claimed
+      assert "lodging" in claimed
+    end
   end
 end

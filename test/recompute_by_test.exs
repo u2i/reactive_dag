@@ -120,8 +120,8 @@ defmodule ReactiveDag.RecomputeByTest do
 
     def query!("INSERT INTO " <> _, params) do
       params
-      |> Enum.chunk_every(4)
-      |> Enum.each(fn [cell, key, _r, _t] -> Agent.update(__MODULE__, &MapSet.put(&1, {cell, key})) end)
+      |> Enum.chunk_every(5)
+      |> Enum.each(fn [cell, key, _r, _t, _prior] -> Agent.update(__MODULE__, &MapSet.put(&1, {cell, key})) end)
 
       %{rows: []}
     end
@@ -138,7 +138,7 @@ defmodule ReactiveDag.RecomputeByTest do
           {Enum.map(mine, &elem(&1, 1)), MapSet.new(rest)}
         end)
 
-      %{rows: Enum.map(keys, &[&1])}
+      %{rows: Enum.map(keys, &[&1, nil])}
     end
 
     def query!("SELECT COUNT" <> _, _params), do: %{rows: [[Agent.get(__MODULE__, &MapSet.size/1)]]}

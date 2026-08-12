@@ -47,6 +47,11 @@ defmodule ReactiveDag.Migration do
       add(:key, :text, null: false)
       add(:reason, :text)
       add(:enqueued_at, :utc_datetime_usec)
+      # the row as it was when marked — see ReactiveDag.Frontier. Nullable: a
+      # source-fed key has no Ash record behind it. Cheap because this table is
+      # a QUEUE: rows live from mark to claim, then DELETE … RETURNING removes
+      # them.
+      add(:prior, :map)
     end
 
     # one index serves everything: uniqueness backs mark_dirty's ON CONFLICT,

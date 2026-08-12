@@ -18,8 +18,8 @@ defmodule ReactiveDag.DrainTest do
 
     def query!("INSERT INTO " <> _, params) do
       params
-      |> Enum.chunk_every(4)
-      |> Enum.each(fn [cell, key, _reason, _at] ->
+      |> Enum.chunk_every(5)
+      |> Enum.each(fn [cell, key, _reason, _at, _prior] ->
         Agent.update(__MODULE__, &MapSet.put(&1, {cell, key}))
       end)
 
@@ -38,7 +38,7 @@ defmodule ReactiveDag.DrainTest do
           {Enum.map(mine, &elem(&1, 1)), MapSet.new(rest)}
         end)
 
-      %{rows: Enum.map(keys, &[&1])}
+      %{rows: Enum.map(keys, &[&1, nil])}
     end
 
     def query!("SELECT COUNT" <> _, _params) do
