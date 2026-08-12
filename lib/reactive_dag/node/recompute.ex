@@ -113,6 +113,17 @@ defmodule ReactiveDag.Node.Recompute do
     {:ok, changed, meta}
   end
 
+  # a UNION — one row per (input cell, key) across N inputs. The claim carries
+  # its provenance ("<input>|<key>"), so a scoped pass reads only the input that
+  # moved; nothing correlates across inputs, which is what makes N of them safe
+  # here where a cross-node join was not.
+  def recompute(%Cell{meta: %{union: %{} = spec}} = cell, keys) do
+    claimed = scope(keys)
+    {pairs, meta} = ReactiveDag.Node.Recompute.Union.pairs(spec, claimed)
+
+    {:ok, materialize(cell, pairs, nil, claimed), meta}
+  end
+
   # a PURE-ASH-QUERY aggregate — the datastore groups + aggregates the `over`
   # relationship. The node's resource (`meta.resource`) is the group's resource: read it
   # with the relationship aggregates loaded (ONE Ash query; Postgres does the
