@@ -122,4 +122,187 @@ defmodule ReactiveDag.BasisTest do
     assert ReactiveDag.Attestation.Basis.digest(rows) ==
              Basis.digest(rows, fields: [:key, :status])
   end
+  describe "how an attestable row emerges" do
+    # The row and its basis come from the SAME `into:`. That matters: a basis
+    # computed anywhere else could describe a different moment than the row it
+    # sits beside, and the whole mechanism rests on them agreeing.
+    defmodule Domain do
+      use Ash.Domain, validate_config_inclusion?: false
+
+      resources do
+        allow_unregistered?(true)
+      end
+    end
+
+    defmodule Machines do
+      use Ash.Resource,
+        domain: Domain,
+        data_layer: Ash.DataLayer.Ets,
+        extensions: [ReactiveDag.Node]
+
+      ets do
+      end
+
+      attributes do
+        attribute :key, :string, primary_key?: true, allow_nil?: false, public?: true
+        attribute :owner, :string, public?: true
+        attribute :serial, :string, public?: true
+      end
+
+      actions do
+        defaults [:read, :destroy]
+
+        create :create do
+          accept([:key, :owner, :serial])
+        end
+
+        update :revise do
+          accept([:serial])
+        end
+      end
+
+      reactive do
+        id(:machines)
+        leaf?(true)
+      end
+    end
+
+    # "these are ALL my machines" — a per-owner claim that needs signing
+    defmodule Holdings do
+      use Ash.Resource,
+        domain: Domain,
+        data_layer: Ash.DataLayer.Ets,
+        extensions: [ReactiveDag.Node]
+
+      ets do
+      end
+
+      attributes do
+        attribute :key, :string, primary_key?: true, allow_nil?: false, public?: true
+        attribute :owner, :string, public?: true
+        attribute :count, :integer, public?: true
+        # emerges WITH the row, from the same rows the row summarises
+        attribute :basis, :string, public?: true
+        # a host would carry these too; a signature writes them
+        attribute :signed_by, :string, public?: true
+        attribute :signed_basis, :string, public?: true
+      end
+
+      actions do
+        defaults [:read, :destroy]
+
+        create :upsert do
+          upsert?(true)
+          accept([:key, :owner, :count, :basis])
+        end
+
+        update :sign do
+          accept([:signed_by, :signed_basis])
+        end
+      end
+
+      reactive do
+        id(:holdings)
+        recompute_by :owner, to: :machines, from: :owner
+
+        reduce into: fn {owner}, machines ->
+                 %{
+                   owner: owner,
+                   count: length(machines),
+                   basis: ReactiveDag.Basis.digest(machines, fields: [:key, :serial])
+                 }
+               end
+      end
+    end
+
+    defmodule NullWriter do
+      @behaviour ReactiveDag.CoordinationWriter
+      @impl true
+      def put(_c, _k, _o), do: :ok
+      @impl true
+      def delete(_c, _k), do: :ok
+    end
+
+    setup do
+      prev = Application.get_env(:reactive_dag, :coordination_writer)
+      Application.put_env(:reactive_dag, :coordination_writer, NullWriter)
+      on_exit(fn -> Application.put_env(:reactive_dag, :coordination_writer, prev) end)
+
+      Machines |> Ash.read!() |> Enum.each(&Ash.destroy!/1)
+      Holdings |> Ash.read!() |> Enum.each(&Ash.destroy!/1)
+
+      for {k, o, ser} <- [{"m1", "ada", "AAA"}, {"m2", "ada", "BBB"}, {"m3", "bob", "CCC"}] do
+        Machines
+        |> Ash.Changeset.for_create(:create, %{key: k, owner: o, serial: ser})
+        |> Ash.create!()
+      end
+
+      :ok
+    end
+
+    defp recompute do
+      plan = ReactiveDag.Node.graph([Machines, Holdings])
+      ReactiveDag.Node.Recompute.recompute(plan.cells["holdings"], ["*"])
+    end
+
+    test "the row and its basis emerge from one `into:`" do
+      {:ok, _} = recompute()
+
+      ada = Holdings |> Ash.get!("ada")
+
+      assert ada.count == 2
+      # the digest of exactly the rows the count summarises
+      assert ada.basis ==
+               ReactiveDag.Basis.digest(
+                 [%{key: "m1", serial: "AAA"}, %{key: "m2", serial: "BBB"}],
+                 fields: [:key, :serial]
+               )
+    end
+
+    test "a change to the underlying rows MOVES the basis — so a signature lapses" do
+      {:ok, _} = recompute()
+      signed = Holdings |> Ash.get!("ada")
+
+      # ada signs: "these two machines are all of them"
+      signed
+      |> Ash.Changeset.for_update(:sign, %{signed_by: "ada@example.com", signed_basis: signed.basis})
+      |> Ash.update!()
+
+      assert (Holdings |> Ash.get!("ada")).signed_basis == signed.basis
+
+      # a machine's serial is corrected — ada never touched the signature
+      Machines
+      |> Ash.get!("m1")
+      |> Ash.Changeset.for_update(:revise, %{serial: "ZZZ"})
+      |> Ash.update!()
+
+      {:ok, changed} = recompute()
+      assert changed == ["ada"]
+
+      after_change = Holdings |> Ash.get!("ada")
+
+      # the signature is now stale, and nothing had to revoke it
+      refute after_change.basis == after_change.signed_basis
+    end
+
+    test "a change to ANOTHER owner's rows leaves this signature standing" do
+      {:ok, _} = recompute()
+      signed = Holdings |> Ash.get!("ada")
+
+      signed
+      |> Ash.Changeset.for_update(:sign, %{signed_by: "ada@example.com", signed_basis: signed.basis})
+      |> Ash.update!()
+
+      Machines
+      |> Ash.get!("m3")
+      |> Ash.Changeset.for_update(:revise, %{serial: "QQQ"})
+      |> Ash.update!()
+
+      {:ok, changed} = recompute()
+      assert changed == ["bob"]
+
+      after_change = Holdings |> Ash.get!("ada")
+      assert after_change.basis == after_change.signed_basis
+    end
+  end
 end

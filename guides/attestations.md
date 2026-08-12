@@ -42,12 +42,57 @@ attributes do
 end
 ```
 
-`ReactiveDag.Basis` digests the rows a signature was **about**:
+### Where the row and its basis come from
+
+Both emerge from the **same `into:`** — the fold that computes the row also
+digests the rows it summarised:
 
 ```elixir
-basis = Basis.digest(rows, fields: [:key, :status])     # store with the signature
-Basis.matches?(row.basis, current_rows, fields: [:key, :status])   # still valid?
+attributes do
+  attribute :key, :string, primary_key?: true
+  attribute :owner, :string
+  attribute :count, :integer
+  attribute :basis, :string           # emerges WITH the row
+  attribute :signed_by, :string       # written by a signature
+  attribute :signed_basis, :string
+end
+
+reactive do
+  recompute_by :owner, to: :machines, from: :owner
+
+  reduce into: fn {owner}, machines ->
+           %{owner: owner,
+             count: length(machines),
+             basis: Basis.digest(machines, fields: [:key, :serial])}
+         end
+end
 ```
+
+That they come from one place is the load-bearing part: a basis computed
+anywhere else could describe a different moment than the row beside it, and the
+whole mechanism rests on the two agreeing.
+
+Then a signature is an ordinary write (`signed_by`, `signed_basis`), and the
+comparison is a predicate:
+
+```elixir
+Basis.matches?(row.signed_basis, current_rows, fields: [:key, :serial])
+# …or simply row.basis == row.signed_basis, since the node keeps :basis current
+```
+
+### What that buys
+
+The recompute machinery does the rest. A machine's serial is corrected:
+
+1. `dirties_on` marks it, carrying the row's prior state;
+2. only that owner's unit is claimed — other owners are untouched;
+3. the fold reruns, and `:basis` moves with `:count`;
+4. `basis != signed_basis`, so the signature has **lapsed** — with nothing
+   revoking it, and no stored copy of the data to drift.
+
+An unrelated owner's machine changing leaves the signature standing, because
+their unit was never claimed. That precision is `recompute_by`'s doing, not the
+basis's.
 
 The signature applies only while the rows still match, so a correction, an
 addition or a removal **lapses it automatically** — no revocation bookkeeping,
