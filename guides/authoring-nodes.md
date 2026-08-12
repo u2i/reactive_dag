@@ -290,6 +290,49 @@ side keys, `into: fn jk, l, r -> ... end` for computed columns
 (`(jk, l, r -> status | {status, strength})`) instead of `into:`. `query:`
 shapes the read exactly as on `reduce`.
 
+### `union` — the graph-wide roll-up as a node
+
+```elixir
+attributes do
+  attribute :check, :string, primary_key?: true      # which input
+  attribute :subject, :string, primary_key?: true    # its key
+  attribute :status, :string
+end
+
+reactive do
+  union from: [:category_health, :fund_balance, :machine_ownership],
+        into: [check: :cell, subject: :key, status: :status]
+end
+```
+
+One row per `(input cell, key)`, across several inputs.
+
+The point is the question a graph of verdict nodes cannot otherwise answer
+cheaply: **what is failing anywhere?** Each verdict node knows about its own
+cell, so the roll-up means scanning every cell separately
+(`Insights.summary/1` does exactly that, one query per cell). A union makes it a
+node — one indexed table, and `filter(status == "failing")` is an ordinary Ash
+read.
+
+It is maintained **incrementally**: a verdict flips, that key propagates, one
+row updates. The composite primary key makes it identity-keyed, so cell keys are
+`"category_health|travel"` — the key carries its own provenance.
+
+Source fields available to `into:` are `:cell` (which input the row came from),
+`:key`, `:status` and `:observed_at`.
+
+#### Why N inputs are safe here
+
+This is the only N-input combinator, and deliberately so. A cross-node **join**
+was built and reverted: a join has to *correlate* its inputs — match a budget row
+to an actual row — so a claim naming one side leaves the other unread, and the
+fold writes nulls over good data. That is not a scoping bug; it is what
+correlating independently-claimed inputs means.
+
+A union does not correlate. Each input contributes rows independently, so a
+scoped claim reads **only the input that moved** and nothing else. The
+provenance in the key is exactly the translation a join could not do.
+
 ### `run` — a generic Ash action as the recompute
 
 ```elixir

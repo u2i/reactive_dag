@@ -686,6 +686,61 @@ defmodule ReactiveDag.Node do
     ]
   }
 
+  defmodule Union do
+    @moduledoc """
+    The N-INPUT shape: one row per `(input cell, key)` across several inputs,
+    materialised into this node's own table.
+
+        union from: [:category_health, :fund_balance, :machine_ownership],
+              into: [cell_id: :cell, key: :key, status: :status]
+
+    Its purpose is the graph-wide view. A verdict-shaped node answers one
+    question about one cell; asking "what is failing ANYWHERE?" today means
+    scanning every cell's status separately (`Insights.summary/1` does exactly
+    that, one query per cell). A union node makes that roll-up a NODE — so it is
+    one indexed table, maintained incrementally: a verdict flips, that key
+    propagates, one row updates.
+
+    ## Why N inputs are safe here, when a cross-node JOIN was not
+
+    A join has to CORRELATE its inputs — match a budget row to an actual row —
+    so a claim naming one side leaves the other unread, and the fold writes
+    nulls over good data. That is not a scoping bug to be fixed; it is what
+    correlating independently-claimed inputs means.
+
+    A union does not correlate. Each input contributes its rows independently,
+    so a claim scopes to exactly the input that fired and reads nothing else.
+    The composite key carries its own provenance (`"category_health|travel"`),
+    which is precisely the translation a join could not do.
+    """
+    defstruct [:from, :into, :__identifier__, :__spark_metadata__]
+  end
+
+  @union %Spark.Dsl.Entity{
+    name: :union,
+    target: Union,
+    describe:
+      "One row per `(input cell, key)` across SEVERAL inputs — the graph-wide roll-up as " <>
+        "a node, maintained incrementally. Safe with N inputs because a union does not " <>
+        "correlate them: each contributes rows independently.",
+    schema: [
+      from: [
+        type: {:list, :atom},
+        required: true,
+        doc: "the input node ids whose keys are unioned. Each becomes an input edge."
+      ],
+      into: [
+        type: :keyword_list,
+        required: false,
+        doc:
+          "how an input's row becomes this node's row: `[cell_id: :cell, key: :key, " <>
+            "status: :status]` maps the source fields (`:cell` — which input it came " <>
+            "from — plus `:key`, `:status`, `:observed_at`) onto this resource's " <>
+            "attributes. Omit to copy every source field whose name matches an attribute."
+      ]
+    ]
+  }
+
   defmodule Compute do
     @moduledoc """
     The ESCAPE HATCH: declare an arbitrary recompute MODULE (a `ReactiveDag.Op`)
@@ -922,6 +977,7 @@ defmodule ReactiveDag.Node do
       @reduce,
       @join,
       @per_key,
+      @union,
       @aggregate,
       @compute,
       @run,
@@ -1565,6 +1621,9 @@ defmodule ReactiveDag.Node do
         nil ->
           []
 
+        %Union{from: from} ->
+          Enum.map(from, &%Ref{to: &1})
+
         c ->
           case Map.get(c, :over) || (recompute_by(resource) || %{to: nil}).to do
             nil ->
@@ -1721,7 +1780,10 @@ defmodule ReactiveDag.Node do
   # relationship on this resource, not another cell, so it adds no edge.
   defp combinator(resource) do
     Ext.get_entities(resource, [:reactive])
-    |> Enum.find(&(match?(%Reduce{}, &1) or match?(%Join{}, &1) or match?(%PerKey{}, &1)))
+    |> Enum.find(
+      &(match?(%Reduce{}, &1) or match?(%Join{}, &1) or match?(%PerKey{}, &1) or
+          match?(%Union{}, &1))
+    )
   end
 
   # the node's Aggregate entity (a relationship aggregate), or nil.
@@ -1793,6 +1855,7 @@ defmodule ReactiveDag.Node do
       case combinator(resource) do
         %Reduce{} = r -> %{reduce: lower_recompute_by(r, resource)}
         %PerKey{} = pk -> %{per_key: pk}
+        %Union{} = u -> %{union: u}
         %Join{} = j -> %{join: j}
         nil -> %{}
       end
