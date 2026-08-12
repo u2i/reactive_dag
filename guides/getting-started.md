@@ -69,22 +69,18 @@ below. The TUPLE table stays yours either way (extension columns).
 
 ```elixir
 def change do
-  # the coordination tuple: one row per (cell, key), carrying freshness and the
-  # coordination bookkeeping. A node's RESULTS live in its own resource — this
-  # table is the spine that tracks them, not where you query them.
+  # the coordination spine: one row per (cell, key), recording WHICH units a
+  # cell holds. A node's RESULTS live in its own resource — this table tracks
+  # them, it is not where you query them.
   create table(:my_tuple, primary_key: false) do
     add :cell_id, :string, null: false
     add :key, :string, null: false
-    add :status, :string, null: false, default: "present"
-    add :observed_at, :utc_datetime_usec
-    add :stale_after, :utc_datetime_usec
     add :updated_at, :utc_datetime_usec
-    # ... your extension columns here (strength, source_ref, …) — the library
-    # neither reads nor writes them; see the "Seams" guide.
+    # ... your extension columns here (source_ref, tombstoned_at, …) — the
+    # library neither reads nor writes them; see the "Seams" guide.
   end
 
   create unique_index(:my_tuple, [:cell_id, :key])
-  create index(:my_tuple, [:cell_id, :status])
 
   # the dirty frontier: pending recompute work, claimed-as-deleted by the drain.
   create table(:my_dirty, primary_key: false) do
@@ -228,8 +224,9 @@ ReactiveDag.Verdict.for_cell(cell)           # a rolled verdict + failing sample
 ReactiveDag.Insights.cell_status(plan, "budget_rollups")
 ```
 
-The coordination tuple is not in this path. It carries freshness and the
-frontier's bookkeeping; results live where you can query them.
+The coordination spine is not in this path. It records which keys a cell holds
+— for a source-fed leaf's reconcile, and for a node that writes its rows
+elsewhere; results live where you can query them.
 
 ## Where next
 

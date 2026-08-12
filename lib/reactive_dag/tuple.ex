@@ -1,48 +1,60 @@
 defmodule ReactiveDag.Tuple do
   @moduledoc """
-  The shared COORDINATION tuple — the reactive layer's projection of a cell into
-  a thin `(cell_id, key, status, freshness)` row. A cell IS its set of these
-  rows; a parent reads a child's set by `(cell_id, key)`.
+  The coordination spine: which `(cell_id, key)` pairs a cell currently holds.
 
-  This is NOT payload. The authoritative value for a key lives in the host's own
-  typed resource (cascade's `BudgetVsActual`, the portal's `Grant`/`Attestation`),
-  joined back by `key`. The coordination row carries only the verdict (`status`)
-  and freshness — enough for the substrate to schedule and for a downstream cell
-  to know *which* keys exist, without copying their payload.
+  A **presence set**, and nothing more. The row for a key says that key exists;
+  it carries no verdict, no value, no freshness. What a key *means* — its status,
+  its total, its computed columns — lives in the node's own resource, read back
+  through `ReactiveDag.Node.Rows`.
+
+  ## Why it shrank
+
+  This table used to carry `status` and freshness columns, because a node could
+  be *tableless* — a `verdict? true` node had nowhere else to put its answer, so
+  the spine had to hold results as well as track them. That shape is gone: every
+  node emits rows into its own resource, so results have a home with real
+  columns, real types and real policies. The spine kept only the job no resource
+  can do for it.
+
+  Two jobs remain, and both are about keys the library cannot otherwise
+  enumerate:
+
+    * **Leaf reconcile** (`reconcile/3`, `reconcile_set/3`) — a source-fed leaf
+      has no derived rows of its own, so subtracting "what the scan returned"
+      from "what we had" needs a record of what we had.
+    * **Write-elsewhere nodes** — a `compute` node with a custom `upsert:` keeps
+      its rows somewhere this library never sees, so the spine is the only
+      record of which units it holds (see `ReactiveDag.Node.Recompute`'s
+      `current_keys`).
+
+  A graph of ordinary payload nodes fed by `dirties_on` touches this table for
+  bookkeeping alone.
 
   ## Spine vs. extension
 
-  The library owns the SPINE — the columns both hosts share:
+  The library owns two columns and is their only reader:
 
       cell_id, key            (composite PK)
-      status                  (string; the host defines the vocabulary)
-      observed_at, updated_at, stale_after   (freshness)
+      updated_at              (bookkeeping)
 
-  Each host's physical table ALSO carries its own extension columns, which the
-  library neither reads nor writes:
-
-    * the portal adds `strength` (the evidence modality — its `derive` output);
-    * cascade adds `source_ref` / `last_seen_at` / `tombstoned_at`
-      (its retain-if-vanished + fingerprint policy).
-
-  So the library provides a spine CONTRACT + shared operators over the configured
-  table — not the table itself (the host owns that, extension columns and all),
-  exactly as `ReactiveDag.Frontier` owns the dirty ops but the host owns the
-  `*_dirty` table. `put/3` writes only spine columns (leaving any extension
-  columns to their DB defaults / a host wrapper that sets them in the same
-  upsert). Reads project spine columns.
+  A host's physical table may carry anything else beside them — cascade's
+  `source_ref`/`tombstoned_at`, a `strength` modality — and the library neither
+  reads nor writes those. It provides a CONTRACT plus shared operators over the
+  configured table, not the table itself, exactly as `ReactiveDag.Frontier` owns
+  the dirty ops while the host owns the `*_dirty` table.
 
       config :reactive_dag, repo: MyApp.Repo, tuple_table: "my_tuple"
 
-  ## The join contract (what makes stratification work)
+  Extension columns keep their DB defaults on insert and are untouched on
+  update, so a host that needs them writes its own `ReactiveDag.CoordinationWriter`
+  setting them in the same upsert.
 
-  `key` is the universal join handle. A BEAM producing-node writes its spine row
-  + its typed payload under a `key`; a SQL proving-node reads other cells' spine
-  rows by `(cell_id, key)`. Both wrote rows into ONE `tuple_table`, so a SQL cell
-  can consume a BEAM cell's output by joining on key. That is the two-layer
-  (produce → prove) graph, made concrete. It commits hosts to one constraint:
-  a node's `key` strings must be stable and join-compatible across the
-  producer/consumer seam.
+  ## The join contract
+
+  `key` is the universal join handle, and it is the one constraint this table
+  still imposes: a node's `key` strings must be stable and join-compatible
+  across the producer/consumer seam, because a parent addresses a child's units
+  by exactly the strings the child wrote.
   """
 
   @default_table "reactive_dag_tuple"
@@ -50,65 +62,26 @@ defmodule ReactiveDag.Tuple do
   @type key :: String.t()
 
   @doc """
-  Upsert the SPINE of a tuple for `(cell_id, key)`: presence/verdict + freshness.
-  Only spine columns are touched — extension columns (strength, source_ref, …)
-  keep their DB defaults on insert and are left untouched on update, so a host
-  that needs them writes its own upsert (calling this for the spine, or setting
-  them in one combined statement host-side).
+  Record that `(cell_id, key)` is present.
 
-  Opts:
-    * `:status`      — verdict string (default `"present"`)
-    * `:stale_after` — freshness horizon (default nil)
-    * `:observed_at` — when the source produced this (default now)
+  Idempotent: re-putting an existing key refreshes `updated_at` and nothing
+  else. `opts` is accepted and ignored — the `ReactiveDag.CoordinationWriter`
+  contract passes host extension fields through it, and this spine-only
+  implementation has no columns to put them in.
   """
   @spec put(String.t(), key(), keyword()) :: :ok
-  def put(cell_id, key, opts \\ []) do
-    now = DateTime.utc_now()
-    status = Keyword.get(opts, :status, "present")
-    stale_after = Keyword.get(opts, :stale_after)
-    observed_at = Keyword.get(opts, :observed_at, now)
-
+  def put(cell_id, key, _opts \\ []) do
     query!(
       """
-      INSERT INTO #{table()}
-        (cell_id, key, status, observed_at, stale_after, updated_at)
-      VALUES ($1, $2, $3, $4, $5, $6)
+      INSERT INTO #{table()} (cell_id, key, updated_at)
+      VALUES ($1, $2, $3)
       ON CONFLICT (cell_id, key) DO UPDATE
-        SET status = EXCLUDED.status,
-            observed_at = EXCLUDED.observed_at,
-            stale_after = EXCLUDED.stale_after,
-            updated_at = EXCLUDED.updated_at
+        SET updated_at = EXCLUDED.updated_at
       """,
-      [cell_id, key, status, observed_at, stale_after, now]
+      [cell_id, key, DateTime.utc_now()]
     )
 
     :ok
-  end
-
-  @doc """
-  `put/3`, but returning whether the row's VERDICT actually changed: `true` for
-  a new `(cell_id, key)` or a `status` flip, `false` for a re-put of the same
-  status (freshness columns still update either way). This is the boolean
-  CHANGED signal the `ReactiveDag.CoordinationWriter` contract lets a writer
-  report, which ops use to propagate only real changes. Read-compare-then-upsert
-  (same shape as the payload loop's change detection) — per-cell writes are
-  serialized by the drain, which is what makes the two steps safe.
-  """
-  @spec put_changed(String.t(), key(), keyword()) :: boolean()
-  def put_changed(cell_id, key, opts \\ []) do
-    status = Keyword.get(opts, :status, "present")
-
-    %{rows: rows} =
-      query!("SELECT status FROM #{table()} WHERE cell_id = $1 AND key = $2", [cell_id, key])
-
-    changed? =
-      case rows do
-        [[^status]] -> false
-        _ -> true
-      end
-
-    put(cell_id, key, opts)
-    changed?
   end
 
   @doc "Delete the tuples for `(cell_id, keys)`. No-op on an empty key list."
@@ -121,7 +94,7 @@ defmodule ReactiveDag.Tuple do
   end
 
   @doc """
-  All keys of a cell (any status), optionally narrowed by `:key_scope` (a
+  All keys a cell currently holds, optionally narrowed by `:key_scope` (a
   `t:key_scope/0`) — e.g. only the keys whose i-th segment names one service.
   """
   @spec all_keys(String.t(), keyword()) :: [key()]
@@ -135,44 +108,6 @@ defmodule ReactiveDag.Tuple do
       )
 
     Enum.map(rows, fn [k] -> k end)
-  end
-
-  @doc """
-  Keys of a cell whose status is `"present"`, optionally narrowed by
-  `:key_scope` (a `t:key_scope/0`). Equivalent to
-  `keys_by_status(cell, ["present"], key_scope: …)` but unordered.
-  """
-  @spec present_keys(String.t(), keyword()) :: [key()]
-  def present_keys(cell_id, opts \\ []) do
-    {scope_sql, scope_params} = key_scope_clause(Keyword.get(opts, :key_scope), 2)
-
-    %{rows: rows} =
-      query!(
-        "SELECT key FROM #{table()} WHERE cell_id = $1 AND status = 'present'" <> scope_sql,
-        [cell_id] ++ scope_params
-      )
-
-    Enum.map(rows, fn [k] -> k end)
-  end
-
-  @doc """
-  The SPINE ROWS of a cell — `%{key, status, observed_at}` maps, ordered by key,
-  optionally narrowed by `:key_scope`. The full-row companion to the key reads
-  above: what an evaluation that needs status alongside key consumes (the
-  attestation machinery's raw-rows and basis-digest input).
-  """
-  @spec rows(String.t(), keyword()) :: [%{key: key(), status: String.t(), observed_at: term()}]
-  def rows(cell_id, opts \\ []) do
-    {scope_sql, scope_params} = key_scope_clause(Keyword.get(opts, :key_scope), 2)
-
-    %{rows: rows} =
-      query!(
-        "SELECT key, status, observed_at FROM #{table()} WHERE cell_id = $1" <>
-          scope_sql <> " ORDER BY key",
-        [cell_id] ++ scope_params
-      )
-
-    Enum.map(rows, fn [k, s, o] -> %{key: k, status: s, observed_at: o} end)
   end
 
   @doc "Count of tuples per cell, as `%{cell_id => count}`."
@@ -199,68 +134,6 @@ defmodule ReactiveDag.Tuple do
           | {:prefix, String.t()}
           | {:exact_or_prefix, String.t(), String.t()}
           | {:segment, pos_integer(), String.t(), String.t()}
-
-  @doc """
-  Keys of a cell whose status is in `statuses`, ordered by key. Options:
-
-    * `:limit`     — cap the result (e.g. a failing-sample)
-    * `:key_scope` — a `t:key_scope/0` narrowing to a subset of the cell's keys
-
-  This is the general spine status-read; `present_keys/1` is the `["present"]`
-  special case.
-  """
-  @spec keys_by_status(String.t(), [String.t()], keyword()) :: [key()]
-  def keys_by_status(cell_id, statuses, opts \\ []) when is_list(statuses) do
-    {scope_sql, scope_params} = key_scope_clause(Keyword.get(opts, :key_scope), 3)
-    next = 3 + length(scope_params)
-
-    {limit_sql, limit_params} =
-      case Keyword.get(opts, :limit) do
-        nil -> {"", []}
-        n -> {" LIMIT $#{next}", [n]}
-      end
-
-    params = [cell_id, statuses] ++ scope_params ++ limit_params
-
-    %{rows: rows} =
-      query!(
-        "SELECT key FROM #{table()} WHERE cell_id = $1 AND status = ANY($2)" <>
-          scope_sql <> " ORDER BY key" <> limit_sql,
-        params
-      )
-
-    Enum.map(rows, fn [k] -> k end)
-  end
-
-  @doc """
-  Status histogram for a cell: `%{status => count}` over its tuples (optionally
-  narrowed by `:key_scope`). The spine read behind a cell's verdict (failing /
-  pending / green rollups are the host's to compute from this).
-  """
-  @spec status_histogram(String.t(), keyword()) :: %{String.t() => non_neg_integer()}
-  def status_histogram(cell_id, opts \\ []) do
-    {scope_sql, scope_params} = key_scope_clause(Keyword.get(opts, :key_scope), 2)
-
-    %{rows: rows} =
-      query!(
-        "SELECT status, COUNT(*) FROM #{table()} WHERE cell_id = $1" <>
-          scope_sql <> " GROUP BY status",
-        [cell_id] ++ scope_params
-      )
-
-    Map.new(rows, fn [s, n] -> {s, n} end)
-  end
-
-  @doc "Most-recent `observed_at` across the given cells, or nil if none have rows."
-  @spec max_observed_at([String.t()]) :: DateTime.t() | nil
-  def max_observed_at(cell_ids) do
-    # an unqualified aggregate always returns exactly one row — SQL NULL (→ nil)
-    # when nothing matches — so this match is total.
-    %{rows: [[ts]]} =
-      query!("SELECT max(observed_at) FROM #{table()} WHERE cell_id = ANY($1)", [cell_ids])
-
-    ts
-  end
 
   @doc """
   Reconcile a cell's tuple set against a host-computed DESIRED key set — the one

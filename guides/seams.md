@@ -46,7 +46,7 @@ grammar.
 
 ## Seam 3: `ReactiveDag.CoordinationWriter` — how tuples are written
 
-The spine (`cell_id, key, status, freshness`) is shared, but a host's
+The spine (`cell_id, key`) is shared, but a host's
 coordination write often touches its **extension columns in the same atomic
 upsert** — a `strength` modality, a `source_ref`, a tombstone policy. That is
 host policy, so the write is a seam:
@@ -60,11 +60,12 @@ host policy, so the write is a seam:
 Ops write through `ReactiveDag.Op.put/3`, which routes here. Two things worth
 exploiting:
 
-- **The changed signal.** A writer's `put` may return a boolean — *did the
-  row's verdict actually flip?* — which ops use as their changed-key signal.
-  The spine-only default reports it (`ReactiveDag.Tuple.put_changed/3`: `true`
-  for a new row or a status flip). A writer that returns bare `:ok` is treated
-  as "assume changed": correct, just less scoped.
+- **The changed signal.** A writer's `put` may return a boolean — *did this
+  row actually change?* — which ops may use as their changed-key signal. The
+  spine-only default returns `:ok`, read as "assume changed": the spine holds no
+  result to compare against, and the callers that matter already decided
+  `changed?` by comparing the node's own rows before writing. A host writer
+  guarding its upsert with `IS DISTINCT FROM` can report a real flip.
 - **Opts are the extension channel.** Machinery above the seam passes host
   fields in opts (`strength:`, `source_ref:`, …); the default writer takes
   only spine keys and drops the rest, a host writer stamps what it knows. This
@@ -87,15 +88,18 @@ reader/writer:
 
 ```
 cell_id, key                      (composite identity)
-status                            (string — the HOST defines the vocabulary)
-observed_at, stale_after, updated_at
+updated_at                        (bookkeeping)
 ```
 
 The host's physical table may carry anything else beside them; the library
-never reads or writes those columns. `status` deserves emphasis: it is an open
-vocabulary. `"present"` is only a default — a compliance host writes
-`covered/failing/pending`, and rollups (`ReactiveDag.Verdict`) take the
-host's meaning of each status as configuration, not assumption.
+never reads or writes those columns.
+
+This spine used to carry `status` and freshness too, back when a node could be
+tableless and had nowhere else to put its answer. Results now live in each
+node's own resource, so the spine kept only what no resource can supply: which
+keys a cell holds when the library cannot enumerate them itself (a source-fed
+leaf, a node whose `upsert:` writes elsewhere). An existing table keeps its old
+columns harmlessly — the library simply stops writing them.
 
 ## Hand-assembled graphs
 

@@ -72,8 +72,7 @@ config :reactive_dag, coordination_writer: MyApp.ReactiveDag.Writer
 ```
 
 The default (`ReactiveDag.Tuple.Writer`) writes the **spine only**:
-`(cell_id, key, status, freshness)`. That is enough for a host with no
-extension columns.
+`(cell_id, key)`. That is enough for a host with no extension columns.
 
 **This is the seam most hosts eventually replace.** The spine is shared, but
 each host's write also touches its own columns in the *same atomic upsert* —

@@ -1,12 +1,14 @@
 defmodule ReactiveDag.TupleKeyScopeTest do
   @moduledoc """
   Pins the SQL predicate each `key_scope` shape generates — text and param
-  order — via a capturing repo. `Scope.matches?/2` (the in-memory mirror) is
-  REQUIRED to select the same keys as these predicates; the mirror's semantics
-  are covered in attestation_scope_basis_test.exs, and this file pins the SQL
-  side of that contract so the two can't drift silently. (Executing the
-  predicates against live Postgres belongs to a host suite — this repo's CI
-  has no database.)
+  order — via a capturing repo.
+
+  `key_scope` survived the spine's reduction to a presence set because it
+  narrows the BASELINE a reconcile subtracts from: a host reconciling one
+  tenant's slice must not retire every other tenant's keys. That makes these
+  predicates load-bearing for correctness, not just for reads. (Executing them
+  against live Postgres belongs to a host suite — this repo's CI has no
+  database.)
   """
   use ExUnit.Case, async: false
 
