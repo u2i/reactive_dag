@@ -1,5 +1,29 @@
 # Changelog
 
+## [0.17.0-rc.2](https://github.com/u2i/reactive_dag/compare/v0.17.0-rc.1...v0.17.0-rc.2) (2026-08-12)
+
+
+### Features
+
+* `status:` writes a :status column when the node has one ([634cb99](https://github.com/u2i/reactive_dag/commit/634cb99842d8f248628e1362c1c44d6ecf55eae1))
+* `status:` writes a :status column when the node has one ([41f3b7a](https://github.com/u2i/reactive_dag/commit/41f3b7abb1b645f79d654ab74056a5fd3921d0c0))
+* ReactiveDag.Basis — a versioned content digest of a row set ([a6891d2](https://github.com/u2i/reactive_dag/commit/a6891d2b7350a6f9e4066f32fbc7fe95f1507f1f))
+* ReactiveDag.Basis — a versioned content digest of a row set ([6fd7dfa](https://github.com/u2i/reactive_dag/commit/6fd7dfa291bd78c14fc71ca1787ef0403acd03a2))
+* ReactiveDag.Config.validate!/0 — fail at boot, not at the first query ([41d12d2](https://github.com/u2i/reactive_dag/commit/41d12d207d92565bf983ef8661ae44a46e4232c9))
+* ReactiveDag.Config.validate!/0 — fail at boot, not at the first query ([#53](https://github.com/u2i/reactive_dag/issues/53)) ([acf2862](https://github.com/u2i/reactive_dag/commit/acf2862931db26e58adfebc9ebc515dbeed8ea32))
+* scan — declare the scanner that feeds a leaf ([0908eea](https://github.com/u2i/reactive_dag/commit/0908eea0833c991222557648ebba014470af14c4))
+* scan — declare the scanner that feeds a leaf ([afc6d10](https://github.com/u2i/reactive_dag/commit/afc6d1009be7593659ae5b056e376be711b42895))
+* snapshot the changed row on the frontier, so claims survive it ([09ab41d](https://github.com/u2i/reactive_dag/commit/09ab41d5d98837bce06f03fdc6cc9bc43212f332))
+* snapshot the changed row on the frontier, so claims survive it ([#60](https://github.com/u2i/reactive_dag/issues/60)) ([a2e5929](https://github.com/u2i/reactive_dag/commit/a2e592971b108a3600c5fa8c0b7a9fef4a3e3b94))
+* union — the graph-wide roll-up as a node ([b7584c2](https://github.com/u2i/reactive_dag/commit/b7584c29196b63c93e70bfc9df59a41f8c7b78e4))
+* union — the graph-wide roll-up as a node (+ an attested guard) ([c6a435b](https://github.com/u2i/reactive_dag/commit/c6a435b616ada98b5b47887bfe9a1d775400f1d8))
+
+
+### Bug Fixes
+
+* a scanner and a computation on one node is a contradiction ([7f1daaf](https://github.com/u2i/reactive_dag/commit/7f1daaf7009aa613ec669996951a0d029d55b7b3))
+* an attested view declaring payload attributes now raises ([3cd9fb1](https://github.com/u2i/reactive_dag/commit/3cd9fb18e550a4471f4ebc8c5e9505a32f9e691e))
+
 ## [0.17.0-rc.1](https://github.com/u2i/reactive_dag/compare/v0.17.0-rc...v0.17.0-rc.1) (2026-08-11)
 
 
