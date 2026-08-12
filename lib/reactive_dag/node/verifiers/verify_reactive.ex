@@ -345,11 +345,19 @@ defmodule ReactiveDag.Node.Verifiers.VerifyReactive do
             "row, so there is no `into:` row to build"
         )
 
-      not verdict? and not is_nil(status) ->
+      # `status:` on a node WITH a table is fine: the verdict is a column like
+      # any other, so the node is an ordinary payload node whose row happens to
+      # be one status. That is the shape to reach for when the verdict wants
+      # company — a `headroom`, a `breached_at` — which a tableless verdict node
+      # cannot carry at all.
+      not verdict? and not is_nil(status) and not has_status_attribute?(dsl) ->
         error(
           dsl,
-          "`status:` is the VERDICT node's slot — mark the node `verdict? true`, or emit " <>
-            "payload rows with `into:`"
+          "`status:` writes a `:status` column, but this resource has no such " <>
+            "attribute. Add `attribute :status, :string` (then the verdict is an " <>
+            "ordinary row, and may carry other columns beside it), or mark the node " <>
+            "`verdict? true` for a tableless verdict whose result lives in the " <>
+            "coordination tuple."
         )
 
       not verdict? and declared == [] ->
@@ -366,6 +374,9 @@ defmodule ReactiveDag.Node.Verifiers.VerifyReactive do
         :ok
     end
   end
+
+  defp has_status_attribute?(dsl),
+    do: not is_nil(Ash.Resource.Info.attribute(dsl, :status))
 
   # the combinator's key_rule: is the preferred home (the claim grain and the
   # computation it must agree with, in one unit) — a NON-DEFAULT block-level
