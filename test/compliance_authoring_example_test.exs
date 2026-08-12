@@ -162,7 +162,6 @@ defmodule ReactiveDag.ComplianceAuthoringExampleTest do
 
     reactive do
       id :merge_gated
-      verdict? true
 
       claim "every merge to a protected branch was reviewed & gated"
       addresses [:CC8_1]
@@ -209,7 +208,6 @@ defmodule ReactiveDag.ComplianceAuthoringExampleTest do
     # (the reconcile), its legs merge_gated/0/0 + merge_gated/0/1 — the structure
     # IS the id, no `as:` authored.
     assert cells["merge_gated"].op == :fold
-    assert cells["merge_gated"].meta[:verdict] == true
     assert cells["merge_gated/0"].op == :reconcile
     assert cells["merge_gated/0/0"].leaf?
     assert cells["merge_gated/0/1"].leaf?

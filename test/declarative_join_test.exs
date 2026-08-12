@@ -142,14 +142,30 @@ defmodule ReactiveDag.DeclarativeJoinTest do
     defmodule OuterVariance do
       use Ash.Resource,
         domain: ReactiveDag.DeclarativeJoinTest.Domain,
-        data_layer: Ash.DataLayer.Simple,
+        data_layer: Ash.DataLayer.Ets,
         extensions: [ReactiveDag.Node]
+
+      ets do
+      end
+
+      attributes do
+        attribute :key, :string, primary_key?: true, allow_nil?: false, public?: true
+        attribute :status, :string, public?: true
+      end
+
+      actions do
+        defaults [:read, :destroy]
+
+        create :upsert do
+          upsert?(true)
+          accept([:key, :status])
+        end
+      end
 
       reactive do
         id(:outer_variance)
         op(:reconcile)
         key_rule(:all)
-        verdict?(true)
 
         join over: :entries,
              left: [key: :acct, where: [kind: "budget"]],
@@ -178,14 +194,30 @@ defmodule ReactiveDag.DeclarativeJoinTest do
     defmodule Linked do
       use Ash.Resource,
         domain: ReactiveDag.DeclarativeJoinTest.Domain,
-        data_layer: Ash.DataLayer.Simple,
+        data_layer: Ash.DataLayer.Ets,
         extensions: [ReactiveDag.Node]
+
+      ets do
+      end
+
+      attributes do
+        attribute :key, :string, primary_key?: true, allow_nil?: false, public?: true
+        attribute :status, :string, public?: true
+      end
+
+      actions do
+        defaults [:read, :destroy]
+
+        create :upsert do
+          upsert?(true)
+          accept([:key, :status])
+        end
+      end
 
       reactive do
         id(:linked)
         op(:reconcile)
         key_rule(:all)
-        verdict?(true)
 
         # every entry is on the left by acct; only actuals land on the right
         # via a fn (mixing forms is fine — each slot resolves independently)
@@ -210,12 +242,28 @@ defmodule ReactiveDag.DeclarativeJoinTest do
     defmodule BadSide do
       use Ash.Resource,
         domain: ReactiveDag.DeclarativeJoinTest.Domain,
-        data_layer: Ash.DataLayer.Simple,
+        data_layer: Ash.DataLayer.Ets,
         extensions: [ReactiveDag.Node]
+
+      ets do
+      end
+
+      attributes do
+        attribute :key, :string, primary_key?: true, allow_nil?: false, public?: true
+        attribute :status, :string, public?: true
+      end
+
+      actions do
+        defaults [:read, :destroy]
+
+        create :upsert do
+          upsert?(true)
+          accept([:key, :status])
+        end
+      end
 
       reactive do
         id(:bad_side)
-        verdict?(true)
 
         join over: :entries,
              left: [where: [kind: "budget"]],
@@ -232,8 +280,25 @@ defmodule ReactiveDag.DeclarativeJoinTest do
     defmodule BadPicks do
       use Ash.Resource,
         domain: ReactiveDag.DeclarativeJoinTest.Domain,
-        data_layer: Ash.DataLayer.Simple,
+        data_layer: Ash.DataLayer.Ets,
         extensions: [ReactiveDag.Node]
+
+      ets do
+      end
+
+      attributes do
+        attribute :key, :string, primary_key?: true, allow_nil?: false, public?: true
+        attribute :status, :string, public?: true
+      end
+
+      actions do
+        defaults [:read, :destroy]
+
+        create :upsert do
+          upsert?(true)
+          accept([:key, :status])
+        end
+      end
 
       reactive do
         id(:bad_picks)

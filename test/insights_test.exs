@@ -94,17 +94,33 @@ defmodule ReactiveDag.InsightsTest do
   defmodule CategoryHealth do
     use Ash.Resource,
       domain: Domain,
-      data_layer: Ash.DataLayer.Simple,
+      data_layer: Ash.DataLayer.Ets,
       extensions: [ReactiveDag.Node]
+
+    ets do
+    end
+
+    attributes do
+      attribute :key, :string, primary_key?: true, allow_nil?: false, public?: true
+      attribute :status, :string, public?: true
+    end
+
+    actions do
+      defaults [:read, :destroy]
+
+      create :upsert do
+        upsert?(true)
+        accept([:key, :status])
+      end
+    end
 
     reactive do
       id(:category_health)
       op(:check)
-      verdict?(true)
 
       reduce over: :category_totals,
              group_by: :key,
-             status: fn _cat, [row | _] -> if row.total < 1000.0, do: "present", else: "failing" end
+             into: fn _cat, [row | _] -> %{status: if(row.total < 1000.0, do: "present", else: "failing")} end
     end
   end
 
@@ -202,10 +218,7 @@ defmodule ReactiveDag.InsightsTest do
       assert status.inputs == ["expenses"]
       assert status.op == :fold
       refute status.leaf?
-      refute status.verdict?
 
-      # a verdict node is flagged as one (it stores no payload row)
-      assert Insights.cell_status(p, "category_health").verdict?
       assert Insights.cell_status(p, "expenses").leaf?
     end
 

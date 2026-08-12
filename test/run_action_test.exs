@@ -200,7 +200,6 @@ defmodule ReactiveDag.RunActionTest do
 
       reactive do
         id(:two_computations)
-        verdict?(true)
         run(:refresh)
 
         reduce over: :somewhere,

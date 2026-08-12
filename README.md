@@ -44,7 +44,7 @@ decides *how* or *what a value means*. Each host brings its domain at the seams:
 | Compile pipeline | `ReactiveDag.Dsl` | `compile / validate_cells` — resolve → structural-validate, with a domain-validation hook. |
 | Op contract | `ReactiveDag.Op` | the behaviour a cell's compute module implements (`recompute(cell, keys) -> {:ok, changed}`) + the write API ops call (`put / tombstone / delete`, routed to the `CoordinationWriter`). |
 | **Node authoring** | `ReactiveDag.Node` | the authoring surface — an **Ash resource extension**: a resource declares its op + dependencies + computation in a `reactive do … end` block. The resource *is* the node **and** its own payload table. `ReactiveDag.Node.graph/2` assembles the `Plan` from the node resources. |
-| **Payload loop** | `ReactiveDag.Node.Payload` | writes a combinator's row into the node's own resource (the default; omit `upsert:`). A `verdict? true` node stores nothing of its own — its result is the coordination tuple. |
+| **Payload loop** | `ReactiveDag.Node.Payload` | writes a combinator's row into the node's own resource (the default; omit `upsert:`). |
 | **Config validation** | `ReactiveDag.Config` | `validate!/0` at boot, reporting EVERY problem at once (missing `:repo`, a writer that doesn't implement the behaviour, a table name that isn't a SQL identifier) instead of raising at the first query, possibly a long way into a deploy. The host calls it; the library starts no application of its own. |
 | **Content digests** | `ReactiveDag.Basis` | a versioned digest of a row set, so "is this still what I saw?" is answerable without storing a copy. Sign-off is the motivating use — store the digest with a signature and it lapses automatically when the rows move — but nothing in it knows about signatures. The versioning is the part worth not re-deriving: an unknown scheme degrades to "re-check", never to a crash, so introducing v2 cannot invalidate every stored digest on deploy. |
 | **Introspection** | `ReactiveDag.Insights` | the engine viewed from outside, for a dashboard/mix task/health check: `levels/1` + `edges/1` (structure), `cell_status/2` + `summary/1` (status histogram, key count, freshness, failing sample), `pending/1` (what the next drain would do), and an opt-in rolling window of `%Drain.Report{}`s (`record/1` / `recent/1` / `last_report/0`). All reads, no UI dependency — [reactive_dag_dashboard](https://github.com/u2i/reactive_dag_dashboard) renders it. |
@@ -125,13 +125,11 @@ changed keys:
   (`[sum: [amount: :total], count: :n]`), keys derive as `"gf|2025"`
   (`key_prefix:` namespaces). Escapes: `query:` shapes the read WITHOUT leaving
   Ash (`fn q, dirty -> … end`); fn `group_by`/`key`/`into` for computed shapes;
-  `expand:` for the group → many-rows shape (self-`:key`ed rows); a verdict
-  node declares `status:` instead of `into:`.
+  `expand:` for the group → many-rows shape (self-`:key`ed rows).
 - **`join`** — a left join over ONE input, declared: sides are attributes
   (`left: :declared_id`) or `[key: :acct, where: [kind: "budget"]]`
   discriminator splits; `into:` picks columns per side, absent sides yielding
-  nils (the gap is information). fn escapes for computed side keys/columns;
-  verdicts declare `status:`.
+  nils (the gap is information). fn escapes for computed side keys/columns.
 - **`run :action`** — the Ash-native escape hatch: the recompute is a GENERIC
   action on the node's own resource (`(keys, cell_id) -> changed keys`; the
   action writes its domain, the library `Op.put`s). Arguments, policies,
@@ -201,35 +199,36 @@ A host can also assemble cells by hand and bring its own strategy/key_rule —
 `ReactiveDag.Graph.build(cells)` + `ReactiveDag.Drain.run(plan, recompute:,
 key_rule:)` — which is how both apps ran before adopting the `Node` surface.
 
-## Verdict nodes (no payload of their own)
+## Verdicts are ordinary rows
 
-A node whose computed result fits the coordination tuple — a status (and, if the
-host extends the tuple, a strength) — needs **no payload table**. Mark it
-`verdict? true` and declare `status:` — the verdict IS the result, so there is
-no `into:` row to build. The key derives exactly as a payload row's would. No
-`data_layer` table, no attributes, no `upsert:`.
+A node whose answer is one word — a status — is a payload node like any other,
+writing a `:status` column.
 
 ```elixir
 defmodule MyApp.StoreEncrypted do
-  use Ash.Resource, data_layer: Ash.DataLayer.Simple, extensions: [ReactiveDag.Node]
+  use Ash.Resource, data_layer: AshPostgres.DataLayer, extensions: [ReactiveDag.Node]
+
+  # … `key` and `status` attributes, an `:upsert` action …
 
   reactive do
     op :reconcile
     key_rule :all
-    verdict? true                       # result lives in the tuple, not a table
     reduce over: :stores,
            group_by: :store,
-           status: fn _store, [r | _] -> if r.enc, do: "present", else: "failing" end
+           into: fn _store, [r | _] -> %{status: if(r.enc, do: "present", else: "failing")} end
   end
 end
 ```
 
-`status:` may return `{status, strength}` for a host whose tuple carries the
-strength modality. This is the "purely calculated" node: it computes a verdict
-per key and persists nothing beyond the coordination row. A **payload-bearing**
-node (above) computes a typed value that doesn't fit the tuple, so it
-materializes rows into its own resource. The line between them is exactly
-whether the result fits the tuple's fixed schema.
+There used to be a second shape for this — `verdict? true`, with no table,
+writing the status straight into the coordination tuple. It saved a migration
+when the answer was one word, and cost a ceiling: the tuple's schema is fixed,
+so the moment a verdict wanted company (a headroom, a breached_at) the shape
+had nothing to offer and you abandoned it entirely. A row costs a migration and
+answers every later question, so verdicts are rows.
+
+Rolling up many verdicts into one graph-wide table is what `union from: […]`
+is for.
 
 ## Human input
 

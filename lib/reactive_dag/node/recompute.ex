@@ -46,9 +46,6 @@ defmodule ReactiveDag.Node.Recompute do
     # exactly the right one is declared for the node's shape.
     emit =
       cond do
-        is_function(r.status, 2) ->
-          fn group, items -> [{key_fn.(group), status_row(r.status.(group, items))}] end
-
         is_function(r.expand, 2) ->
           fn group, items -> expand_pairs(r.expand.(group, items), cell.id) end
 
@@ -78,13 +75,8 @@ defmodule ReactiveDag.Node.Recompute do
     key_fn = Declarative.key_fn(j.key, j.key_prefix)
     keyer = row_keyer(cell, j, key_fn)
 
-    emit =
-      if is_function(j.status, 3) do
-        fn jk, l, r -> [{key_fn.(jk), status_row(j.status.(jk, l, r))}] end
-      else
-        into = Declarative.join_into_fn(j.into)
-        fn jk, l, r -> into_pair(into.(jk, l, r), keyer, jk) end
-      end
+    into = Declarative.join_into_fn(j.into)
+    emit = fn jk, l, r -> into_pair(into.(jk, l, r), keyer, jk) end
 
     left_pairs =
       Enum.flat_map(left, fn {jk, litem} -> emit.(jk, litem, Map.get(right, jk)) end)
@@ -292,11 +284,7 @@ defmodule ReactiveDag.Node.Recompute do
     end
   end
 
-  # a `status:` result → the verdict row (`{status, strength}` when the host's
   # tuple carries strength).
-  defp status_row({status, strength}), do: %{status: status, strength: strength}
-  defp status_row(status), do: %{status: status}
-
   # an `into:` result is ONE row: its own `:key` wins (a self-identified row),
   # else the cell keyer derives it — from the row's IDENTITY fields for a
   # composite-primary-key node, else from the group term / join key. A list
@@ -341,30 +329,8 @@ defmodule ReactiveDag.Node.Recompute do
 
   # write each {key, row}, Op.put the changed keys, return them. Shared by
   # reduce/expand + join. Three write modes, in precedence order:
-  #   * VERDICT node (`verdict? true`) — no payload; the row's `:status`/`:strength`
-  #     go straight into the tuple (Op.put opts). The result IS the coordination row.
   #   * host `upsert:` callback (override) — `(key, row) -> changed?`.
   #   * the LIB closing the loop into the node's OWN resource (`meta.resource`).
-  defp materialize(%Cell{meta: %{verdict: true}} = cell, pairs, _upsert, claimed) do
-    # a verdict-only node: the computed row lives in the tuple, not a payload
-    # table — so the tuple write IS the change detection. A writer reporting
-    # the boolean CHANGED signal (the default Tuple.Writer does) scopes
-    # propagation to real flips; a bare-:ok writer propagates everything
-    # (correct, just less scoped).
-    changed =
-      Enum.flat_map(pairs, fn {key, row} ->
-        case ReactiveDag.Op.put(cell, key, verdict_opts(row)) do
-          false -> []
-          _ok_or_true -> [key]
-        end
-      end)
-
-    # a verdict node has no payload row, but its TUPLE still has to be
-    # reconciled — a verdict for a unit that no longer exists is as stale as a
-    # payload row for one.
-    changed ++ retire_vanished(cell, Enum.map(pairs, &elem(&1, 0)), claimed, nil)
-  end
-
   defp materialize(cell, pairs, upsert, claimed) do
     write = writer_fn(cell, upsert)
     coord = cell.meta[:coordination_opts]
@@ -436,10 +402,7 @@ defmodule ReactiveDag.Node.Recompute do
 
   # a payload node's OWN ROWS are the truth about which units it currently
   # holds — the coordination table is the host's, may be written by a different
-  # writer, and is not what a consumer queries. A verdict node has no rows, so
-  # its tuple keys are the only baseline there is.
-  defp current_keys(%Cell{meta: %{verdict: true}, id: id}), do: tuple_keys(id)
-
+  # writer, and is not what a consumer queries.
   defp current_keys(%Cell{meta: meta, id: id}) do
     case meta[:resource] do
       nil ->
@@ -467,14 +430,6 @@ defmodule ReactiveDag.Node.Recompute do
   defp coord_opts(nil, _key, _row), do: []
   defp coord_opts(fun, key, row) when is_function(fun, 2), do: fun.(key, row)
 
-  # a verdict row's tuple opts — status/strength if the combinator set them.
-  defp verdict_opts(row) when is_map(row) do
-    [status: row[:status], strength: row[:strength]]
-    |> Enum.reject(fn {_k, v} -> is_nil(v) end)
-  end
-
-  defp verdict_opts(_), do: []
-
   # `(key, row) -> changed?`. An explicit `upsert:` wins; otherwise the row is
   # written into the node's own resource (the unified "resource IS payload" shape).
   defp writer_fn(_cell, upsert) when is_function(upsert, 2), do: upsert
@@ -484,9 +439,8 @@ defmodule ReactiveDag.Node.Recompute do
       nil ->
         raise """
         reactive_dag: node #{inspect(id)} has a reduce/join with no `upsert:`, no
-        backing resource, and is not `verdict? true`. Either give the node an
-        AshPostgres resource (its rows ARE its payload), mark it `verdict? true` (its
-        result lives in the coordination tuple), or supply an explicit `upsert:`.
+        backing resource. Either give the node an AshPostgres resource (its rows
+        ARE its payload), or supply an explicit `upsert:`.
         """
 
       resource ->

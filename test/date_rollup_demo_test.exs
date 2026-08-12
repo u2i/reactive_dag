@@ -111,17 +111,33 @@ defmodule ReactiveDag.DateRollupDemoTest do
   defmodule MonthHealth do
     use Ash.Resource,
       domain: Domain,
-      data_layer: Ash.DataLayer.Simple,
+      data_layer: Ash.DataLayer.Ets,
       extensions: [ReactiveDag.Node]
+
+    ets do
+    end
+
+    attributes do
+      attribute :key, :string, primary_key?: true, allow_nil?: false, public?: true
+      attribute :status, :string, public?: true
+    end
+
+    actions do
+      defaults [:read, :destroy]
+
+      create :upsert do
+        upsert?(true)
+        accept([:key, :status])
+      end
+    end
 
     reactive do
       id(:month_health)
       op(:check)
-      verdict?(true)
 
       reduce over: :monthly_readings,
              group_by: :key,
-             status: fn _month, [row | _] -> if row.n > 0, do: "present", else: "failing" end
+             into: fn _month, [row | _] -> %{status: if(row.n > 0, do: "present", else: "failing")} end
     end
   end
 

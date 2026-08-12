@@ -38,7 +38,6 @@ defmodule ReactiveDag.UnionNodeTest do
     reactive do
       id(:category_health)
       leaf?(true)
-      verdict?(true)
     end
   end
 
@@ -51,7 +50,6 @@ defmodule ReactiveDag.UnionNodeTest do
     reactive do
       id(:fund_balance)
       leaf?(true)
-      verdict?(true)
     end
   end
 

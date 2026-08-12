@@ -39,7 +39,6 @@ defmodule ReactiveDag.Insights do
           depth: non_neg_integer(),
           inputs: [String.t()],
           leaf?: boolean(),
-          verdict?: boolean(),
           op: atom() | nil,
           statuses: %{String.t() => non_neg_integer()},
           key_count: non_neg_integer(),
@@ -101,7 +100,6 @@ defmodule ReactiveDag.Insights do
       depth: depth,
       inputs: cell.inputs,
       leaf?: cell.leaf? == true,
-      verdict?: cell.meta[:verdict] == true,
       # `op` is a core %Cell{} field, not meta (Cell's Access impl flattens the
       # two, but the struct is the honest read here)
       op: cell.op,

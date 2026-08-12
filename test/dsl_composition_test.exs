@@ -108,8 +108,8 @@ defmodule ReactiveDag.DslCompositionTest do
     end
   end
 
-  # the guarantee node: a verdict? node (no payload table) authored with the
-  # composed compliance nouns AND the lib's own combinator (op :reconcile + a ref).
+  # the guarantee node: authored with the composed compliance nouns AND the
+  # lib's own combinator (op :reconcile + a ref).
   defmodule MergeGated do
     use Ash.Resource,
       domain: Domain,
@@ -119,7 +119,6 @@ defmodule ReactiveDag.DslCompositionTest do
     reactive do
       id :merge_gated
       op :reconcile
-      verdict? true
       guarantee "every merge to a protected branch was reviewed & gated"
       addresses :CC8_1
       addresses :CC8_2
@@ -143,13 +142,10 @@ defmodule ReactiveDag.DslCompositionTest do
     assert ComplianceExt.strength(Baseline) == nil
   end
 
-  test "the composed node still lowers to a cell via the lib (verdict? + ref edge)" do
+  test "the composed node still lowers to a cell via the lib (ref edge)" do
     [cell] = ReactiveDag.Node.cells(MergeGated)
     assert cell.id == "merge_gated"
     assert cell.op == :reconcile
-    # the lib's own `verdict?` rode through untouched by the composition
-    # (lowering keys it as meta[:verdict])
-    assert cell.meta[:verdict] == true
     # the ref became a propagating input edge to the baseline leaf's cell
     assert cell.inputs == ["baseline"]
   end
