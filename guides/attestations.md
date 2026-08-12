@@ -23,6 +23,51 @@ edges, with propagation identical to any other input.
 - **Force** — whether a stance currently counts: a read-time predicate, never
   a stored status.
 
+## The smaller shape: sign-off as columns
+
+`ReactiveDag.Attestation` is the full apparatus — records, eligibility, quorum,
+tolerance, gated edges. Often you do not need it, and the piece that is
+genuinely hard to get right is available on its own.
+
+A row can carry **derived data and signing state together**:
+
+```elixir
+attributes do
+  attribute :key, :string, primary_key?: true
+  attribute :serial, :string             # derived
+  attribute :encrypted, :boolean         # derived
+  attribute :basis, :string              # the digest when signed
+  attribute :signed_by, :string
+  attribute :signed_at, :utc_datetime
+end
+```
+
+`ReactiveDag.Basis` digests the rows a signature was **about**:
+
+```elixir
+basis = Basis.digest(rows, fields: [:key, :status])     # store with the signature
+Basis.matches?(row.basis, current_rows, fields: [:key, :status])   # still valid?
+```
+
+The signature applies only while the rows still match, so a correction, an
+addition or a removal **lapses it automatically** — no revocation bookkeeping,
+and nothing stored that can drift out of step with the data.
+
+"Is this attested?" is then a predicate on a column, not a separate node — and
+the `dirties_on` write that records a signature re-derives it like any other
+change.
+
+**Versioning is why `Basis` is in the library rather than your app.** Every
+digest carries its scheme version and is compared under *that* version, so
+changing the canonicalization cannot lapse every signature in the estate on
+deploy. An unknown version never matches and never raises — a digest from a
+future build degrades to "re-check", not to a crash on the read path.
+
+Reach for the full apparatus below when you need **quorum** (`:any`, `:all`,
+`{:n_of, k}`), **eligibility** derived from another cell, **tolerance** (a
+signature expiring after N days), or **gated edges**. Those are what it adds
+over a column.
+
 ## Declaring a requirement
 
 Policy is declared **once**, on the node that owns the raw data:

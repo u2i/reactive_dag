@@ -17,6 +17,11 @@ defmodule ReactiveDag.Attestation.Basis do
   matches (evaluates as a basis mismatch, never as a crash): records from a
   future scheme degrade to "re-ask", not to an error.
 
+  This is `ReactiveDag.Basis` with the attestation's field choice fixed —
+  `(key, status)`. The digesting, the versioning and the unknown-version
+  degradation all live there; what an attestation adds is only WHICH fields a
+  signature binds to.
+
   ## What v1 digests
 
   The SPINE's view of the selected rows: `(key, status)` pairs, sorted by key.
@@ -26,43 +31,23 @@ defmodule ReactiveDag.Attestation.Basis do
   fields in the basis proposes a v2, it does not widen v1.
   """
 
-  @current 1
+  @fields [:key, :status]
 
   @doc "The current digest-scheme version."
   @spec current_version() :: pos_integer()
-  def current_version, do: @current
+  def current_version, do: ReactiveDag.Basis.current_version()
 
   @doc """
-  Digest `rows` (spine-row maps with `:key` and `:status`) under `version`.
-  Returns the digest string, or `:unknown_version` for a version this build
-  does not know — which the evaluation treats as a non-matching basis.
-
-  Every row MUST carry both fields (`ReactiveDag.Tuple.rows/2` always does);
-  a row without a `:status` raises rather than digesting a status nobody
-  observed — the basis is the load-bearing content identity for lapse, so
-  absent must never hash like present.
+  Digest `rows` under `version`. Returns the digest, or `:unknown_version` for a
+  version this build does not know — which the evaluation treats as a
+  non-matching basis.
   """
   @spec digest([map()], pos_integer()) :: String.t() | :unknown_version
-  def digest(rows, version \\ @current)
-
-  def digest(rows, 1) do
-    canonical =
-      rows
-      |> Enum.map(&{Map.fetch!(&1, :key), Map.fetch!(&1, :status)})
-      |> Enum.sort()
-      |> Enum.map_join("\n", fn {k, s} -> "#{k}\x1F#{s}" end)
-
-    "1:" <> Base.encode16(:crypto.hash(:sha256, canonical), case: :lower)
-  end
-
-  def digest(_rows, _unknown), do: :unknown_version
+  def digest(rows, version \\ ReactiveDag.Basis.current_version()),
+    do: ReactiveDag.Basis.digest(rows, fields: @fields, version: version)
 
   @doc "Does `stored` (a record's basis) match `rows` under `version`?"
   @spec matches?(String.t(), [map()], pos_integer()) :: boolean()
-  def matches?(stored, rows, version) do
-    case digest(rows, version) do
-      :unknown_version -> false
-      current -> stored == current
-    end
-  end
+  def matches?(stored, rows, version),
+    do: ReactiveDag.Basis.matches?(stored, rows, fields: @fields, version: version)
 end
