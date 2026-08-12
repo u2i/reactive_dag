@@ -5,18 +5,16 @@ is the node and its own payload table**: the `reactive do … end` block declare
 the computation; the resource's `attributes` are the rows it materializes. This
 guide covers every shape that block can take.
 
-## The four node shapes
+## The three node shapes
 
 | shape | data_layer | attributes | `reactive` block | result lives in |
 |---|---|---|---|---|
 | **payload** | AshPostgres/Ets | the payload columns + an `:upsert` action | a combinator, no `upsert:` | the resource itself |
-| **verdict** (`verdict? true`) | `Ash.DataLayer.Simple` | none | a combinator with `status:` | the coordination tuple |
 | **write-elsewhere** | Simple | none | a combinator + a custom `upsert:` | wherever `upsert:` writes |
 | **escape hatch** | Simple | none | `compute MyOp` | up to the op |
 
-The line between payload and verdict is exactly whether the result fits the
-tuple's fixed schema. A verdict node that declares payload attributes raises at
-compile time — the attributes would silently never be written.
+Every node emits **rows**. A node whose answer is one word emits a row with a
+`:status` column — see below.
 
 ## Declaring the computation
 
@@ -32,7 +30,7 @@ real change.
 | `aggregate` | attribute atoms only | the fold is a datastore aggregate over a relationship |
 | `recompute_by` + `reduce` | the unit a change invalidates, then the fold | you know what a change should re-do (the common case) |
 | declarative `reduce`/`join` | attributes + fold keywords | grouping/joining by attributes; the library reads Ash for you |
-| per-slot escapes | a fn for the one slot that outgrew attributes | `query:`, computed groups/keys/rows, `expand:`, `status:` |
+| per-slot escapes | a fn for the one slot that outgrew attributes | `query:`, computed groups/keys/rows, `expand:` |
 | `run :action` | a generic Ash action on this resource | arbitrary recompute that should stay a first-class action |
 | `compute Module` | a `ReactiveDag.Op` | recompute that outgrows Ash entirely |
 
@@ -202,10 +200,9 @@ slots resolve independently — a declarative `group_by` with an `into:` fn is
 fine (the fn receives the group tuple exactly as the fn idiom always has). A
 read that isn't Ash at all belongs on the `run`/`compute` rungs.
 
-Two shapes have their own slots instead of `into:`:
+Two shapes are worth calling out:
 
-- **verdict** — a verdict is a **column**, so a node with a table writes one
-  with `into:` like any other:
+- **verdict** — a verdict is a **column**, written with `into:` like any other:
 
   ```elixir
   attributes do
@@ -224,14 +221,11 @@ Two shapes have their own slots instead of `into:`:
   "What is failing?" is then `filter(status == "failing")` — an ordinary Ash
   read, with policies, joins and loads.
 
-  **`status:` is the TABLELESS node's slot** (`verdict? true`), and only that.
-  It exists because the coordination tuple has exactly two result columns —
-  `status` and `strength` — so something must name them. A node with a table has
-  no such constraint, and two spellings for one write would be one too many.
-
-  Reach for `verdict? true` when the answer really is one word and a migration
-  would be ceremony; declare a `:status` column otherwise. The tuple's schema is
-  fixed, so a tableless verdict can never carry a `headroom`.
+  There used to be a tableless shape for this (`verdict? true`, writing the
+  status straight into the coordination tuple). It saved a migration when the
+  answer was one word, and cost a ceiling: the tuple's schema is fixed, so the
+  moment a verdict wanted a `headroom` the shape had nothing to offer. A row
+  costs a migration and answers every later question.
 
 - **expand** — declare `expand:` (`(group, items -> [row])`, each row carrying
   its own `:key`, since one group fans out to many keys).
@@ -313,9 +307,7 @@ attribute is the two-column case (`left: :declared_id` — a nil value means
 discriminator field. `outer: true` also emits right-only keys (an undeclared
 member is a finding). The fn escapes: `left: fn item -> ... end` for computed
 side keys, `into: fn jk, l, r -> ... end` for computed columns
-(variance = budget − actual); a verdict join declares `status:`
-(`(jk, l, r -> status | {status, strength})`) instead of `into:`. `query:`
-shapes the read exactly as on `reduce`.
+(variance = budget − actual). `query:` shapes the read exactly as on `reduce`.
 
 ### `union` — the graph-wide roll-up as a node
 

@@ -67,7 +67,7 @@ defmodule ReactiveDag.Node.Verifiers.VerifyReactive do
          :ok <- verify_unit_vs_key_rule(dsl),
          :ok <- verify_key_rule_home(dsl, r.key_rule),
          :ok <- verify_key_prefix(dsl, r.key, r.key_prefix),
-         :ok <- verify_result_slots(dsl, :reduce, r.status, into: r.into, expand: r.expand),
+         :ok <- verify_result_slots(dsl, :reduce, into: r.into, expand: r.expand),
          :ok <- verify_reduce_into(dsl, effective) do
       :ok
     end
@@ -78,7 +78,7 @@ defmodule ReactiveDag.Node.Verifiers.VerifyReactive do
          :ok <- verify_key_prefix(dsl, j.key, j.key_prefix),
          :ok <- verify_side(dsl, :left, j.left),
          :ok <- verify_side(dsl, :right, j.right),
-         :ok <- verify_result_slots(dsl, :join, j.status, into: j.into),
+         :ok <- verify_result_slots(dsl, :join, into: j.into),
          :ok <- verify_join_into(dsl, j.into) do
       :ok
     end
@@ -325,55 +325,21 @@ defmodule ReactiveDag.Node.Verifiers.VerifyReactive do
   # the node-shape × result-slot matrix: a VERDICT node's result IS its status
   # (`status:` required, row slots forbidden); a payload node emits rows
   # (exactly one of `into:`/`expand:`, `status:` forbidden).
-  defp verify_result_slots(dsl, kind, status, row_slots) do
-    verdict? = Verifier.get_option(dsl, [:reactive], :verdict?)
-    declared = for {name, v} <- row_slots, not is_nil(v), do: name
+  # every node emits ROWS, so the matrix is only "exactly one row slot".
+  defp verify_result_slots(dsl, kind, row_slots) do
+    case for {name, v} <- row_slots, not is_nil(v), do: name do
+      [_one] ->
+        :ok
 
-    cond do
-      verdict? and declared != [] ->
+      [] ->
         error(
           dsl,
-          "a verdict node has no payload row — drop #{inspect(declared)}; its result is " <>
-            "`status:` (`(… -> status | {status, strength})`), written straight into the " <>
-            "coordination tuple"
-        )
-
-      verdict? and is_nil(status) ->
-        error(
-          dsl,
-          "a verdict node's #{kind} declares `status:` — its result IS the coordination " <>
-            "row, so there is no `into:` row to build"
-        )
-
-      # `status:` is the TABLELESS verdict node's slot, and only that. It exists
-      # because the coordination tuple has exactly two result columns
-      # (status/strength), so something must name them — a table-backed node has
-      # no such constraint and writes its verdict with `into:` like any other
-      # column. Two spellings for one write would be one too many.
-      not verdict? and not is_nil(status) ->
-        error(
-          dsl,
-          "`status:` is the slot of a TABLELESS verdict node (`verdict? true`), whose " <>
-            "result lives in the coordination tuple. This node has a table, so write " <>
-            "the verdict as an ordinary column:\n\n" <>
-            "    attribute :status, :string\n" <>
-            "    into: fn group, rows -> %{status: …} end\n\n" <>
-            "which can carry other columns beside it — a headroom, a breached_at — as " <>
-            "the tuple's fixed schema never could."
-        )
-
-      not verdict? and declared == [] ->
-        error(
-          dsl,
-          "a payload #{kind} needs `into:`" <>
+          "a #{kind} needs `into:`" <>
             if(kind == :reduce, do: " (or `expand:` for the group → many-rows shape)", else: "")
         )
 
-      not verdict? and length(declared) > 1 ->
-        error(dsl, "declare ONE of #{inspect(declared)} — a node emits rows one way")
-
-      true ->
-        :ok
+      several ->
+        error(dsl, "declare ONE of #{inspect(several)} — a node emits rows one way")
     end
   end
 

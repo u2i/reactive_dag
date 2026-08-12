@@ -67,7 +67,6 @@ defmodule ReactiveDag.Node do
   | shape | data_layer | attributes | actions | `reactive` |
   |---|---|---|---|---|
   | **payload** (materializes typed rows) | AshPostgres/Ets | the payload columns | an `:upsert` action | a combinator, no `upsert:` |
-  | **verdict** (`verdict? true`) | `Ash.DataLayer.Simple` | none | none | a combinator; rows carry `:status` |
   | **write-elsewhere** | Simple | none | none | a combinator + a custom `upsert:` |
   | **escape hatch** | Simple | none | none | `compute Mod` |
 
@@ -319,7 +318,6 @@ defmodule ReactiveDag.Node do
       :key_rule,
       :into,
       :expand,
-      :status,
       :read,
       :query,
       :upsert,
@@ -415,15 +413,6 @@ defmodule ReactiveDag.Node do
             "row carrying its own `:key` (one group fans out to many keys, so keys cannot " <>
             "derive). Mutually exclusive with `into`/`status`."
       ],
-      status: [
-        type: {:fun, 2},
-        required: false,
-        doc:
-          "a VERDICT node's result: `(group_term, [item] -> status)` — a status string, " <>
-            "or `{status, strength}` where the host's tuple carries strength. The key " <>
-            "derives exactly as a payload row's (`key:`/`key_prefix:`/the `\"|\"` default). " <>
-            "Required on `verdict? true` nodes; forbidden elsewhere."
-      ],
       upsert: [
         type: {:fun, 2},
         required: false,
@@ -456,7 +445,6 @@ defmodule ReactiveDag.Node do
       :key_prefix,
       :key_rule,
       :into,
-      :status,
       :upsert,
       outer: false,
       __identifier__: nil,
@@ -528,14 +516,6 @@ defmodule ReactiveDag.Node do
             "or the fn escape hatch `(join_key, left_item_or_nil, right_item_or_nil -> " <>
             "row)` for computed columns (variance = a − b). left is nil only for " <>
             "`outer: true` right-only keys. A VERDICT node declares `status:` instead."
-      ],
-      status: [
-        type: {:fun, 3},
-        required: false,
-        doc:
-          "a VERDICT node's result: `(join_key, left_or_nil, right_or_nil -> status)` — " <>
-            "a status string or `{status, strength}`. Required on `verdict? true` nodes; " <>
-            "forbidden elsewhere."
       ],
       outer: [
         type: :boolean,
@@ -971,12 +951,6 @@ defmodule ReactiveDag.Node do
         doc:
           "`(key, row -> keyword)` — extra opts for the coordination write when the payload loop `Op.put`s a changed key, so a host `CoordinationWriter` can write EXTENSION COLUMNS (e.g. `source_ref`, a fingerprint) during a `reduce`/`join`. Without it, the loop writes spine columns only. (Retain-if-vanish/tombstone is a LEAF concern — reconcile a source-fed leaf via `ReactiveDag.Tuple.reconcile`, not here.)"
       ],
-      verdict?: [
-        type: :boolean,
-        default: false,
-        doc:
-          "VERDICT-ONLY node (named `verdict?` to match `leaf?`): its computed result lives entirely in the coordination tuple (`status`/`strength`), with NO payload table of its own. Its `reduce`/`join` declares `status:` — the verdict IS the result, written straight into the tuple via `Op.put`; keys derive as a payload row's would. No resource table, no `into:`, no `upsert:`, no attributes. Use for nodes whose output fits the tuple's fixed schema (e.g. a compliance verdict), as opposed to nodes that materialize typed rows. (Distinct from `ReactiveDag.Verdict`, the read-side status rollup.)"
-      ],
       source: [
         type: :atom,
         doc: "convenience: a leaf's source binding id (also merged into meta)"
@@ -1121,6 +1095,41 @@ defmodule ReactiveDag.Node do
     Enum.map(cells, &resolve_read_cell(&1, by_id))
   end
 
+  # a UNION reads its inputs' ROWS, so like a declarative read it needs each
+  # input's resource and key derivation — cross-node facts, resolved here.
+  defp resolve_read_cell(%{meta: %{union: %{from: from}}} = cell, by_id) do
+    sources =
+      Map.new(from, fn input ->
+        id = to_string(input)
+        source = by_id[id]
+
+        resource = source && source.meta[:resource]
+
+        # a union reads ROWS, so an input needs somewhere to keep them. A node
+        # with a resource but no attributes has a table in name only — that is
+        # the tableless-verdict shape, and it would silently union nothing.
+        if is_nil(resource) || Ash.Resource.Info.attributes(resource) == [] do
+          raise ArgumentError,
+                "reactive_dag: #{cell.id} unions over #{inspect(input)}, " <>
+                  if(is_nil(source),
+                    do: "which is not a cell in this graph.",
+                    else: "which has no rows to read — a union reads its inputs' rows, " <>
+                            "and #{inspect(resource)} declares no attributes."
+                  ) <>
+                  " Point `from:` at nodes with payload attributes."
+        end
+
+        {id,
+         %{
+           resource: source.meta[:resource],
+           payload_key: source.meta[:payload_key],
+           identity_fields: source.meta[:identity_fields]
+         }}
+      end)
+
+    %{cell | meta: Map.put(cell.meta, :union_sources, sources)}
+  end
+
   defp resolve_read_cell(cell, by_id) do
     spec = cell.meta[:reduce] || cell.meta[:join] || per_key_read_spec(cell)
 
@@ -1139,13 +1148,6 @@ defmodule ReactiveDag.Node do
                     " — a combinator read is an Ash read of the over node's resource. " <>
                     "Point `over:` at a resource-backed node, or use `run`/`compute` " <>
                     "for a non-Ash read."
-
-          over.meta[:verdict] ->
-            raise ArgumentError,
-                  "reactive_dag: #{cell.id} reads over #{inspect(spec.over)}, a VERDICT " <>
-                    "node — its result lives in the coordination tuple, not a payload " <>
-                    "table, so there are no rows to read. Point `over:` at a payload " <>
-                    "node, or use `run`/`compute` to read the tuple."
 
           Ash.Resource.Info.attributes(resource) == [] ->
             raise ArgumentError,
@@ -1511,33 +1513,6 @@ defmodule ReactiveDag.Node do
     Ext.get_entities(resource, [:reactive]) |> Enum.find(&match?(%Aggregate{}, &1))
   end
 
-  # `true` when the node is verdict-only, else nil (so it's dropped from meta and
-  # `meta[:verdict]` stays falsy for the common payload-bearing case). Guards the
-  # half-state: a verdict node stores nothing but the tuple, so declaring payload
-  # attributes on it is a mistake (the verdict write ignores them) — raise rather
-  # than silently drop the columns.
-  defp verdict_flag(resource) do
-    if Ext.get_opt(resource, [:reactive], :verdict?, false) do
-      case payload_attributes(resource) do
-        [] ->
-          true
-
-        extra ->
-          raise """
-          reactive_dag: node #{inspect(resource)} is `verdict? true` but declares \
-          payload attribute(s) #{inspect(extra)}. A verdict node's result lives in \
-          the coordination tuple — those attributes would never be written. Drop \
-          them (use `data_layer: Ash.DataLayer.Simple`, no attributes), or remove \
-          `verdict?` to make it a payload node.
-          """
-      end
-    else
-      nil
-    end
-  end
-
-  # a COMPOSITE primary key means the node is IDENTITY-KEYED: rows upsert by
-  # identity, and the cell key is the serialization of these fields in order.
   defp identity_fields(resource) do
     case Ash.Resource.Info.primary_key(resource) do
       pk when is_list(pk) and length(pk) > 1 -> pk
@@ -1557,19 +1532,6 @@ defmodule ReactiveDag.Node do
     end
   end
 
-  # public, non-primary-key attributes — the payload columns a verdict node must not have.
-  defp payload_attributes(resource) do
-    resource
-    |> Ash.Resource.Info.public_attributes()
-    |> Enum.reject(& &1.primary_key?)
-    |> Enum.map(& &1.name)
-  end
-
-  # the OPEN host binding folded into a cell's meta: the `meta:` keyword list, the
-  # source/driver/over conveniences, and the combinator spec under its kind key
-  # (`:reduce` | `:join`) — which ReactiveDag.Node.Recompute runs. `all_refs` is
-  # the node's resolved Ref legs, from which the GATED pairs are recorded (graph
-  # assembly reads them back to interpose attested cells — no id-string parsing).
   defp extra_meta(resource, _all_refs) do
     combinator_meta =
       case combinator(resource) do
@@ -1609,7 +1571,6 @@ defmodule ReactiveDag.Node do
         payload_action: Ext.get_opt(resource, [:reactive], :payload_action, nil),
         coordination_opts: Ext.get_opt(resource, [:reactive], :coordination_opts, nil),
         identity_fields: identity_fields(resource),
-        verdict: verdict_flag(resource),
         context_inputs: context_inputs(resource)
       }
       |> Enum.reject(fn {_k, v} -> is_nil(v) end)
