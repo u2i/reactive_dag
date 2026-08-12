@@ -39,14 +39,8 @@ cleanly as Ash actions.
 config :reactive_dag, repo: MyApp.Repo
 ```
 
-**The only required key.** Omitting it raises on the *first query*, not at boot:
-
-```
-** (RuntimeError) reactive_dag: set `config :reactive_dag, repo: MyApp.Repo`
-```
-
-which may be a long way into a deploy. A boot-time check is
-[tracked separately](https://github.com/u2i/reactive_dag/issues/53).
+**The only required key.** Omitting it raises on the *first query* — which may
+be a long way into a deploy — so validate at boot instead (below).
 
 ### `:dirty_table`, `:tuple_table`
 
@@ -139,6 +133,40 @@ own — the library reports, the host records). The buffer is per-node, in
 memory, and lost on restart; it exists so a dashboard has something to show
 without the host building storage. A host wanting history stores the report
 where its runs already live.
+
+## Validating at boot
+
+Misconfiguration otherwise surfaces at the first query, in whatever process
+happened to trigger it. `ReactiveDag.Config.validate!/0` moves that to boot:
+
+```elixir
+def start(_type, _args) do
+  ReactiveDag.Config.validate!()
+  Supervisor.start_link(children, opts)
+end
+```
+
+```
+** (ReactiveDag.Config.Error) reactive_dag is misconfigured:
+
+  * `:repo` is not set (required) — add `config :reactive_dag, repo: MyApp.Repo`
+  * `:coordination_writer` MyApp.Writer does not implement
+    ReactiveDag.CoordinationWriter (missing: put/3, delete/2)
+  * `:dirty_table` "my dirty" is not a valid SQL identifier
+```
+
+It reports **every** problem, not the first — a config with three mistakes
+should take one deploy to fix. `Config.problems/0` returns the same list without
+raising, for a host that would rather log them.
+
+**The host calls it**; the library does not start its own application to do it
+automatically. That would give `reactive_dag` a supervision tree and an opinion
+about when it starts, and would make the check unskippable by tests that
+deliberately run unconfigured.
+
+It checks only what is *definitely* wrong, and touches no database — whether
+the tables exist is `ReactiveDag.Migration`'s business, and a boot check that
+queried would make booting depend on the database being reachable.
 
 ## What is *not* configured here
 
