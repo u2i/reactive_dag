@@ -19,9 +19,7 @@ defmodule ReactiveDag.ConfigTest do
     :coordination_writer,
     :dirty_table,
     :tuple_table,
-    :insights_keep,
-    :attestation_resource,
-    :attestation_cell
+    :insights_keep
   ]
 
   defmodule GoodRepo do
@@ -166,27 +164,6 @@ defmodule ReactiveDag.ConfigTest do
 
       assert [problem] = Config.problems()
       assert problem =~ "positive integer"
-    end
-  end
-
-  describe "attestations" do
-    test "both absent is fine — attestations are opt-in" do
-      assert Config.problems() == []
-    end
-
-    test "a resource that isn't loadable" do
-      Application.put_env(:reactive_dag, :attestation_resource, NoSuchAttestationResource)
-
-      assert [problem] = Config.problems()
-      assert problem =~ ":attestation_resource"
-      assert problem =~ "not a loadable module"
-    end
-
-    test "a cell id that isn't a string" do
-      Application.put_env(:reactive_dag, :attestation_cell, :attestations)
-
-      assert [problem] = Config.problems()
-      assert problem =~ "must be a string"
     end
   end
 

@@ -18,7 +18,7 @@ defmodule ReactiveDag.Node.Verifiers.VerifyReactive do
       Verifier.get_entities(dsl, [:reactive])
       |> Enum.reject(
         &(match?(%Ref{}, &1) or match?(%Context{}, &1) or match?(%Compose{}, &1) or
-            match?(%RecomputeBy{}, &1) or match?(%ReactiveDag.Attestation.Requirement{}, &1))
+            match?(%RecomputeBy{}, &1))
       )
 
     # NOT Attested: `attested` + an explicit `compute` is a documented pair

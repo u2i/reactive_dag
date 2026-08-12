@@ -44,7 +44,6 @@ defmodule ReactiveDag.MixProject do
         "guides/authoring-nodes.md",
         "guides/llm-nodes.md",
         "guides/sources.md",
-        "guides/attestations.md",
         "guides/seams.md",
         "README.md",
         "docs/adr-001-reactive-dag-library.md"

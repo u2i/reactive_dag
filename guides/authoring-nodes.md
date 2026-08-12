@@ -411,7 +411,6 @@ context :people                   # read-as-context: consulted, never triggers
 depends_on [:a, :b]               # flat sugar — one ref per id
 reduce over: :x, ...              # a combinator's `over:` implies a ref
 recompute_by :x, to: :xs, ...     # ...as does `recompute_by to:`
-ref :machines, gate: :ownership   # gated: consume through the attested view
 ```
 
 **`ref` vs `context`** is the load-bearing distinction — a change to a `ref`
@@ -435,9 +434,6 @@ One boundary: a `context` edge still participates in depth ordering (that is
 what guarantees the target settles first), so it cannot form a cycle —
 `Graph.build` raises. It reads settled upstream context; it is not a feedback
 mechanism.
-
-`gate:` is covered in the [Attestations](attestations.md) guide — it interposes
-an attested view on the edge, admitting only signed rows.
 
 ## Nested expressions: `compose`
 
@@ -529,6 +525,6 @@ plan = ReactiveDag.Node.graph([NodeA, NodeB, ...], for_each: &fetch/1)
 ```
 
 Assembly is where cross-resource resolution happens: refs are checked against
-real cells, ids must be unique, cycles are rejected, attestation requirements
+real cells, ids must be unique, cycles are rejected
 are resolved and their interposed cells manufactured. A broken graph fails
 here, with the offending id in the message.

@@ -111,7 +111,7 @@ Corollary: when a source feeds several leaves and only some upstreams fail,
 write the leaves you could observe and skip the ones you couldn't — never let
 one vendor's outage discard another's (or a human's) data. If two kinds of
 evidence keep ending up in one poll, that is usually the signal they are two
-sources (see the [Attestations](attestations.md) guide for the canonical case).
+sources.
 
 ## Humans are a source too
 
@@ -123,7 +123,7 @@ those differences need machinery; they are properties of the source, not of
 the propagation.
 
 For human assertions that carry *accountability* — who confirmed what, when,
-and whether it still holds — use the attestation machinery rather than a bare
+and whether it still holds — carry a `ReactiveDag.Basis` digest beside it rather than a bare
 leaf write: it adds the signer, the content basis, and read-time force
 evaluation on top of exactly this propagation path.
 

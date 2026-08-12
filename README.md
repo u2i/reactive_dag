@@ -10,9 +10,7 @@ pipeline and the u2i compliance portal's `model_eval`), and now shared by both.
 started](https://hexdocs.pm/reactive_dag/getting-started.html),
 [Configuration](https://hexdocs.pm/reactive_dag/configuration.html), [Authoring
 nodes](https://hexdocs.pm/reactive_dag/authoring-nodes.html), [LLM nodes](https://hexdocs.pm/reactive_dag/llm-nodes.html), [Sources and
-scanning](https://hexdocs.pm/reactive_dag/sources.html),
-[Attestations](https://hexdocs.pm/reactive_dag/attestations.html) (human
-sign-off as a first-class input), and [The
+scanning](https://hexdocs.pm/reactive_dag/sources.html), and [The
 seams](https://hexdocs.pm/reactive_dag/seams.html). This
 README is the reference-style overview.
 
