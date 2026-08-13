@@ -151,8 +151,9 @@ report.steps
 The `%ReactiveDag.Drain.Report{}` is the drain's processing trace — what ran,
 why (`triggered_by` reconstructs the causal tree), what actually changed, and
 how long each step took. Persist it wherever your runs live (a job's meta, a
-run table): the library reports, the host records. For progress *during* a
-long drain, pass `on_step: fn cell, step -> ... end`.
+run table): the library reports, the host records. For progress *during* a long
+drain, attach to the `[:reactive_dag, :drain, :step]` telemetry event — see
+`ReactiveDag.Drain` for the full event list.
 
 `graph/2` validates the whole thing at assembly: every edge resolves, ids are
 unique, the graph is acyclic — an authoring mistake fails loudly here, not

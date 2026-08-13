@@ -39,15 +39,41 @@ defmodule ReactiveDag.Drain do
     * `:recompute` — a `ReactiveDag.RecomputeStrategy` module (required unless the
       graph is leaves-only).
     * `:key_rule`  — a `ReactiveDag.KeyRule` module (default: identity mapping).
-    * `:on_step`   — optional `(cell, step) -> any` for STREAMING (live progress
-      UI) — called after each cell recomputes with the same fields the report
-      step carries (minus `:cell`/`:pass`, which the report adds). The full
-      trace arrives in the report either way; use `on_step` only when you need
-      it before the drain finishes.
     * `:max_passes` — runaway guard (default #{100_000}): exceeding it raises
       `ReactiveDag.Drain.RunawayError`, whose `:report` field carries the
       partial trace — the step list showing which cells keep re-dirtying each
       other is exactly the diagnostic for the cycle the guard suspects.
+
+  ## Telemetry
+
+  The drain emits `:telemetry` events, so a host observes it without threading a
+  callback through every call site — a dashboard, a metrics backend and a log
+  can all attach independently, and none of them changes how the drain is
+  invoked.
+
+  | event | measurements | metadata |
+  |---|---|---|
+  | `[:reactive_dag, :drain, :start]` | `system_time` | `cells` (count in the plan) |
+  | `[:reactive_dag, :drain, :step]` | `duration_us`, `claimed`, `changed` | `cell`, `pass`, `changed_keys`, `triggered_by`, `step` |
+  | `[:reactive_dag, :drain, :stop]` | `duration_us`, `passes`, `steps`, `changed` | `report`, `cells_touched` |
+  | `[:reactive_dag, :drain, :exception]` | `duration_us` | `kind`, `reason`, `report` |
+
+  `:step` carries the changed KEYS, not just their count, because that is what
+  makes a consumer incremental: a dashboard that knows which cells moved reads
+  only those instead of re-reading the graph.
+
+      :telemetry.attach("my-drain-log", [:reactive_dag, :drain, :stop], fn _e, m, meta, _ ->
+        Logger.info("drained \#{length(meta.cells_touched)} cells in \#{m.duration_us}us")
+      end, nil)
+
+  `:exception` fires for a `RunawayError` too, carrying the partial report — a
+  monitor should see the runaway, not just the crash.
+
+  This replaces an earlier `:on_step` option. A closure threaded through `run/2`
+  could only serve whoever owned that call site — a dashboard, a metrics backend
+  and a log could not all have one, and adding a second consumer meant editing
+  every place the drain was invoked. Telemetry has no such limit, and a caller
+  who wants a plain closure can attach one in three lines.
   """
 
   require Logger
@@ -69,8 +95,47 @@ defmodule ReactiveDag.Drain do
   @spec run(Plan.t(), keyword()) :: {:ok, Report.t()}
   def run(%Plan{} = plan, opts \\ []) do
     t0 = System.monotonic_time(:microsecond)
-    do_run(plan, opts, 0, %{}, [], t0)
+
+    :telemetry.execute(
+      [:reactive_dag, :drain, :start],
+      %{system_time: System.system_time()},
+      %{cells: map_size(plan.cells)}
+    )
+
+    try do
+      result = do_run(plan, opts, 0, %{}, [], t0)
+      emit_stop(result, t0)
+      result
+    catch
+      kind, reason ->
+        :telemetry.execute(
+          [:reactive_dag, :drain, :exception],
+          %{duration_us: System.monotonic_time(:microsecond) - t0},
+          %{kind: kind, reason: reason, report: partial_report(reason)}
+        )
+
+        :erlang.raise(kind, reason, __STACKTRACE__)
+    end
   end
+
+  defp emit_stop({:ok, %Report{} = report}, t0) do
+    :telemetry.execute(
+      [:reactive_dag, :drain, :stop],
+      %{
+        duration_us: System.monotonic_time(:microsecond) - t0,
+        passes: report.passes,
+        steps: length(report.steps),
+        changed: Report.changed_total(report)
+      },
+      %{report: report, cells_touched: Report.cells(report)}
+    )
+  end
+
+  defp emit_stop(_other, _t0), do: :ok
+
+  # a RunawayError carries the partial trace; anything else has none to give.
+  defp partial_report(%RunawayError{report: report}), do: report
+  defp partial_report(_reason), do: nil
 
   defp do_run(plan, opts, passes, cause, steps, t0) do
     max = opts[:max_passes] || @max_passes
@@ -157,7 +222,19 @@ defmodule ReactiveDag.Drain do
                 meta: meta
               }
 
-              if f = opts[:on_step], do: f.(cell, step)
+              :telemetry.execute(
+                [:reactive_dag, :drain, :step],
+                %{duration_us: us, claimed: length(keys), changed: length(changed)},
+                %{
+                  cell: cell_id,
+                  pass: passes,
+                  # the KEYS, not just the count: a consumer that knows which
+                  # keys moved can read only those, which is the whole point
+                  changed_keys: changed,
+                  triggered_by: Map.get(cause, cell_id),
+                  step: step
+                }
+              )
 
               # Every parent we just dirtied was triggered by this cell.
               cause =
