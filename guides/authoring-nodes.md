@@ -31,6 +31,7 @@ real change.
 | `recompute_by` + `reduce` | the unit a change invalidates, then the fold | you know what a change should re-do (the common case) |
 | declarative `reduce`/`join` | attributes + fold keywords | grouping/joining by attributes; the library reads Ash for you |
 | per-slot escapes | a fn for the one slot that outgrew attributes | `query:`, computed groups/keys/rows, `expand:` |
+| `per_key :action` | an action called once per row | expensive per-row work — an LLM, an embedding, a fetch |
 | `run :action` | a generic Ash action on this resource | arbitrary recompute that should stay a first-class action |
 | `compute Module` | a `ReactiveDag.Op` | recompute that outgrows Ash entirely |
 
@@ -352,6 +353,42 @@ A union does not correlate. Each input contributes rows independently, so a
 scoped claim reads **only the input that moved** and nothing else. The
 provenance in the key is exactly the translation a join could not do.
 
+### `per_key` — one action call per row
+
+```elixir
+per_key :summarise,
+  args: [text: :body],          # the row's :body becomes the `text` argument
+  fingerprint: [:body],         # SKIP the call when :body has not moved
+  into: [summary: :summary],    # the result's "summary" → this :summary
+  max_concurrency: 8            # bounded Task.async_stream over the rows
+```
+
+For work that is expensive **per row** rather than per cell — an LLM call, an
+embedding, a document fetch. The library drives the loop: scope to the claimed
+keys, read those rows, call the action once each, write each result through the
+payload loop.
+
+`fingerprint:` is why this is a rung of its own rather than a shape of `run`.
+The library can see what a `per_key` node depends on, so it partitions **before**
+calling: a row whose fingerprint has not moved costs nothing at all. It reports
+`%{called: n, skipped: n}` in the drain step's meta, so the saving is visible
+rather than assumed.
+
+```
+first pass                    → %{called: 40, skipped: 0}
+second pass, two rows edited  → %{called: 2,  skipped: 38}
+```
+
+`max_concurrency:` bounds a `Task.async_stream` over the rows, since the latency
+is a remote call rather than CPU. Results apply in row order regardless, so the
+changed-key list stays deterministic. Rows skipped by `fingerprint:` never enter
+the stream, so slots are spent only on real calls.
+
+An **LLM node** is this rung with an [ash_ai](https://hexdocs.pm/ash_ai)
+prompt-backed action behind it — no library code required. See
+[LLM nodes](llm-nodes.html) for the shape, the cost discipline, and how to test
+one without a model.
+
 ### `run` — a generic Ash action as the recompute
 
 ```elixir
@@ -379,10 +416,11 @@ computation stays a first-class action: arguments, policies, testable with
 does its own domain writes, and the keys it returns are what propagates. The
 action must exist and be generic — verified at compile time.
 
-An **LLM node** is this rung with an [ash_ai](https://hexdocs.pm/ash_ai)
-prompt-backed action behind it — no library code required. See
-[LLM nodes](llm-nodes.html) for the shape, the `ref` vs `context` billing
-distinction, and how to test one without a model.
+Reach for `run` over `per_key` when the recompute is genuinely **whole-cell** —
+one action that rewrites the node in a pass. The trade is that an action is
+opaque: the library cannot see what it depends on, so it cannot fingerprint it,
+and a whole-cell claim re-runs everything. Per-row work that costs money belongs
+on `per_key` for exactly that reason.
 
 ### `compute` — the outermost escape hatch
 

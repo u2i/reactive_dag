@@ -262,7 +262,7 @@ end
 That makes the scanner↔leaf pairing **a fact of the graph**, which buys two
 things:
 
-- **`Node.graph/2` verifies it.** The module must implement `ReactiveDag.Source`,
+- **`ReactiveDag.Node.graph/2` verifies it.** The module must implement `ReactiveDag.Source`,
   and its own `leaf_cells/1` must claim this leaf. A scanner refactored to feed
   `"agenda_docs_v2"` while a resource still declares `scan` fails at assembly,
   rather than polling into a cell nobody reads. No `verify!/2` call needed.
