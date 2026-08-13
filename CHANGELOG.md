@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.17.0-rc.6](https://github.com/u2i/reactive_dag/compare/v0.17.0-rc.5...v0.17.0-rc.6) (2026-08-13)
+
+
+### ⚠ BREAKING CHANGES
+
+* the `:on_step` option is removed. A caller using it attaches a handler instead — three lines, and it no longer has to be the only consumer:
+
+### Features
+
+* the drain emits telemetry, replacing the :on_step callback ([332ca2a](https://github.com/u2i/reactive_dag/commit/332ca2a4e20b5842061b24a90c90528ae915c53b))
+
 ## [0.17.0-rc.5](https://github.com/u2i/reactive_dag/compare/v0.17.0-rc.4...v0.17.0-rc.5) (2026-08-12)
 
 
