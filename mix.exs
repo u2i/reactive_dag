@@ -14,9 +14,9 @@ defmodule ReactiveDag.MixProject do
       elixir: "~> 1.18",
       description:
         "Reactive DAG engine as an Ash extension: dirty frontier, depth-ordered " <>
-          "incremental drain, change propagation, and a shared coordination-tuple " <>
-          "spine. Author nodes as Ash resources with reduce/join/aggregate " <>
-          "combinators; the domain plugs in at three seams.",
+          "incremental drain, change propagation. Author nodes as Ash resources " <>
+          "with reduce/join/aggregate combinators; each node's results are its own " <>
+          "rows, and the domain plugs in at three seams.",
       elixirc_paths: elixirc_paths(Mix.env()),
       deps: deps(),
       docs: docs(),
