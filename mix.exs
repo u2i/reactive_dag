@@ -97,6 +97,9 @@ defmodule ReactiveDag.MixProject do
       {:ash, "~> 3.5"},
       {:ash_postgres, "~> 2.0"},
       {:spark, "~> 2.7"},
+      # the drain's observability seam. Arrives transitively via Ash anyway, but
+      # the drain calls :telemetry.execute directly, so it is a direct dependency.
+      {:telemetry, "~> 1.1"},
       # TEST-ONLY: proves an ash_ai prompt-backed action composes with `run`,
       # so an LLM node needs no library code (see guides/llm-nodes.md). Never a
       # runtime dependency — hosts that want LLM nodes add ash_ai themselves.
