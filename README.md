@@ -416,6 +416,13 @@ the host can surface the gap.
 **Human edits** — a managed list or an approval writes a leaf like anything else:
 the host's normal write, then a dirty mark (or `dirties_on`).
 
+**More:** [Sources and scanning](https://hexdocs.pm/reactive_dag/sources.html)
+covers the parts a real scanner runs into — why the poll/drain split is a design
+invariant rather than a convention, multi-leaf and fan-out sources
+(`leaf_cells/1` when no single leaf owns the cells), the corollary when *some*
+upstreams fail and others succeed, choosing between `dirties_on` and a `Source`,
+and when a scanner is the wrong tool.
+
 ## LLM and other expensive per-row work
 
 An LLM recompute needs **no library code**. [ash_ai](https://hexdocs.pm/ash_ai)'s
@@ -486,6 +493,12 @@ Two more options worth knowing:
 
 Nothing here is LLM-specific: an embedding call, a PDF fetch, or an OCR pass is
 the same rung with a different action.
+
+**More:** [LLM nodes](https://hexdocs.pm/reactive_dag/llm-nodes.html) goes into
+the economics — why the drain being sequential means parallelism has to live
+inside a recompute, why embeddings are usually not a node at all, how dirty-key
+scoping bounds the bill, testing a prompt node without a model, and the rough
+edges worth knowing before you ship one.
 
 ## Reading results
 

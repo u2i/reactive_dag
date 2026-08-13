@@ -207,20 +207,10 @@ run prompt("openai:gpt-4o", prompt: {...}, req_llm: StubReqLLM)
 Assert on the *context* the stub receives to prove your prompt actually carried
 what you think it did — including the `context` edge's data.
 
-## Known rough edges
+## Watching the bill
 
-These are the reasons a first-class `llm` rung is still open
-([#30](https://github.com/u2i/reactive_dag/issues/30)); none of them block the
-shape above:
-
-- ~~No input fingerprinting.~~ **Solved** by `per_key … fingerprint:` above.
-  (A `run` node still re-bills on a whole-cell claim — the library cannot see
-  its inputs. That is the trade for `run`'s opacity.)
-- ~~One call per key, serially.~~ **Bounded concurrency solved** by
-  `max_concurrency:` above. Batching (N rows per prompt) remains open — it is a
-  different action contract, not a tuning knob.
-- ~~No token/cost telemetry.~~ **Solved.** A recompute may return
-  `{:ok, changed, meta}`, and the map rides on the drain's `%Report{}` step:
+A recompute may return `{:ok, changed, meta}`, and the map rides on the drain's
+`%Report{}` step:
 
   ```elixir
   def recompute(cell, keys) do
@@ -229,11 +219,42 @@ shape above:
   end
   ```
 
-  `Report.total(report, :tokens_in)` rolls one key up across every step, and
-  `ReactiveDag.Insights` carries it to a dashboard. The library never
-  interprets the map — cache hits, retries and rows scanned are equally valid
-  keys.
-- ~~The per-key map is hand-written.~~ **Solved** by the `per_key` rung.
+`Report.total(report, :tokens_in)` rolls one key up across every step. The
+library never interprets the map — cache hits, retries and rows scanned are
+equally valid keys.
+
+`per_key` populates it for you: `%{called: n, skipped: n}`, so the saving from
+`fingerprint:` is visible rather than assumed.
+
+For **live** cost — a budget alarm, a dashboard, a per-run log — the same numbers
+arrive as telemetry while the drain is still running, rather than only in the
+report at the end:
+
+```elixir
+:telemetry.attach("llm-cost", [:reactive_dag, :drain, :step], fn _e, _m, meta, _ ->
+  case meta.step.meta do
+    %{cost_usd: usd} -> MyApp.Budget.spend(meta.cell, usd)
+    _ -> :ok
+  end
+end, nil)
+```
+
+The handler runs synchronously in the drain's process, so keep it cheap — record
+the number and get out; do not call the billing API from inside it.
+
+## What is still missing
+
+One thing, and it is a contract change rather than a tuning knob:
+
+**Batching — N rows per prompt.** `per_key` is one call per row by design, so the
+fingerprint can decide per row and a failure blames one row. Feeding ten rows to
+one prompt means a different action shape (an array argument, an array result,
+and a story for partial failure), which is why it is not a `per_key` option.
+Tracked in [#49](https://github.com/u2i/reactive_dag/issues/49).
+
+A `run` node also still re-bills on a whole-cell claim: the library cannot see
+what an opaque action depends on, so it cannot fingerprint it. That is the trade
+for `run`'s freedom, and the reason `per_key` exists beside it.
 
 ## Where it sits on the ladder
 
