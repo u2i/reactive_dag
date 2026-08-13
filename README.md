@@ -290,34 +290,202 @@ end
 
 ## Getting data in
 
-**Ordinary writes** — `dirties_on [:create, :update, :destroy]`, as above. The
-mark happens inside the write's transaction.
+**Ordinary writes** — `dirties_on [:create, :update, :destroy]`, as in the
+pipeline above. The mark happens inside the write's own transaction, so no call
+site has to remember.
 
-**Scanners** — when the data comes from outside (a fleet API, a crawler, an LLM),
-the fetch is effectful and fallible, so it stays outside the drain. A leaf names
-its source and `ReactiveDag.Node.Rows.reconcile/3` does the set math:
+**A scanner** — when the data comes from outside (a crawler, a fleet API, a
+vendor export), the fetch is effectful and fallible, so it stays *outside* the
+drain. That split is a design invariant, not an accident: one unreachable vendor
+cannot wedge the recompute of everything else, and the drain stays re-runnable.
+
+### Writing a scanner
+
+The leaf is an ordinary resource that names its source:
 
 ```elixir
-reactive do
-  leaf? true
-  scan MyApp.Sources.FleetScan
-  fingerprint [:content_md5]     # what counts as a changed observation
+defmodule MyApp.Docs do
+  use Ash.Resource, data_layer: AshPostgres.DataLayer, extensions: [ReactiveDag.Node]
+
+  attributes do
+    attribute :url, :string, primary_key?: true
+    attribute :body, :string
+    attribute :content_md5, :string
+    attribute :last_seen_at, :utc_datetime_usec   # moves on EVERY poll
+  end
+
+  actions do
+    defaults [:read, :destroy]
+    create :upsert do upsert?(true); accept([:url, :body, :content_md5, :last_seen_at]) end
+  end
+
+  reactive do
+    leaf? true
+    scan MyApp.DocCrawler
+    fingerprint [:content_md5]     # what counts as a changed observation
+  end
 end
 ```
 
-`fingerprint` matters for a scanned leaf: its row carries fields that move on
-*every* observation without the observation having changed — a `last_seen_at` by
-definition, an `etag` a server may re-issue for identical bytes. Comparing every
-attribute would fire the cascade on each poll. Name the one value that decides
-instead.
+The source implements three callbacks. `poll/1` fetches, hands what it observed
+to `reconcile/3`, and returns the keys that changed:
 
-The discipline that matters most: **an upstream you could not reach writes
-nothing.** A scan that failed must not hand `reconcile/3` an empty set, or every
-key reads as vanished and a downstream rollup goes vacuously green. See
-[Sources and scanning](https://hexdocs.pm/reactive_dag/sources.html).
+```elixir
+defmodule MyApp.DocCrawler do
+  @behaviour ReactiveDag.Source
+
+  @impl true
+  def id, do: :doc_crawler
+
+  @impl true
+  def leaf_cells(_graph), do: ["docs"]
+
+  @impl true
+  def origin, do: %{label: "City site · agendas", url: "https://example.gov"}
+
+  @impl true
+  def poll(opts) do
+    case fetch_index() do
+      {:ok, docs} ->
+        by_url = Map.new(docs, &{&1.url, &1})
+
+        {:ok, changed} =
+          ReactiveDag.Node.Rows.reconcile(opts[:cell], Map.keys(by_url),
+            upsert: fn url -> Map.get(by_url, url) end
+          )
+
+        {:ok, %{changed: changed, unreachable: []}}
+
+      # an upstream we could not reach writes NOTHING — see below
+      {:error, reason} ->
+        {:ok, %{changed: [], unreachable: [{"docs", reason}]}}
+    end
+  end
+end
+```
+
+`upsert:` returns the row you observed and the library writes it, deciding
+`changed?` against the declared `fingerprint`. Return `nil` for a key you could
+not observe and it is skipped — written nowhere, reported as nothing.
+
+`reconcile/3` also does the set math: keys the scan no longer found are
+**retired** (their row destroyed) and reported as changed, because something
+disappearing is a change your downstream nodes need to see.
+
+Then poll and drain:
+
+```elixir
+{:ok, results} = ReactiveDag.Source.poll_all(plan)
+for {_source, %{changed: keys}} <- results do
+  ReactiveDag.Graph.dirty_parents(plan, "docs", keys, ReactiveDag.Node.KeyRule)
+end
+
+ReactiveDag.Drain.run(plan, recompute: ..., key_rule: ...)
+```
+
+`poll_all/1` finds every scanner from the plan's `scan` declarations, so there is
+no hand-kept list to fall out of date. `graph/2` has already checked that each
+declared module implements the behaviour *and* that its `leaf_cells/1` claims the
+leaf it is attached to.
+
+### Two things a scanner must get right
+
+**`fingerprint` decides what "changed" means.** A scanned row carries fields that
+move on *every* observation without the observation having changed: a
+`last_seen_at` by definition, an `etag` a server may re-issue for identical bytes.
+The default change detection compares every attribute, so without a fingerprint
+each poll fires the whole cascade. With `fingerprint [:content_md5]`:
+
+```
+first poll                      → changed: ["/a", "/b"]
+re-poll, identical bytes        → changed: []          ← last_seen_at moved; nothing else did
+re-poll, "/b" gone from index   → changed: ["/b"]      ← retired
+```
+
+Use the `(row -> value)` form when "the same observation" is not a plain field
+comparison — folding a listing title into the digest, say, so a renamed document
+re-fires even though its bytes are identical.
+
+**An upstream you could not reach writes nothing.** If the fetch fails and the
+scan hands `reconcile/3` an empty set, every key reads as vanished, every row is
+retired, and a downstream rollup over an empty set typically reads as *vacuously
+fine*. A scan that could not look must never render as a scan that found nothing —
+so on failure, write nothing, retire nothing, and report it in `unreachable:` so
+the host can surface the gap.
 
 **Human edits** — a managed list or an approval writes a leaf like anything else:
-the host's normal write, then a dirty mark.
+the host's normal write, then a dirty mark (or `dirties_on`).
+
+## LLM and other expensive per-row work
+
+An LLM recompute needs **no library code**. [ash_ai](https://hexdocs.pm/ash_ai)'s
+`prompt/2` builds an ordinary generic Ash action, and `per_key` calls a generic
+action once per input row — so an LLM node is `per_key` with a prompt behind it.
+`ash_ai` is not a dependency of this library; hosts that want it add it
+themselves.
+
+```elixir
+defmodule MyApp.Summaries do
+  use Ash.Resource, data_layer: AshPostgres.DataLayer, extensions: [ReactiveDag.Node]
+
+  import AshAi.Actions, only: [prompt: 2]
+
+  attributes do
+    attribute :key, :string, primary_key?: true
+    attribute :summary, :string
+    attribute :fingerprint, :string      # where the input hash lives
+  end
+
+  actions do
+    defaults [:read, :destroy]
+    create :upsert do upsert?(true); accept([:key, :summary, :fingerprint]) end
+
+    action :summarise, :map do
+      argument :text, :string, allow_nil?: false
+      run prompt("openai:gpt-4o",
+            prompt: {"You summarise documents", "Summarise: <%= @input.arguments.text %>"})
+    end
+  end
+
+  reactive do
+    recompute_by :key, to: :docs, from: :url
+
+    per_key :summarise,
+      args: [text: :body],          # the row's :body becomes the `text` argument
+      fingerprint: [:body],         # SKIP the call when :body is unchanged
+      into: [summary: :summary]     # the result's "summary" → this :summary
+
+    context :people                 # settled context; never re-triggers
+  end
+end
+```
+
+The library drives the loop: scope to the claimed keys, read those rows, call the
+action once each, write the structured output through the payload loop.
+
+**`fingerprint:` is the line that matters**, because the call costs money and
+latency. It partitions *before* calling, so an unchanged row costs nothing at all:
+
+```
+first pass                    → %{called: 1, skipped: 0}
+second pass, nothing moved    → %{called: 0, skipped: 1}
+```
+
+Those counts come back in the drain report's step meta, so the saving is visible
+rather than assumed. A `run` action would be opaque — the library cannot know what
+it depends on — which is why fingerprinting lives on this rung.
+
+Two more options worth knowing:
+
+- **`max_concurrency:`** — bounded `Task.async_stream` over the rows, since the
+  latency is a remote call rather than CPU. Results apply in row order regardless,
+  so the changed-key list stays deterministic.
+- **`context :people`** — the LLM reads a curated table but must not re-run every
+  time someone edits it. A context edge is a real input (validated, ordered by
+  depth so it settles first) that simply does not propagate.
+
+Nothing here is LLM-specific: an embedding call, a PDF fetch, or an OCR pass is
+the same rung with a different action.
 
 ## Reading results
 
