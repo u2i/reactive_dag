@@ -215,6 +215,38 @@ Order sources so that ones which only observe the world run before any source
 that derives from other cells' results — a deriving source that runs first
 computes against a stale model.
 
+## Seeing whether it worked
+
+A poll returns `%{changed: […], unreachable: […]}`, and both halves matter. An
+empty `changed` is ambiguous on its own — nothing moved, or nothing was looked
+at? — which is why `unreachable` exists. Log it, alert on it, or surface it; a
+gap that nobody sees is the failure mode this whole discipline exists to prevent.
+
+For the state of a leaf after the fact, read the cell:
+
+```elixir
+cell = plan.cells["machines"]
+
+ReactiveDag.Node.Rows.all(cell)               # what the leaf currently holds
+ReactiveDag.Insights.cell_status(plan, "machines")
+#=> %{key_count: 412, statuses: %{…}, failing_sample: […], …}
+```
+
+A leaf whose rows cannot be read at all reports `key_count: 0` rather than
+raising, so a health check can tell "the scan found nothing" from "I could not
+look" — the same distinction the honest-gap rule turns on.
+[reactive_dag_dashboard](https://github.com/u2i/reactive_dag_dashboard) renders
+this, including a per-leaf key count and the drain trace each poll produced.
+
+Put a `last_seen_at` on the leaf's resource (excluded from the `fingerprint`, so
+it does not fire the cascade) and staleness becomes an ordinary query:
+
+```elixir
+MyApp.Machines
+|> Ash.Query.filter(last_seen_at < ago(2, :day))
+|> Ash.read!()
+```
+
 ## Declaring the scanner: `scan`
 
 A leaf says which scanner feeds it:
@@ -230,7 +262,7 @@ end
 That makes the scanner↔leaf pairing **a fact of the graph**, which buys two
 things:
 
-- **`Node.graph/2` verifies it.** The module must implement `ReactiveDag.Source`,
+- **`ReactiveDag.Node.graph/2` verifies it.** The module must implement `ReactiveDag.Source`,
   and its own `leaf_cells/1` must claim this leaf. A scanner refactored to feed
   `"agenda_docs_v2"` while a resource still declares `scan` fails at assembly,
   rather than polling into a cell nobody reads. No `verify!/2` call needed.

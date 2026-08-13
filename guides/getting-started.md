@@ -3,7 +3,7 @@
 `reactive_dag` turns a set of Ash resources into an incrementally-recomputed
 dependency graph: leaves are fed by scanners or humans, derived cells recompute
 when — and only when — something beneath them changed, and every cell's result
-is readable through one shared coordination table.
+is rows in that cell's own resource — queryable with ordinary Ash reads.
 
 The library owns the *schedule* (what is dirty, what recomputes, in what
 order); your app owns the *meaning* (what an op computes, what a status string
@@ -86,7 +86,20 @@ Two nodes: a leaf fed from outside, and a derived rollup over it.
 
 ```elixir
 defmodule MyApp.FiscalLines do
-  use Ash.Resource, data_layer: Ash.DataLayer.Simple, extensions: [ReactiveDag.Node]
+  use Ash.Resource, data_layer: AshPostgres.DataLayer, extensions: [ReactiveDag.Node]
+
+  # A leaf is an ordinary resource holding ordinary rows — the rollup below
+  # READS them, so it needs real attributes and a read action.
+  attributes do
+    attribute :id, :string, primary_key?: true
+    attribute :fund, :string
+    attribute :amount, :float
+  end
+
+  actions do
+    defaults [:read, :destroy]
+    create :upsert do upsert?(true); accept([:id, :fund, :amount]) end
+  end
 
   reactive do
     op :source
@@ -106,9 +119,10 @@ defmodule MyApp.BudgetRollups do
   end
 
   actions do
+    defaults [:read, :destroy]
+
     create :upsert do
       upsert? true
-      upsert_identity :key
       accept [:key, :fund, :total]
     end
   end
@@ -126,9 +140,14 @@ defmodule MyApp.BudgetRollups do
 end
 ```
 
+Draining this writes one row per fund — `{"gf", 150.0}`, `{"water", 20.0}` — and
+reports `["gf", "water"]` as changed.
+
 The resource **is** the node *and* its payload table — and the computation is
 declared, not coded: no read plumbing, no write plumbing, no key derivation to
-author. When a shape outgrows attributes, each slot has an escape hatch. See [Authoring nodes](authoring-nodes.md) for every
+author. Note the `:read` action on both: the library reads the input's resource
+itself, so a node with nothing to read fails at `graph/2` with a message saying
+so. When a shape outgrows attributes, each slot has an escape hatch. See [Authoring nodes](authoring-nodes.md) for every
 node shape.
 
 ## Assemble and run
@@ -228,9 +247,9 @@ ReactiveDag.Verdict.for_cell(cell)           # a rolled verdict + failing sample
 ReactiveDag.Insights.cell_status(plan, "budget_rollups")
 ```
 
-The coordination spine is not in this path. It records which keys a cell holds
-— for a source-fed leaf's reconcile, and for a node that writes its rows
-elsewhere; results live where you can query them.
+There is no second store to consult. A node's results are its own rows; the one
+table the library owns is the dirty frontier, and that holds pending work rather
+than answers.
 
 ## Where next
 

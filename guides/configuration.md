@@ -107,7 +107,7 @@ end
 ```
 
 It reports **every** problem, not the first — a config with two mistakes
-should take one deploy to fix. `Config.problems/0` returns the same list without
+should take one deploy to fix. `ReactiveDag.Config.problems/0` returns the same list without
 raising, for a host that would rather log them.
 
 **The host calls it**; the library does not start its own application to do it
