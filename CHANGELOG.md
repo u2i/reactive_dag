@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.17.0-rc.7](https://github.com/u2i/reactive_dag/compare/v0.17.0-rc.6...v0.17.0-rc.7) (2026-08-14)
+
+
+### Features
+
+* poll_cell/3 + controls/1 — the library describes, the host builds the GUI ([9ef7f73](https://github.com/u2i/reactive_dag/commit/9ef7f734fad7812d0ba5264a04202b42fdf72bdb))
+* retain_if_vanished — keep the row when a scan drops its key ([#85](https://github.com/u2i/reactive_dag/issues/85)) ([3bcebd4](https://github.com/u2i/reactive_dag/commit/3bcebd4b02a8382cd6aaee2e6a9cfcd0910872e5))
+* retain_if_vanished — keep the row when a scan drops its key ([#85](https://github.com/u2i/reactive_dag/issues/85)) ([76eafcb](https://github.com/u2i/reactive_dag/commit/76eafcbd2add27efa95e3a1c05aa6a7ecece9335))
+* scan args + cadence, declared on the leaf ([#86](https://github.com/u2i/reactive_dag/issues/86)) ([7c183c3](https://github.com/u2i/reactive_dag/commit/7c183c3f5bcf6b3bc1911a8a99e3bf7b9204caa5))
+* scan args + cadence, declared on the leaf ([#86](https://github.com/u2i/reactive_dag/issues/86)) ([29ef2fe](https://github.com/u2i/reactive_dag/commit/29ef2fe58a59ee9917f37f19e5462c324349c25f))
+
 ## [0.17.0-rc.6](https://github.com/u2i/reactive_dag/compare/v0.17.0-rc.5...v0.17.0-rc.6) (2026-08-13)
 
 
