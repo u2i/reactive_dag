@@ -914,6 +914,17 @@ defmodule ReactiveDag.Node do
             "and the computation it must agree with belong in one unit."
       ],
       leaf?: [type: :boolean, default: false, doc: "true for a source-fed leaf (no compute)"],
+      retain_if_vanished: [
+        type: :boolean,
+        default: false,
+        doc:
+          "keep the row when a scan stops returning its key, instead of destroying it. For a " <>
+            "leaf whose upstream WITHDRAWS items but whose artifacts you keep — the listing " <>
+            "dropped the document, the PDF you fetched is still yours. The key is NOT reported " <>
+            "as changed: the row is still there, so from a consumer's side nothing happened, " <>
+            "and re-polling stays quiet. Leave it false on a DERIVED node, where a row whose " <>
+            "inputs are gone is stale rather than archival."
+      ],
       dirties_on: [
         type: {:list, {:one_of, [:create, :update, :destroy]}},
         required: false,
@@ -1580,6 +1591,7 @@ defmodule ReactiveDag.Node do
         payload_action: Ext.get_opt(resource, [:reactive], :payload_action, nil),
         fingerprint: Ext.get_opt(resource, [:reactive], :fingerprint, nil),
         fingerprint_attribute: Ext.get_opt(resource, [:reactive], :fingerprint_attribute, nil),
+        retain_if_vanished: Ext.get_opt(resource, [:reactive], :retain_if_vanished, nil),
         identity_fields: identity_fields(resource),
         context_inputs: context_inputs(resource)
       }

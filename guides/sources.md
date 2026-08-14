@@ -155,6 +155,46 @@ This is the same `fingerprint` vocabulary `per_key` uses to skip an expensive
 action when its inputs have not moved — one concept, one implementation, at two
 rungs of the ladder.
 
+## Keeping what the upstream dropped
+
+By default a key the scan stops returning has its row **destroyed**. For a
+derived node that is right: a row whose inputs are gone is stale, and a stale
+derived row is indistinguishable from a live one.
+
+For a leaf it is often wrong. The listing dropped the document, but the PDF you
+fetched is still yours — and may not be re-fetchable. Declare it:
+
+```elixir
+reactive do
+  leaf? true
+  scan MyApp.DocCrawler
+  retain_if_vanished true
+end
+```
+
+The row stays, untouched, with everything on it.
+
+**A retained key is not reported as changed.** The row is still there and
+nothing about it moved, so from a consumer's side nothing happened — a rollup
+over this leaf still counts it, correctly, because it is still a row. That also
+keeps polling idempotent: reporting it would report it *again* on every
+subsequent poll, forever, since nothing marks the key as already handled.
+
+```
+poll 1: [a, b]   → changed: ["a", "b"]
+poll 2: [a]      → changed: []          ← b's row kept; nothing to report
+poll 3: [a]      → changed: []          ← and it stays quiet
+poll 4: [a, b]   → changed: []          ← b never left
+```
+
+Real changes still propagate: if `b` comes back with different content, its
+fingerprint has moved and it is reported. Retention hides a disappearance, not
+an edit.
+
+For anything beyond keeping the row — a tombstone column, an audit trail —
+`:retire` still takes a `(keys -> any)` fun, and those keys **do** propagate,
+because the host did something.
+
 ## The honest-gap discipline
 
 The single most important rule for a source:

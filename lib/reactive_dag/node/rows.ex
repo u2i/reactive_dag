@@ -123,15 +123,18 @@ defmodule ReactiveDag.Node.Rows do
       it moved. Use this when the write is not an upsert into the node's own
       resource.
     * `:retire` — how vanished keys leave. Defaults to destroying the row via
-      the node's `payload_destroy` action; a host with a retain-if-vanish policy
-      passes a `(keys -> any)` fun and marks its own rows instead.
+      the node's `payload_destroy` action, or to doing NOTHING when the node
+      declares `retain_if_vanished true`. A host wanting something else — a
+      tombstone column, an audit row — passes a `(keys -> any)` fun.
     * `:current` — the baseline `vanished` is computed against. Defaults to the
       cell's current keys. A host whose *live* set is narrower than all its rows
       passes it explicitly — a retain-if-vanish leaf passes its non-tombstoned
       keys, so already-retired keys are neither re-retired nor reported as newly
       vanished.
 
-  Vanished keys always propagate: something disappearing is a change.
+  Vanished keys propagate: something disappearing is a change. The exception is
+  a node declaring `retain_if_vanished true`, where nothing disappeared — the row
+  is still there, so the key is not reported and re-polling stays quiet.
 
   A leaf declaring `fingerprint` needs no `:upsert` at all for the row-returning
   form to be worth using — that is the point: `poll/1` becomes fetch, build
@@ -161,7 +164,7 @@ defmodule ReactiveDag.Node.Rows do
 
     retire(vanished, Keyword.get(opts, :retire), meta)
 
-    {:ok, changed_up ++ vanished}
+    {:ok, changed_up ++ propagated(vanished, meta, opts)}
   end
 
   # the host either wrote the row itself and told us whether it moved, or handed
@@ -202,8 +205,26 @@ defmodule ReactiveDag.Node.Rows do
     end
   end
 
+  # A RETAINED key is not a change: the row is still there, unmodified, so from a
+  # consumer's side nothing happened. It also keeps re-polling quiet — reporting
+  # it would report it again on every subsequent poll, forever, since nothing
+  # marks it as already handled.
+  #
+  # An explicit `:retire` fun means the host did something, so the keys
+  # propagate as they always have.
+  defp propagated(vanished, meta, opts) do
+    if meta[:retain_if_vanished] == true and is_nil(opts[:retire]) do
+      []
+    else
+      vanished
+    end
+  end
+
   defp retire([], _how, _meta), do: :ok
   defp retire(keys, fun, _meta) when is_function(fun, 1), do: fun.(keys)
+
+  # the node keeps what its upstream dropped — nothing to do.
+  defp retire(_keys, nil, %{retain_if_vanished: true}), do: :ok
 
   defp retire(keys, _nil, meta) do
     ReactiveDag.Node.Payload.retire(
