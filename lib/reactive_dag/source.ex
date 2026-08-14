@@ -202,15 +202,148 @@ defmodule ReactiveDag.Source do
   """
   @spec poll_all(graph(), keyword()) :: {:ok, map()} | {:error, [{module(), term()}]}
   def poll_all(graph, opts \\ []) do
+    standing = standing_args(graph)
+
     {oks, errors} =
       graph
       |> scanners()
-      |> Enum.map(fn mod -> {mod, safe_poll(mod, opts)} end)
+      |> Enum.map(fn mod ->
+        # the leaf's declared `args:` are the DEFAULT; the caller's win. That is
+        # what keeps a routine `poll_all(plan)` cheap without any call site
+        # remembering the bound, while still letting a deliberate deep pass say
+        # so — `poll_all(plan, recent: false)`.
+        {mod, safe_poll(mod, Keyword.merge(Map.get(standing, mod, []), opts))}
+      end)
       |> Enum.split_with(fn {_mod, result} -> match?({:ok, _}, result) end)
 
     case errors do
       [] -> {:ok, Map.new(oks, fn {mod, {:ok, r}} -> {mod, r} end)}
       _ -> {:error, Enum.map(errors, fn {mod, {:error, reason}} -> {mod, reason} end)}
+    end
+  end
+
+  @doc """
+  Poll the scanner feeding ONE cell — the "re-run this scanner" affordance.
+
+  `poll_all/2` is the routine sweep. This is what a host wires a button to: a
+  dashboard has a cell in hand, not a source module, and a human asking to
+  refresh is asking about *this leaf*, not about every scanner in the graph.
+
+      # routine, on the declared cadence
+      Source.poll_all(plan)
+
+      # a human pressed "refresh", accepting the cheap default
+      Source.poll_cell(plan, "agenda_docs")
+
+      # ...or asked for the deep pass
+      Source.poll_cell(plan, "agenda_docs", recent: false)
+
+  The leaf's declared `args:` apply exactly as they do in `poll_all/2`, with the
+  caller's opts winning — so a button that passes nothing gets the cheap pass,
+  and one that passes `recent: false` gets the expensive one.
+
+  Returns `{:ok, result}`, `{:error, reason}` if the poll failed, or
+  `{:error, :no_scanner}` when the cell declares none — which a host should
+  render as "no refresh available" rather than as a failure.
+
+  Note a source feeding several leaves is polled whole: `poll/1` takes options,
+  not a cell, so asking for one leaf runs whatever that scanner does. The
+  scanner narrows itself through `args:` if that matters.
+  """
+  @spec poll_cell(graph(), String.t(), keyword()) ::
+          {:ok, map()} | {:error, term()} | {:error, :no_scanner}
+  def poll_cell(graph, cell_id, opts \\ []) do
+    case graph.cells[cell_id] do
+      nil ->
+        {:error, :no_scanner}
+
+      cell ->
+        case cell.meta[:scan] do
+          nil -> {:error, :no_scanner}
+          mod -> safe_poll(mod, Keyword.merge(cell.meta[:scan_args] || [], opts))
+        end
+    end
+  end
+
+  @doc """
+  What a host needs to render a scan control for each cell that has one:
+  `%{cell_id => %{source:, args:, every:, origin:}}`.
+
+  The library describes; the host renders. A cell with no scanner is absent, and
+  a scanner declaring no `args:`/`every:` reports them empty — so a leaf cheap
+  enough to run whole gets a plain "refresh" and no misleading range picker,
+  without the dashboard having to know which scanners are expensive.
+
+  `origin:` is the source's own `origin/0` when it implements it, so a control
+  can say *where* it is about to fetch from.
+  """
+  @spec controls(graph()) :: %{String.t() => map()}
+  def controls(graph) do
+    for {id, cell} <- graph.cells,
+        mod = cell.meta[:scan],
+        not is_nil(mod),
+        into: %{} do
+      {id,
+       %{
+         source: mod,
+         args: cell.meta[:scan_args] || [],
+         every: cell.meta[:scan_every],
+         origin: origin_of(mod)
+       }}
+    end
+  end
+
+  defp origin_of(mod) do
+    if Code.ensure_loaded?(mod) and function_exported?(mod, :origin, 0), do: mod.origin()
+  end
+
+  @doc """
+  The Oban-style crontab entries a plan's leaves declare, as
+  `{cron, worker, args: %{"source" => id}}`.
+
+  The library **never schedules anything**. A leaf declaring `every:` states how
+  often a routine poll *should* run; this collects those declarations into data
+  the host hands to its own scheduler:
+
+      plugins: [
+        {Oban.Plugins.Cron, crontab: ReactiveDag.Source.crontab(plan, MyApp.ScanWorker)}
+      ]
+
+  Emitting data rather than inserting jobs keeps the library out of the host's
+  supervision tree and out of its deploy story — and lets a host filter, rewrite
+  or ignore the entries, which it could not do if they were already scheduled.
+
+  The worker receives `%{"source" => "agenda_center"}` and is expected to poll
+  that one scanner. A leaf declaring no `every:` contributes nothing, which is
+  the correct outcome for a scanner cheap enough to run on any cadence the host
+  likes.
+  """
+  @spec crontab(graph(), module()) :: [{String.t(), module(), keyword()}]
+  def crontab(graph, worker) do
+    for cell <- Map.values(graph.cells),
+        every = cell.meta[:scan_every],
+        not is_nil(every),
+        mod = cell.meta[:scan],
+        not is_nil(mod) do
+      {every, worker, args: %{"source" => to_string(mod.id())}}
+    end
+    |> Enum.uniq()
+  end
+
+  @doc """
+  The standing `args:` each scanner's leaf declared, as `%{module => keyword}`.
+
+  `poll_all/2` merges these under the caller's opts. Exposed because a host
+  driving one scanner directly wants the same default rather than a second copy
+  of it.
+  """
+  @spec standing_args(graph()) :: %{module() => keyword()}
+  def standing_args(graph) do
+    for cell <- Map.values(graph.cells),
+        mod = cell.meta[:scan],
+        not is_nil(mod),
+        into: %{} do
+      {mod, cell.meta[:scan_args] || []}
     end
   end
 

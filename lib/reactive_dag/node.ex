@@ -744,7 +744,7 @@ defmodule ReactiveDag.Node do
     `leaf_cells/1` takes the lowered graph precisely because those leaves come
     from live data, which no compile-time declaration can name.
     """
-    defstruct [:module, :__identifier__, :__spark_metadata__]
+    defstruct [:module, :args, :every, :__identifier__, :__spark_metadata__]
   end
 
   @scan %Spark.Dsl.Entity{
@@ -762,6 +762,25 @@ defmodule ReactiveDag.Node do
         doc:
           "a module implementing `ReactiveDag.Source`. Verified at assembly — it must " <>
             "implement the behaviour, and its `leaf_cells/1` must include this leaf."
+      ],
+      args: [
+        type: :keyword_list,
+        required: false,
+        doc:
+          "the STANDING options for a routine poll, merged into `Source.poll_all/2`'s opts " <>
+            "with the caller's winning. This is where a cheap default lives: a crawler whose " <>
+            "full pass costs a request per board per year declares `args: [recent: true]`, so " <>
+            "the routine call stays `poll_all(plan)` and no call site can forget the bound. " <>
+            "A scanner cheap enough to run whole declares nothing."
+      ],
+      every: [
+        type: :string,
+        required: false,
+        doc:
+          "how often a routine poll SHOULD run, as a cron expression. The library never " <>
+            "schedules anything — this is a declaration, collected by " <>
+            "`ReactiveDag.Source.crontab/2` into entries the host hands to its own scheduler. " <>
+            "Declaring it beside the leaf means reading the resource tells you the cadence."
       ]
     ]
   }
@@ -1576,8 +1595,11 @@ defmodule ReactiveDag.Node do
 
     scan_meta =
       case Ext.get_entities(resource, [:reactive]) |> Enum.find(&match?(%Scan{}, &1)) do
-        %Scan{module: m} -> %{scan: m}
-        nil -> %{}
+        %Scan{module: m, args: a, every: e} ->
+          %{scan: m, scan_args: a || [], scan_every: e}
+
+        nil ->
+          %{}
       end
 
     Ext.get_opt(resource, [:reactive], :meta, [])

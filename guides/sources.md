@@ -255,6 +255,109 @@ Order sources so that ones which only observe the world run before any source
 that derives from other cells' results — a deriving source that runs first
 computes against a stale model.
 
+## Cadence, and running a scanner on demand
+
+Scanners differ enormously in what a full check costs. A directory listing is
+free; a crawler whose discovery is one request per board per year is not. The
+routine check should be cheap, and the expensive pass should be something you
+ask for — one scanner with two ways to call it, not two scanners.
+
+Both options go on the `scan` declaration, so everything about a leaf reads in
+one place: what feeds it, what a routine check costs, how often it should
+happen, and what counts as a change.
+
+```elixir
+defmodule MyApp.Docs do
+  use Ash.Resource, data_layer: AshPostgres.DataLayer, extensions: [ReactiveDag.Node]
+
+  attributes do
+    attribute :url, :string, primary_key?: true
+    attribute :body, :string
+    attribute :content_md5, :string
+    attribute :last_seen_at, :utc_datetime_usec   # moves on EVERY poll
+  end
+
+  actions do
+    defaults [:read, :destroy]
+    create :upsert do upsert?(true); accept([:url, :body, :content_md5, :last_seen_at]) end
+  end
+
+  reactive do
+    leaf? true
+
+    scan MyApp.DocCrawler,
+      args: [recent: true],       # the standing default for a routine poll
+      every: "0 * * * *"          # how often a routine poll SHOULD run
+
+    fingerprint [:content_md5]    # what counts as a changed observation
+  end
+end
+```
+
+`args:` merges into the poll's opts with **the caller winning**:
+
+```elixir
+poll_all(plan)                  # recent: true — cheap, and no call site had to remember
+poll_all(plan, recent: false)   # the deliberate deep pass
+poll_all(plan, only: [2019])    # narrower still; recent: true still applies
+```
+
+That is the point of declaring it: a forgotten bound at one call site would
+quietly issue every request the cheap path exists to avoid.
+
+**A scanner cheap enough to run whole declares nothing** and is polled with
+whatever the caller passes. No ceremony — and no misleading range control on
+something that has no range.
+
+### Running one scanner on demand
+
+`poll_all/2` is the routine sweep. `poll_cell/3` is the "refresh this" button: a
+UI has a *cell* in hand, not a source module, and a human asking to refresh is
+asking about one leaf.
+
+```elixir
+Source.poll_cell(plan, "docs")                  # the cheap default
+Source.poll_cell(plan, "docs", recent: false)   # the deep pass
+```
+
+`{:error, :no_scanner}` comes back for a cell that has none — a derived node, or
+a leaf fed by ordinary writes. Render that as *no refresh available* rather than
+as a failure.
+
+### Building the control
+
+The library describes; your UI renders. `controls/1` reports every cell that has
+a scanner, and what it declared:
+
+```elixir
+Source.controls(plan)
+#=> %{"docs" => %{source: MyApp.DocCrawler,
+#                 args: [recent: true],
+#                 every: "0 * * * *",
+#                 origin: %{label: "City agenda center"}}}
+```
+
+A cell with no scanner is absent. A scanner with no `args:`/`every:` reports
+them empty — so a cheap leaf gets a plain *refresh* and an expensive one can be
+offered its deep pass, without the UI knowing which scanners are costly.
+
+### The library does not schedule
+
+`every:` is a declaration, not a job. `crontab/2` collects them into entries you
+hand to your own scheduler:
+
+```elixir
+plugins: [
+  {Oban.Plugins.Cron, crontab: ReactiveDag.Source.crontab(plan, MyApp.ScanWorker)}
+]
+#=> [{"0 * * * *", MyApp.ScanWorker, args: %{"source" => "doc_crawler"}}]
+```
+
+Emitting data rather than inserting jobs keeps the library out of your
+supervision tree and your deploy story — and lets you filter, rewrite or ignore
+what it produces, which you could not do if it had already scheduled. Your
+worker receives `%{"source" => "doc_crawler"}` and polls that one scanner.
+
 ## Seeing whether it worked
 
 A poll returns `%{changed: […], unreachable: […]}`, and both halves matter. An
