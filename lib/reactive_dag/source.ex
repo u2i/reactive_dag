@@ -223,6 +223,81 @@ defmodule ReactiveDag.Source do
   end
 
   @doc """
+  Poll the scanner feeding ONE cell — the "re-run this scanner" affordance.
+
+  `poll_all/2` is the routine sweep. This is what a host wires a button to: a
+  dashboard has a cell in hand, not a source module, and a human asking to
+  refresh is asking about *this leaf*, not about every scanner in the graph.
+
+      # routine, on the declared cadence
+      Source.poll_all(plan)
+
+      # a human pressed "refresh", accepting the cheap default
+      Source.poll_cell(plan, "agenda_docs")
+
+      # ...or asked for the deep pass
+      Source.poll_cell(plan, "agenda_docs", recent: false)
+
+  The leaf's declared `args:` apply exactly as they do in `poll_all/2`, with the
+  caller's opts winning — so a button that passes nothing gets the cheap pass,
+  and one that passes `recent: false` gets the expensive one.
+
+  Returns `{:ok, result}`, `{:error, reason}` if the poll failed, or
+  `{:error, :no_scanner}` when the cell declares none — which a host should
+  render as "no refresh available" rather than as a failure.
+
+  Note a source feeding several leaves is polled whole: `poll/1` takes options,
+  not a cell, so asking for one leaf runs whatever that scanner does. The
+  scanner narrows itself through `args:` if that matters.
+  """
+  @spec poll_cell(graph(), String.t(), keyword()) ::
+          {:ok, map()} | {:error, term()} | {:error, :no_scanner}
+  def poll_cell(graph, cell_id, opts \\ []) do
+    case graph.cells[cell_id] do
+      nil ->
+        {:error, :no_scanner}
+
+      cell ->
+        case cell.meta[:scan] do
+          nil -> {:error, :no_scanner}
+          mod -> safe_poll(mod, Keyword.merge(cell.meta[:scan_args] || [], opts))
+        end
+    end
+  end
+
+  @doc """
+  What a host needs to render a scan control for each cell that has one:
+  `%{cell_id => %{source:, args:, every:, origin:}}`.
+
+  The library describes; the host renders. A cell with no scanner is absent, and
+  a scanner declaring no `args:`/`every:` reports them empty — so a leaf cheap
+  enough to run whole gets a plain "refresh" and no misleading range picker,
+  without the dashboard having to know which scanners are expensive.
+
+  `origin:` is the source's own `origin/0` when it implements it, so a control
+  can say *where* it is about to fetch from.
+  """
+  @spec controls(graph()) :: %{String.t() => map()}
+  def controls(graph) do
+    for {id, cell} <- graph.cells,
+        mod = cell.meta[:scan],
+        not is_nil(mod),
+        into: %{} do
+      {id,
+       %{
+         source: mod,
+         args: cell.meta[:scan_args] || [],
+         every: cell.meta[:scan_every],
+         origin: origin_of(mod)
+       }}
+    end
+  end
+
+  defp origin_of(mod) do
+    if Code.ensure_loaded?(mod) and function_exported?(mod, :origin, 0), do: mod.origin()
+  end
+
+  @doc """
   The Oban-style crontab entries a plan's leaves declare, as
   `{cron, worker, args: %{"source" => id}}`.
 

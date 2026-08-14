@@ -35,6 +35,8 @@ defmodule ReactiveDag.ScanScheduleTest do
     @impl true
     def leaf_cells(_g), do: ["agendas"]
     @impl true
+    def origin, do: %{label: "City agenda center"}
+    @impl true
     def poll(opts) do
       Agent.update(__MODULE__, &[opts | &1])
       {:ok, %{changed: []}}
@@ -99,6 +101,28 @@ defmodule ReactiveDag.ScanScheduleTest do
       id(:transcripts)
       leaf?(true)
       scan(ReactiveDag.ScanScheduleTest.Listing)
+    end
+  end
+
+  defmodule Derived do
+    use Ash.Resource, domain: Domain, data_layer: Ash.DataLayer.Ets, extensions: [ReactiveDag.Node]
+
+    ets do
+    end
+
+    attributes do
+      attribute :key, :string, primary_key?: true, allow_nil?: false, public?: true
+      attribute :n, :integer, public?: true
+    end
+
+    actions do
+      defaults [:read, :destroy]
+      create :upsert, upsert?: true, accept: [:key, :n]
+    end
+
+    reactive do
+      id(:derived)
+      reduce over: :agendas, group_by: :key, into: [count: :n]
     end
   end
 
@@ -179,5 +203,64 @@ defmodule ReactiveDag.ScanScheduleTest do
     assert cells["agendas"].meta[:scan_every] == "0 * * * *"
     assert cells["transcripts"].meta[:scan_args] == []
     refute cells["transcripts"].meta[:scan_every]
+  end
+
+  describe "poll_cell/3 — the 'refresh this leaf' affordance" do
+    test "polls the scanner feeding that cell, with its standing default" do
+      {:ok, _} = Source.poll_cell(plan(), "agendas")
+
+      assert [[recent: true]] = Crawler.polls()
+      assert Listing.polls() == [], "only the named leaf's scanner runs"
+    end
+
+    test "the caller wins — the deep pass a button asks for" do
+      {:ok, _} = Source.poll_cell(plan(), "agendas", recent: false)
+
+      assert [opts] = Crawler.polls()
+      assert opts[:recent] == false
+    end
+
+    test "a cell with no scanner reports it, rather than failing" do
+      # a host renders this as "no refresh available", not as an error
+      p = ReactiveDag.Node.graph([Agendas, Transcripts, Derived])
+
+      assert Source.poll_cell(p, "derived") == {:error, :no_scanner}
+    end
+
+    test "an unknown cell id is the same answer" do
+      assert Source.poll_cell(plan(), "nope") == {:error, :no_scanner}
+    end
+  end
+
+  describe "controls/1 — what a host needs to render a scan control" do
+    test "describes each scannable cell, and omits the rest" do
+      p = ReactiveDag.Node.graph([Agendas, Transcripts, Derived])
+      controls = Source.controls(p)
+
+      assert Map.keys(controls) |> Enum.sort() == ["agendas", "transcripts"]
+      refute Map.has_key?(controls, "derived")
+    end
+
+    test "an expensive scanner reports its default and cadence" do
+      %{"agendas" => c} = Source.controls(plan())
+
+      assert c.source == Crawler
+      assert c.args == [recent: true]
+      assert c.every == "0 * * * *"
+    end
+
+    test "a cheap scanner reports empty — so a host renders a plain refresh" do
+      %{"transcripts" => c} = Source.controls(plan())
+
+      assert c.args == []
+      refute c.every
+    end
+
+    test "origin rides along when the source implements it" do
+      %{"agendas" => a, "transcripts" => t} = Source.controls(plan())
+
+      assert a.origin == %{label: "City agenda center"}
+      refute t.origin, "not implemented = origin unknown"
+    end
   end
 end
