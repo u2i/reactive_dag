@@ -60,6 +60,7 @@ defmodule ReactiveDag.Node.Payload do
       |> Map.drop([:key])
       |> Map.put(key_attr, cell_key)
       |> stamp_fingerprint(row, resource, opts)
+      |> stamp_live(opts)
 
     changed? =
       case existing(resource, key_attr, cell_key) do
@@ -85,7 +86,7 @@ defmodule ReactiveDag.Node.Payload do
   """
   @spec upsert_identity(module(), [atom()], map(), atom(), keyword()) :: :changed | :unchanged
   def upsert_identity(resource, identity_fields, row, action \\ :upsert, opts \\ []) do
-    attrs = row |> Map.drop([:key]) |> stamp_fingerprint(row, resource, opts)
+    attrs = row |> Map.drop([:key]) |> stamp_fingerprint(row, resource, opts) |> stamp_live(opts)
 
     changed? =
       case existing_by(resource, Map.take(attrs, identity_fields)) do
@@ -131,6 +132,53 @@ defmodule ReactiveDag.Node.Payload do
           true
       end
     end)
+  end
+
+  @doc """
+  MARK `keys` retired rather than destroying their rows — the retain-if-vanish
+  policy a node declares with `retain_if_vanished`.
+
+  Sets the status attribute to the declared `retired` value and, when the node
+  named one, stamps the timestamp. Rows already absent are skipped, so this is
+  idempotent. Returns the keys whose row was actually marked.
+
+  The row survives, which is the point: the upstream withdrew the item but the
+  artifact you fetched is still yours. `reconcile/3` then leaves it out of its
+  baseline, so it is not retired again on the next poll.
+  """
+  @spec mark_retired(module(), atom() | nil, [atom()] | nil, [String.t()], map(), atom()) ::
+          [String.t()]
+  def mark_retired(_resource, _key_attr, _fields, [], _policy, _action), do: []
+
+  def mark_retired(resource, key_attr, fields, keys, policy, action) do
+    now = DateTime.utc_now()
+
+    Enum.filter(keys, fn key ->
+      case find_row(resource, key_attr, fields, key) do
+        nil ->
+          false
+
+        record ->
+          attrs =
+            %{policy.status => policy.retired}
+            |> then(&if policy[:at], do: Map.put(&1, policy.at, now), else: &1)
+
+          record
+          |> Ash.Changeset.for_update(update_action(resource, action), attrs)
+          |> Ash.update!()
+
+          true
+      end
+    end)
+  end
+
+  # a node's `:upsert` is a create action, so marking goes through an UPDATE:
+  # the primary one when it exists, else Ash's built-in.
+  defp update_action(resource, _action) do
+    case Ash.Resource.Info.primary_action(resource, :update) do
+      %{name: name} -> name
+      _ -> :update
+    end
   end
 
   defp find_row(resource, _key_attr, fields, key) when is_list(fields) do
@@ -192,9 +240,22 @@ defmodule ReactiveDag.Node.Payload do
   # everything. That is the safe direction: it may report a change that did not
   # happen, where trusting a nil would miss one that did.
   defp moved?(record, attrs, opts) do
-    case fingerprint_attr(opts, attrs) do
-      {attr, value} when not is_nil(value) -> Map.get(record, attr) != value
-      _ -> differs?(record, attrs)
+    revived?(record, opts) or
+      case fingerprint_attr(opts, attrs) do
+        {attr, value} when not is_nil(value) -> Map.get(record, attr) != value
+        _ -> differs?(record, attrs)
+      end
+  end
+
+  # COMING BACK is a change, even when the bytes did not move. A retired row that
+  # reappears carries its old fingerprint — its liveness changed, not its
+  # content — so a fingerprint comparison alone would report "unchanged" and the
+  # revival would never propagate. The prior record is already in hand for that
+  # comparison, so seeing this costs no extra read.
+  defp revived?(record, opts) do
+    case opts[:retain_if_vanished] do
+      %{status: attr, retired: retired} -> Map.get(record, attr) == retired
+      _ -> false
     end
   end
 
@@ -206,6 +267,17 @@ defmodule ReactiveDag.Node.Payload do
       _ ->
         attr = opts[:fingerprint_attribute] || Fingerprint.default_attribute()
         {attr, Map.get(attrs, attr)}
+    end
+  end
+
+  # An observed row is LIVE by definition — otherwise a revived row would be
+  # written back still marked retired, and `reconcile/3` would leave it out of
+  # its own baseline forever. An explicit status in the row wins: the host may
+  # have its own vocabulary beyond live/retired.
+  defp stamp_live(attrs, opts) do
+    case opts[:retain_if_vanished] do
+      %{status: attr, live: live} -> Map.put_new(attrs, attr, live)
+      _ -> attrs
     end
   end
 

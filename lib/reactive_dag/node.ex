@@ -766,6 +766,81 @@ defmodule ReactiveDag.Node do
     ]
   }
 
+  defmodule RetainIfVanished do
+    @moduledoc """
+    Retirement MARKS a row instead of destroying it.
+
+    The default is destruction: a unit whose inputs have gone produces nothing,
+    and a derived row you cannot distinguish from a live one defeats the point of
+    materializing it. But a source-fed leaf over an upstream that can *withdraw*
+    items often wants the opposite — "the listing dropped it, but we keep what we
+    fetched" is a normal archival stance for a document mirror, a package
+    registry, a feed ingester.
+
+    Declaring it tells the library one fact — **rows can be retired without being
+    destroyed** — and three behaviours follow from that fact rather than from
+    three separately-maintained callbacks:
+
+      * `reconcile/3`'s baseline becomes the LIVE rows, so an already-retired key
+        is neither re-retired nor re-reported as newly vanished.
+      * retirement marks the status column and stamps the timestamp.
+      * **revival is a change.** A row that comes back carries its old
+        fingerprint — the bytes did not move, its liveness did — so a
+        fingerprint comparison alone says "unchanged" when the honest answer is
+        "it came back". The library sees the prior row's status while comparing
+        fingerprints, so it costs nothing to notice.
+
+    That third one is why this is a declaration rather than a pair of options: a
+    host cannot detect revival without taking over the write entirely, which
+    means re-implementing the change detection the row form exists to provide.
+
+    The column names stay yours. Only the knowledge that retirement is
+    non-destructive moves into the library.
+    """
+    defstruct [
+      :status,
+      :at,
+      :live,
+      :retired,
+      :__identifier__,
+      :__spark_metadata__
+    ]
+  end
+
+  @retain_if_vanished %Spark.Dsl.Entity{
+    name: :retain_if_vanished,
+    target: RetainIfVanished,
+    describe:
+      "Retirement MARKS the row instead of destroying it. The library then reconciles " <>
+        "against LIVE rows only, marks on retire, and reports a REVIVED row as changed " <>
+        "even though its fingerprint has not moved. For a leaf over an upstream that " <>
+        "withdraws items but whose artifacts you keep.",
+    schema: [
+      status: [
+        type: :atom,
+        required: true,
+        doc: "the attribute holding liveness (e.g. `:status`)."
+      ],
+      live: [
+        type: :string,
+        default: "present",
+        doc: "the `status` value meaning a row is live."
+      ],
+      retired: [
+        type: :string,
+        default: "tombstoned",
+        doc: "the `status` value written when a key vanishes."
+      ],
+      at: [
+        type: :atom,
+        required: false,
+        doc:
+          "OPTIONAL attribute stamped with the retirement time (e.g. `:tombstoned_at`). " <>
+            "Omit it if you only need the status."
+      ]
+    ]
+  }
+
   defmodule Run do
     @moduledoc """
     The ASH-NATIVE escape hatch: `run :recompute_keys` declares that this
@@ -892,7 +967,8 @@ defmodule ReactiveDag.Node do
       @aggregate,
       @compute,
       @run,
-      @scan
+      @scan,
+      @retain_if_vanished
     ],
     schema: [
       id: [
@@ -1522,6 +1598,26 @@ defmodule ReactiveDag.Node do
     Ext.get_entities(resource, [:reactive]) |> Enum.find(&match?(%Aggregate{}, &1))
   end
 
+  # the retain-if-vanish declaration, as a plain map for the recompute side.
+  # Raises when the named columns are absent: a status column that is not there
+  # means retirement silently writes nothing, and the row stays live forever.
+  defp retain_if_vanished(resource) do
+    case Ext.get_entities(resource, [:reactive]) |> Enum.find(&match?(%RetainIfVanished{}, &1)) do
+      nil ->
+        nil
+
+      %RetainIfVanished{} = r ->
+        for attr <- [r.status, r.at], attr != nil, is_nil(Ash.Resource.Info.attribute(resource, attr)) do
+          raise ArgumentError,
+                "reactive_dag: `retain_if_vanished` names #{inspect(attr)} on " <>
+                  "#{inspect(resource)}, which has no such attribute. Retirement would " <>
+                  "write nothing and the row would stay live forever."
+        end
+
+        %{status: r.status, at: r.at, live: r.live, retired: r.retired}
+    end
+  end
+
   defp identity_fields(resource) do
     case Ash.Resource.Info.primary_key(resource) do
       pk when is_list(pk) and length(pk) > 1 -> pk
@@ -1580,6 +1676,7 @@ defmodule ReactiveDag.Node do
         payload_action: Ext.get_opt(resource, [:reactive], :payload_action, nil),
         fingerprint: Ext.get_opt(resource, [:reactive], :fingerprint, nil),
         fingerprint_attribute: Ext.get_opt(resource, [:reactive], :fingerprint_attribute, nil),
+        retain_if_vanished: retain_if_vanished(resource),
         identity_fields: identity_fields(resource),
         context_inputs: context_inputs(resource)
       }

@@ -122,20 +122,31 @@ defmodule ReactiveDag.Node.Rows do
     * `(key -> boolean)` — full control. Write the row yourself and say whether
       it moved. Use this when the write is not an upsert into the node's own
       resource.
-    * `:retire` — how vanished keys leave. Defaults to destroying the row via
-      the node's `payload_destroy` action; a host with a retain-if-vanish policy
-      passes a `(keys -> any)` fun and marks its own rows instead.
+    * `:retire` — how vanished keys leave. Defaults to destroying the row via the
+      node's `payload_destroy` action, or to MARKING it when the node declares
+      `retain_if_vanished`. A host with a policy neither covers passes a
+      `(keys -> any)` fun.
     * `:current` — the baseline `vanished` is computed against. Defaults to the
-      cell's current keys. A host whose *live* set is narrower than all its rows
-      passes it explicitly — a retain-if-vanish leaf passes its non-tombstoned
-      keys, so already-retired keys are neither re-retired nor reported as newly
-      vanished.
+      cell's current keys, or to its LIVE keys when the node declares
+      `retain_if_vanished` — so an already-retired key is neither re-retired nor
+      re-reported. Pass it explicitly only for a baseline neither covers.
 
   Vanished keys always propagate: something disappearing is a change.
 
   A leaf declaring `fingerprint` needs no `:upsert` at all for the row-returning
   form to be worth using — that is the point: `poll/1` becomes fetch, build
   rows, call reconcile.
+
+  ## Retain-if-vanish
+
+  A node declaring `retain_if_vanished` gets all three parts consistently, from
+  one fact rather than from options a host must keep in step: the baseline is
+  live rows, retirement marks instead of destroying, and **a revived row counts
+  as changed**. That last one is the reason it is a declaration: a row that comes
+  back carries its old fingerprint — the bytes did not move, its liveness did —
+  so comparing fingerprints alone reports "unchanged" when the honest answer is
+  "it came back". The prior row is already in hand for the fingerprint
+  comparison, so noticing costs nothing.
 
   > #### The honest gap {: .warning}
   >
@@ -156,7 +167,7 @@ defmodule ReactiveDag.Node.Rows do
       |> Enum.sort()
       |> Enum.filter(&(observe(&1, upsert, meta) == true))
 
-    current = Keyword.get_lazy(opts, :current, fn -> Enum.map(all(cell), & &1.key) end)
+    current = Keyword.get_lazy(opts, :current, fn -> baseline(cell, meta) end)
     vanished = Enum.reject(current, &MapSet.member?(want_set, &1))
 
     retire(vanished, Keyword.get(opts, :retire), meta)
@@ -177,7 +188,8 @@ defmodule ReactiveDag.Node.Rows do
   defp write(key, row, meta) do
     opts = [
       fingerprint: meta[:fingerprint],
-      fingerprint_attribute: meta[:fingerprint_attribute]
+      fingerprint_attribute: meta[:fingerprint_attribute],
+      retain_if_vanished: meta[:retain_if_vanished]
     ]
 
     case meta[:identity_fields] do
@@ -202,8 +214,36 @@ defmodule ReactiveDag.Node.Rows do
     end
   end
 
+  # what `vanished` is subtracted from. A retain-if-vanish node counts only LIVE
+  # rows, so a key retired on an earlier poll is not retired (or reported) again.
+  defp baseline(cell, meta) do
+    case meta[:retain_if_vanished] do
+      nil ->
+        Enum.map(all(cell), & &1.key)
+
+      %{status: attr, live: live} ->
+        cell
+        |> all()
+        |> Enum.filter(&(Map.get(&1.record, attr) == live))
+        |> Enum.map(& &1.key)
+    end
+  end
+
   defp retire([], _how, _meta), do: :ok
   defp retire(keys, fun, _meta) when is_function(fun, 1), do: fun.(keys)
+
+  # MARK, don't destroy: the host keeps the artifact and records that the
+  # upstream withdrew it.
+  defp retire(keys, nil, %{retain_if_vanished: %{} = policy} = meta) do
+    ReactiveDag.Node.Payload.mark_retired(
+      meta[:resource],
+      meta[:payload_key] || :key,
+      meta[:identity_fields],
+      keys,
+      policy,
+      meta[:payload_action] || :upsert
+    )
+  end
 
   defp retire(keys, _nil, meta) do
     ReactiveDag.Node.Payload.retire(

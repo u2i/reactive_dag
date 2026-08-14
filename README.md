@@ -413,6 +413,20 @@ fine*. A scan that could not look must never render as a scan that found nothing
 so on failure, write nothing, retire nothing, and report it in `unreachable:` so
 the host can surface the gap.
 
+**Keeping what vanished** — when the upstream withdraws an item but the artifact
+you fetched is still worth having, declare it and the library marks the row
+instead of destroying it:
+
+```elixir
+retain_if_vanished status: :status, at: :tombstoned_at,
+                   live: "present", retired: "tombstoned"
+```
+
+Retirement then marks, the reconcile baseline becomes live rows only (so an
+already-retired key stays quiet), and a **revived** row counts as changed even
+though its fingerprint has not moved — coming back is a change the bytes cannot
+show you.
+
 **Human edits** — a managed list or an approval writes a leaf like anything else:
 the host's normal write, then a dirty mark (or `dirties_on`).
 

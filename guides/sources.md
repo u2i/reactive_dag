@@ -155,6 +155,52 @@ This is the same `fingerprint` vocabulary `per_key` uses to skip an expensive
 action when its inputs have not moved — one concept, one implementation, at two
 rungs of the ladder.
 
+## Retain-if-vanish: keeping what you fetched
+
+The default is that a vanished key's row is destroyed. For a derived node that is
+right — a stale derived row is indistinguishable from a live one. But a leaf over
+an upstream that *withdraws* items often wants the opposite: the listing dropped
+the document, but the PDF you fetched is still yours.
+
+Declare it, and the library stops destroying:
+
+```elixir
+reactive do
+  leaf? true
+  scan MyApp.DocCrawler
+  fingerprint [:content_md5]
+
+  retain_if_vanished status: :status, at: :tombstoned_at,
+                     live: "present", retired: "tombstoned"
+end
+```
+
+Three things follow from that one declaration, and they have to agree:
+
+1. **Retirement marks.** The status column is set and the timestamp stamped; the
+   row survives with everything you fetched.
+2. **The baseline is live rows.** A key retired on an earlier poll is not retired
+   again, and not reported as newly vanished again. Its `tombstoned_at` keeps
+   answering *when did we lose this?*
+3. **Revival is a change.** This is the one you cannot do yourself without taking
+   over the write. A row that comes back carries the *same fingerprint it left
+   with* — the bytes did not move, its liveness did — so a fingerprint comparison
+   says "unchanged" when the honest answer is "it came back". The library sees
+   the prior row's status at the moment it compares fingerprints, so noticing
+   costs no extra query, and the returning key propagates.
+
+```
+poll 1: [a, b]   → changed: ["a", "b"]
+poll 2: [a]      → changed: ["b"]        ← b marked tombstoned, row kept
+poll 3: [a]      → changed: []           ← already retired; quiet
+poll 4: [a, b]   → changed: ["b"]        ← REVIVED, though b's bytes never moved
+```
+
+A revived row is written back live, so it rejoins its own baseline.
+
+`:retire` and `:current` still take a fun for a policy neither default covers —
+they are just no longer the only way to express the common one.
+
 ## The honest-gap discipline
 
 The single most important rule for a source:
