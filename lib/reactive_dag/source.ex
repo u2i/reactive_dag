@@ -202,15 +202,73 @@ defmodule ReactiveDag.Source do
   """
   @spec poll_all(graph(), keyword()) :: {:ok, map()} | {:error, [{module(), term()}]}
   def poll_all(graph, opts \\ []) do
+    standing = standing_args(graph)
+
     {oks, errors} =
       graph
       |> scanners()
-      |> Enum.map(fn mod -> {mod, safe_poll(mod, opts)} end)
+      |> Enum.map(fn mod ->
+        # the leaf's declared `args:` are the DEFAULT; the caller's win. That is
+        # what keeps a routine `poll_all(plan)` cheap without any call site
+        # remembering the bound, while still letting a deliberate deep pass say
+        # so — `poll_all(plan, recent: false)`.
+        {mod, safe_poll(mod, Keyword.merge(Map.get(standing, mod, []), opts))}
+      end)
       |> Enum.split_with(fn {_mod, result} -> match?({:ok, _}, result) end)
 
     case errors do
       [] -> {:ok, Map.new(oks, fn {mod, {:ok, r}} -> {mod, r} end)}
       _ -> {:error, Enum.map(errors, fn {mod, {:error, reason}} -> {mod, reason} end)}
+    end
+  end
+
+  @doc """
+  The Oban-style crontab entries a plan's leaves declare, as
+  `{cron, worker, args: %{"source" => id}}`.
+
+  The library **never schedules anything**. A leaf declaring `every:` states how
+  often a routine poll *should* run; this collects those declarations into data
+  the host hands to its own scheduler:
+
+      plugins: [
+        {Oban.Plugins.Cron, crontab: ReactiveDag.Source.crontab(plan, MyApp.ScanWorker)}
+      ]
+
+  Emitting data rather than inserting jobs keeps the library out of the host's
+  supervision tree and out of its deploy story — and lets a host filter, rewrite
+  or ignore the entries, which it could not do if they were already scheduled.
+
+  The worker receives `%{"source" => "agenda_center"}` and is expected to poll
+  that one scanner. A leaf declaring no `every:` contributes nothing, which is
+  the correct outcome for a scanner cheap enough to run on any cadence the host
+  likes.
+  """
+  @spec crontab(graph(), module()) :: [{String.t(), module(), keyword()}]
+  def crontab(graph, worker) do
+    for cell <- Map.values(graph.cells),
+        every = cell.meta[:scan_every],
+        not is_nil(every),
+        mod = cell.meta[:scan],
+        not is_nil(mod) do
+      {every, worker, args: %{"source" => to_string(mod.id())}}
+    end
+    |> Enum.uniq()
+  end
+
+  @doc """
+  The standing `args:` each scanner's leaf declared, as `%{module => keyword}`.
+
+  `poll_all/2` merges these under the caller's opts. Exposed because a host
+  driving one scanner directly wants the same default rather than a second copy
+  of it.
+  """
+  @spec standing_args(graph()) :: %{module() => keyword()}
+  def standing_args(graph) do
+    for cell <- Map.values(graph.cells),
+        mod = cell.meta[:scan],
+        not is_nil(mod),
+        into: %{} do
+      {mod, cell.meta[:scan_args] || []}
     end
   end
 
