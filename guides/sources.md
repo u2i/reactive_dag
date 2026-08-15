@@ -258,6 +258,49 @@ This needs your `:current` to be the **live** set — the keys your marking left
 alone. That is the baseline the library subtracts from, so it is also how it
 recognises a return.
 
+## Partial observations
+
+Retiring a key is an **inference**: the upstream no longer lists it, so it is
+gone. That inference is only valid from a *complete* observation.
+
+A scoped poll (`only:`), a windowed one (`recent:`), or a crawl whose index page
+failed all produce a want-set that is real but incomplete. Absence from it means
+"not looked at", not "gone" — so say so:
+
+```elixir
+Rows.reconcile(cell, observed_keys, observed: :partial, upsert: &fetch/1)
+```
+
+Nothing vanishes, nothing is retired. The keys you *did* see are written and
+reported exactly as usual, so a partial poll still drives the cascade for the
+slice it covered.
+
+**Why this has a name.** The failure is asymmetric. Getting `:partial` wrong
+under-retires — rows linger that should have gone, and the next full scan
+cleans them up. Getting `:all` wrong tombstones everything the scan did not
+happen to look at, which for an archival consumer is a mass-deletion wave from
+one upstream 500. One direction is untidy; the other is unrecoverable.
+
+If your scanner narrows itself — and `scan … args: [recent: true]` means it
+does — decide the mode from the same condition:
+
+```elixir
+def poll(opts) do
+  scoped? = opts[:only] != nil or opts[:recent] == true
+
+  with {:ok, docs, failures} <- fetch(opts) do
+    Rows.reconcile(cell, Map.keys(docs),
+      observed: if(scoped? or failures != [], do: :partial, else: :all),
+      upsert: &Map.get(docs, &1)
+    )
+  end
+end
+```
+
+A failed index page belongs in that condition too: a crawl that could not read
+part of its own index observed less than it meant to, whether or not it was
+scoped.
+
 ## The honest-gap discipline
 
 The single most important rule for a source:
@@ -268,6 +311,12 @@ If the fleet API is down and the scan writes an empty set, `reconcile` will
 dutifully retire every machine — and every downstream guarantee will see an
 estate with no members, which typically rolls up as *vacuously green*. A scan
 that couldn't look must never render as a scan that found nothing.
+
+A total outage and a partial observation are not the same thing, though both
+mean "do not retire". An outage writes **nothing** — so it marks nothing dirty,
+and the drain correctly does no downstream work; the rows you already have stand
+as the last true thing you knew. A partial observation writes what it *did* see,
+and simply must not conclude anything from what it did not.
 
 So on failure: write nothing, retire nothing, and report the outage in the poll
 result (`unreachable:`) so the host can surface it. Within a partially-successful

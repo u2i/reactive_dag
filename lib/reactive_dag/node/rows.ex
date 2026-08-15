@@ -122,6 +122,11 @@ defmodule ReactiveDag.Node.Rows do
     * `(key -> boolean)` — full control. Write the row yourself and say whether
       it moved. Use this when the write is not an upsert into the node's own
       resource.
+    * `:observed` — was this scan COMPLETE? `:all` (the default) means absence
+      from `want_keys` is evidence a key is gone, so the vanish diff runs.
+      `:partial` means the scan looked at only part of the upstream — a scoped
+      `only:` poll, a windowed `recent:` one, a crawl whose index page failed —
+      so absence means "not looked at" and **nothing can vanish**. See below.
     * `:retire` — how vanished keys leave. See the table below.
     * `:current` — the baseline `vanished` is computed against. Defaults to the
       cell's current keys. Pass it when your live set is narrower than all your
@@ -158,6 +163,25 @@ defmodule ReactiveDag.Node.Rows do
   form to be worth using — that is the point: `poll/1` becomes fetch, build
   rows, call reconcile.
 
+  ## Partial observations
+
+  Retiring a key is an inference: *the upstream no longer lists it, so it is
+  gone*. That inference is only valid from a **complete** observation. A scoped
+  poll, a windowed one, or a crawl whose index page failed all produce a want-set
+  that is real but incomplete, where absence means "not looked at".
+
+      Rows.reconcile(cell, observed_keys, observed: :partial, upsert: &fetch/1)
+
+  Nothing vanishes, nothing is retired, and the keys you did see are written and
+  reported exactly as usual.
+
+  This was previously spelled `current: []` — "measure vanishing against
+  nothing" — which works, and says nothing about why. The distinction is worth a
+  name because the failure is silent and severe in one direction only: getting
+  `:partial` wrong under-retires, leaving rows that should have gone. Getting
+  `:all` wrong tombstones everything the scan did not happen to look at, which
+  for an archival consumer is a mass-deletion wave from one upstream 500.
+
   > #### The honest gap {: .warning}
   >
   > Call this only with a want-set you actually observed. An upstream you could
@@ -165,6 +189,11 @@ defmodule ReactiveDag.Node.Rows do
   > failed retires every key the cell has, and a downstream rollup over an empty
   > set typically reads as vacuously fine. A scan that couldn't look must never
   > render as a scan that found nothing.
+  >
+  > A total outage and a partial one differ: an outage writes nothing at all, so
+  > it marks nothing dirty and the drain correctly does no downstream work. A
+  > partial observation writes what it saw — it just must not conclude anything
+  > from what it did not.
   """
   @spec reconcile(Cell.t(), [String.t()] | MapSet.t(), keyword()) :: {:ok, [String.t()]}
   def reconcile(%Cell{meta: meta} = cell, want_keys, opts) do
@@ -179,13 +208,30 @@ defmodule ReactiveDag.Node.Rows do
     observed = Enum.map(want, fn key -> {key, observe(key, upsert, meta)} end)
     changed_up = for {key, {true, _}} <- observed, do: key
 
-    current = Keyword.get_lazy(opts, :current, fn -> Enum.map(all(cell), & &1.key) end)
-    vanished = Enum.reject(current, &MapSet.member?(want_set, &1))
+    case Keyword.get(opts, :observed, :all) do
+      :partial ->
+        # A PARTIAL observation cannot say anything vanished — absence from
+        # `want` means "not looked at", not "gone" — so the whole vanish
+        # computation is skipped rather than fed an empty baseline. Revival is
+        # skipped for the same reason: it is derived from absence from the
+        # baseline, and here absence carries no information.
+        {:ok, changed_up}
 
-    retire(vanished, Keyword.get(opts, :retire), meta)
+      :all ->
+        current = Keyword.get_lazy(opts, :current, fn -> Enum.map(all(cell), & &1.key) end)
+        vanished = Enum.reject(current, &MapSet.member?(want_set, &1))
 
-    {:ok,
-     changed_up ++ revived(observed, current, meta, opts) ++ propagated(vanished, meta, opts)}
+        retire(vanished, Keyword.get(opts, :retire), meta)
+
+        {:ok,
+         changed_up ++ revived(observed, current, meta, opts) ++ propagated(vanished, meta, opts)}
+
+      other ->
+        raise ArgumentError,
+              "reactive_dag: `observed:` is `:all` (the default) or `:partial`, got " <>
+                "#{inspect(other)}. `:partial` says this scan looked at only part of the " <>
+                "upstream, so nothing can be inferred to have vanished."
+    end
   end
 
   # COMING BACK is a change, even when the bytes did not move.
