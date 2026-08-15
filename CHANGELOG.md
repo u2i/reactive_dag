@@ -1,5 +1,30 @@
 # Changelog
 
+## [0.17.0-rc.8](https://github.com/u2i/reactive_dag/compare/v0.17.0-rc.7...v0.17.0-rc.8) (2026-08-15)
+
+
+### ⚠ BREAKING CHANGES
+
+* a marking leaf now reports returning keys as changed where it previously reported nothing. That is the bug being fixed, but a host relying on the old silence will see downstream recomputes it did not before.
+* `meta[:retain_if_vanished]` is now `:keep | {:mark, fun}` rather than `true`. Only reachable by a host inspecting cell meta directly; the DSL spelling `retain_if_vanished true` is unchanged.
+
+### Features
+
+* report revivals instead of warning about them (closes [#82](https://github.com/u2i/reactive_dag/issues/82)) ([d9101bf](https://github.com/u2i/reactive_dag/commit/d9101bfde19622bc52ea075136b3a7808ad60adf))
+* warn when a marked-retired key returns unchanged ([#82](https://github.com/u2i/reactive_dag/issues/82)) ([cd58a34](https://github.com/u2i/reactive_dag/commit/cd58a34e1cdb15d798bbf109bba170151a717285))
+
+
+### Bug Fixes
+
+* declaring no computation is a compile error ([#91](https://github.com/u2i/reactive_dag/issues/91)) ([15b2ec9](https://github.com/u2i/reactive_dag/commit/15b2ec9335a605d4a15f23348c729996b92dedd9))
+* declaring no computation is a compile error ([#91](https://github.com/u2i/reactive_dag/issues/91)) ([f2d2944](https://github.com/u2i/reactive_dag/commit/f2d2944e04b3f7e4bd94b9d65d593da09fd603cc))
+* the silent-revival warning missed the declared mark policy ([956f128](https://github.com/u2i/reactive_dag/commit/956f128cf596397a7e40022ae9532ecbe5a92166))
+
+
+### Code Refactoring
+
+* keep and mark are one declaration, not two mechanisms ([c6f7c78](https://github.com/u2i/reactive_dag/commit/c6f7c788bd6b898f3cd01619cc00ade4a80d1c65))
+
 ## [0.17.0-rc.7](https://github.com/u2i/reactive_dag/compare/v0.17.0-rc.6...v0.17.0-rc.7) (2026-08-14)
 
 
