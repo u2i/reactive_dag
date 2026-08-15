@@ -17,6 +17,7 @@ config :reactive_dag, repo: MyApp.Repo
 |---|---|---|---|
 | [`:repo`](#repo) | — | **yes** | `Frontier` |
 | [`:dirty_table`](#dirty_table) | `"reactive_dag_dirty"` | no | `Frontier`, `Migration` |
+| [`:plan_mfa`](#plan_mfa) | — | only with `ScanWorker` | `ScanWorker` |
 | [`:set_op_templates`](#set_op_templates) | `%{}` | only with `SetOp` | `SetOp` |
 | [`:insights_keep`](#insights_keep) | `20` | no | `Insights` |
 
@@ -55,6 +56,21 @@ a syntax error deep inside a query.
 `ReactiveDag.Migration` resolves `:dirty_table` exactly as `Frontier` does, so
 a host that sets the config gets a migration matching the table the runtime
 queries — there is no second place to keep in sync.
+
+### `:plan_mfa`
+
+How `ReactiveDag.ScanWorker` builds the plan it scans.
+
+```elixir
+config :reactive_dag, plan_mfa: {MyApp.Dag, :plan, []}
+```
+
+A plan is built from resource modules at runtime, so it cannot ride in an Oban
+job argument. The worker needs one name for it; this is that name. A job may
+override it (`%{"plan_mfa" => ["MyApp.Dag", "plan", []]}`), which is what lets
+one app schedule scans over more than one graph.
+
+Only read by `ScanWorker`. A host scheduling its own polls never needs it.
 
 ### `:set_op_templates`
 

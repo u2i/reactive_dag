@@ -172,8 +172,10 @@ defmodule ReactiveDag.ScanScheduleTest do
 
   describe "crontab/2" do
     test "collects the declared cadence into Oban-shaped entries" do
+      # keyed by CELL, not source: a source feeding several leaves is several
+      # units of work, each with its own declared bound
       assert Source.crontab(plan(), MyWorker) == [
-               {"0 * * * *", MyWorker, args: %{"source" => "crawler"}}
+               {"0 * * * *", MyWorker, args: %{"cell" => "agendas"}}
              ]
     end
 
@@ -181,7 +183,7 @@ defmodule ReactiveDag.ScanScheduleTest do
       # the cheap scanner gets no entry — the host schedules it however it likes,
       # and offering a cadence it never asked for would be noise
       refute Source.crontab(plan(), MyWorker)
-             |> Enum.any?(fn {_c, _w, args: %{"source" => s}} -> s == "listing" end)
+             |> Enum.any?(fn {_c, _w, [args: %{"cell" => c}]} -> c == "transcripts" end)
     end
 
     test "a plan with no cadence at all yields no entries" do
@@ -261,6 +263,40 @@ defmodule ReactiveDag.ScanScheduleTest do
 
       assert a.origin == %{label: "City agenda center"}
       refute t.origin, "not implemented = origin unknown"
+    end
+  end
+
+  describe "scan_jobs/1 — every scannable unit of work" do
+    test "one entry per scanned cell, cadence or not" do
+      jobs = Source.scan_jobs(plan())
+
+      assert Enum.map(jobs, & &1.cell) == ["agendas", "transcripts"]
+    end
+
+    test "each carries what its leaf declared" do
+      [agendas, transcripts] = Source.scan_jobs(plan())
+
+      assert agendas.source == Crawler
+      assert agendas.args == [recent: true]
+      assert agendas.every == "0 * * * *"
+
+      # the cheap one declared nothing, and says so rather than being absent
+      assert transcripts.source == Listing
+      assert transcripts.args == []
+      refute transcripts.every
+    end
+
+    test "crontab/2 is a projection of the subset that declared a cadence" do
+      with_cadence = Source.scan_jobs(plan()) |> Enum.filter(& &1.every) |> Enum.map(& &1.cell)
+
+      assert Enum.map(Source.crontab(plan(), MyWorker), fn {_c, _w, [args: a]} -> a["cell"] end) ==
+               with_cadence
+    end
+
+    test "a derived cell is not a unit of scannable work" do
+      jobs = ReactiveDag.Node.graph([Agendas, Derived]) |> Source.scan_jobs()
+
+      assert Enum.map(jobs, & &1.cell) == ["agendas"]
     end
   end
 end
