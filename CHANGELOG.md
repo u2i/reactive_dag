@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.17.0-rc.9](https://github.com/u2i/reactive_dag/compare/v0.17.0-rc.8...v0.17.0-rc.9) (2026-08-15)
+
+
+### Features
+
+* observed: :partial — a scan that looked at only part of the upstream ([#83](https://github.com/u2i/reactive_dag/issues/83)) ([4a7e759](https://github.com/u2i/reactive_dag/commit/4a7e7594838f9983ce75777469523f1f1f68498c))
+* observed: :partial — a scan that looked at only part of the upstream ([#83](https://github.com/u2i/reactive_dag/issues/83)) ([e5672da](https://github.com/u2i/reactive_dag/commit/e5672dacb13abc9d075c2fc8847a808ec074739e))
+
+
+### Performance Improvements
+
+* count in the datastore instead of loading every row ([#76](https://github.com/u2i/reactive_dag/issues/76)) ([bda0134](https://github.com/u2i/reactive_dag/commit/bda0134f8eeba8c63ce26033d7816d9162d38b4a))
+* count in the datastore instead of loading every row ([#76](https://github.com/u2i/reactive_dag/issues/76)) ([975965c](https://github.com/u2i/reactive_dag/commit/975965ca8d7632a611ac06b961380b2a5b26c60c))
+
 ## [0.17.0-rc.8](https://github.com/u2i/reactive_dag/compare/v0.17.0-rc.7...v0.17.0-rc.8) (2026-08-15)
 
 
