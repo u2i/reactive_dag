@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.17.0-rc.10](https://github.com/u2i/reactive_dag/compare/v0.17.0-rc.9...v0.17.0-rc.10) (2026-08-15)
+
+
+### Features
+
+* ReactiveDag.ScanWorker — the library defines the Oban job ([fcf9bdd](https://github.com/u2i/reactive_dag/commit/fcf9bdd60777c552fadd4a8fd68229c865e2f363))
+* ReactiveDag.ScanWorker — the library defines the Oban job ([1792c1a](https://github.com/u2i/reactive_dag/commit/1792c1a37d6237985bf16f1338df5edc32553192))
+
 ## [0.17.0-rc.9](https://github.com/u2i/reactive_dag/compare/v0.17.0-rc.8...v0.17.0-rc.9) (2026-08-15)
 
 
