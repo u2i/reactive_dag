@@ -88,7 +88,74 @@ defmodule ReactiveDag.SilentRevivalWarningTest do
     Docs |> Ash.read!() |> Enum.reject(&(&1.status == "tombstoned")) |> Enum.map(& &1.key)
   end
 
+  # a node declaring the marking policy, rather than passing :retire per call
+  defmodule Marked do
+    use Ash.Resource,
+      domain: ReactiveDag.SilentRevivalWarningTest.Domain,
+      data_layer: Ash.DataLayer.Ets,
+      extensions: [ReactiveDag.Node]
+
+    ets do
+    end
+
+    attributes do
+      attribute :key, :string, primary_key?: true, allow_nil?: false, public?: true
+      attribute :content_md5, :string, public?: true
+      attribute :status, :string, public?: true
+      attribute :fingerprint, :string, public?: true
+    end
+
+    actions do
+      defaults [:read, :destroy, update: [:status]]
+
+      create :upsert do
+        upsert?(true)
+        accept([:key, :content_md5, :status, :fingerprint])
+      end
+    end
+
+    reactive do
+      id(:marked)
+      leaf?(true)
+      fingerprint([:content_md5])
+      retain_if_vanished(mark: &ReactiveDag.SilentRevivalWarningTest.mark_gone/1)
+    end
+  end
+
+  @doc false
+  def mark_gone(keys) do
+    for key <- keys, row = Enum.find(Ash.read!(Marked), &(&1.key == key)) do
+      row |> Ash.Changeset.for_update(:update, %{status: "tombstoned"}) |> Ash.update!()
+    end
+  end
+
   describe "it fires on the shape it exists for" do
+    test "the DECLARED mark policy, not just a per-call :retire" do
+      # regression: the guard originally keyed off `opts[:retire]`, so unifying
+      # keep/mark into a node declaration silently stopped it firing for the very
+      # case it was written for.
+      [cell] = ReactiveDag.Node.cells(Marked)
+      for row <- Ash.read!(Marked), do: Ash.destroy!(row)
+
+      live = fn ->
+        Marked |> Ash.read!() |> Enum.reject(&(&1.status == "tombstoned")) |> Enum.map(& &1.key)
+      end
+
+      {:ok, _} = Rows.reconcile(cell, ["a", "b"], upsert: &Map.get(@rows, &1))
+      {:ok, _} = Rows.reconcile(cell, ["a"], upsert: &Map.get(@rows, &1), current: live.())
+
+      log =
+        capture_log(fn ->
+          {:ok, changed} =
+            Rows.reconcile(cell, ["a", "b"], upsert: &Map.get(@rows, &1), current: live.())
+
+          assert changed == []
+        end)
+
+      assert log =~ "report UNCHANGED"
+      assert log =~ "MARKS rows"
+    end
+
     test "a marked-retired key returns with unmoved bytes" do
       # seed both, then withdraw b and mark it
       {:ok, _} = Rows.reconcile(cell(), ["a", "b"], upsert: &Map.get(@rows, &1))

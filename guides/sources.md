@@ -239,9 +239,10 @@ fingerprint cannot see: a row you marked retired comes back carrying the bytes i
 left with. Its *liveness* moved; its content did not. The library reports nothing
 and the revival never propagates — silently, with no dirty key and no drain step.
 
-The library warns when it sees that shape (a key the scan returned, absent from
-your `:current`, reporting unchanged) but it cannot fix it: it does not know what
-your retirement marks. Report the revival yourself with the boolean form:
+The library warns when it sees that shape — a key the scan returned, absent from
+your `:current`, reporting unchanged — but it cannot fix it: it does not know
+what your `mark:` wrote. Report the revival yourself with the boolean form,
+which is what the warning tells you to do:
 
 ```elixir
 upsert: fn key ->
@@ -250,6 +251,10 @@ upsert: fn key ->
   revived? or fingerprint_moved?(key)
 end
 ```
+
+You reach this only with `mark:`. `retain_if_vanished true` keeps the key in its
+own baseline, so a returning key never looks absent and there is nothing to
+miss; and a destroying policy leaves no row to come back.
 
 If you only want the row kept, prefer `retain_if_vanished true` — a retained key
 stays in the baseline, so nothing ever looks like a revival and none of this

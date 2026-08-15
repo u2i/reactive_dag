@@ -184,7 +184,7 @@ defmodule ReactiveDag.Node.Rows do
     current = Keyword.get_lazy(opts, :current, fn -> Enum.map(all(cell), & &1.key) end)
     vanished = Enum.reject(current, &MapSet.member?(want_set, &1))
 
-    warn_silent_revivals(observed, current, opts)
+    warn_silent_revivals(observed, current, meta, opts)
     retire(vanished, Keyword.get(opts, :retire), meta)
 
     {:ok, changed_up ++ propagated(vanished, meta, opts)}
@@ -208,8 +208,8 @@ defmodule ReactiveDag.Node.Rows do
   # together are what identify a marking policy. A `retain_if_vanished` node is
   # not affected: its retained keys stay in the baseline, so they never look like
   # a revival.
-  defp warn_silent_revivals(observed, current, opts) do
-    if is_nil(opts[:current]) or is_nil(opts[:retire]) do
+  defp warn_silent_revivals(observed, current, meta, opts) do
+    if is_nil(opts[:current]) or not marking?(meta, opts) do
       :ok
     else
       live = MapSet.new(current)
@@ -229,13 +229,21 @@ defmodule ReactiveDag.Node.Rows do
           Logger.warning(
             "reactive_dag: #{length(keys)} key(s) returned by a scan were absent from the " <>
               "supplied `:current` baseline but report UNCHANGED, so they will not " <>
-              "propagate: #{inspect(Enum.take(keys, 5))}. If your `:retire` marks rows " <>
-              "rather than destroying them, this is a revival the fingerprint cannot see " <>
-              "— coming back is a change even when the bytes did not move. Report it " <>
+              "propagate: #{inspect(Enum.take(keys, 5))}. Your retirement MARKS rows " <>
+              "rather than destroying them, so this is a revival the fingerprint cannot " <>
+              "see — coming back is a change even when the bytes did not move. Report it " <>
               "yourself with the boolean `:upsert` form (see u2i/reactive_dag#82)."
           )
       end
     end
+  end
+
+  # Does retirement WRITE something? Only a marking policy can produce a silent
+  # revival: a destroying one leaves no row to come back, and `:keep` leaves the
+  # key in the baseline so it never looks absent. Declared on the node, or passed
+  # per-call — both spellings, or the warning misses the case it exists for.
+  defp marking?(meta, opts) do
+    match?({:mark, _}, meta[:retain_if_vanished]) or is_function(opts[:retire], 1)
   end
 
   # the host either wrote the row itself and told us whether it moved, or handed
