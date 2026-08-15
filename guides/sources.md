@@ -195,6 +195,29 @@ For anything beyond keeping the row — a tombstone column, an audit trail —
 `:retire` still takes a `(keys -> any)` fun, and those keys **do** propagate,
 because the host did something.
 
+### If your `:retire` marks rather than destroys
+
+`changed?` for the row form is a fingerprint comparison, and there is one case a
+fingerprint cannot see: a row you marked retired comes back carrying the bytes it
+left with. Its *liveness* moved; its content did not. The library reports nothing
+and the revival never propagates — silently, with no dirty key and no drain step.
+
+The library warns when it sees that shape (a key the scan returned, absent from
+your `:current`, reporting unchanged) but it cannot fix it: it does not know what
+your retirement marks. Report the revival yourself with the boolean form:
+
+```elixir
+upsert: fn key ->
+  revived? = Map.get(prior_status, key) == "tombstoned"
+  write_row(key)
+  revived? or fingerprint_moved?(key)
+end
+```
+
+If you only want the row kept, prefer `retain_if_vanished true` — a retained key
+stays in the baseline, so nothing ever looks like a revival and none of this
+applies. This is for a policy that genuinely marks state.
+
 ## The honest-gap discipline
 
 The single most important rule for a source:

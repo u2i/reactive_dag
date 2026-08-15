@@ -30,6 +30,8 @@ defmodule ReactiveDag.Node.Rows do
   somewhere else entirely and reads as empty. Asking is always safe.
   """
 
+  require Logger
+
   alias ReactiveDag.Cell
   alias ReactiveDag.Node.Recompute.Declarative
 
@@ -153,27 +155,78 @@ defmodule ReactiveDag.Node.Rows do
     upsert = Keyword.fetch!(opts, :upsert)
     want_set = MapSet.new(want_keys)
 
-    changed_up =
-      want_set
-      |> MapSet.to_list()
-      |> Enum.sort()
-      |> Enum.filter(&(observe(&1, upsert, meta) == true))
+    want = want_set |> MapSet.to_list() |> Enum.sort()
+
+    # `{key, changed?, library_decided?}` — the third is what tells the warning
+    # below whether `changed?` came from a fingerprint comparison (which cannot
+    # see a revival) or from the host (which can).
+    observed = Enum.map(want, fn key -> {key, observe(key, upsert, meta)} end)
+    changed_up = for {key, {true, _}} <- observed, do: key
 
     current = Keyword.get_lazy(opts, :current, fn -> Enum.map(all(cell), & &1.key) end)
     vanished = Enum.reject(current, &MapSet.member?(want_set, &1))
 
+    warn_silent_revivals(observed, current, opts)
     retire(vanished, Keyword.get(opts, :retire), meta)
 
     {:ok, changed_up ++ propagated(vanished, meta, opts)}
+  end
+
+  # A key the scan returned, that the host's OWN baseline excluded, whose
+  # fingerprint has not moved.
+  #
+  # For a host retiring by MARKING (a custom `:retire` that tombstones rather
+  # than destroys), that combination means a retired row came back carrying the
+  # bytes it left with. Its liveness changed; its content did not. `changed?` is
+  # fingerprint comparison, so the library reports nothing and the revival never
+  # propagates — silently, with no dirty key and no drain step to notice.
+  #
+  # The library cannot fix this: it does not know what the host's retirement
+  # marks, and `changed?` is deliberately the fingerprint's business. But it can
+  # see the shape, so it says so rather than leaving a correctness gap that only
+  # surfaces as stale downstream rows much later. (See u2i/reactive_dag#82.)
+  #
+  # Only fires with a host-supplied `:current` AND a custom `:retire` — the two
+  # together are what identify a marking policy. A `retain_if_vanished` node is
+  # not affected: its retained keys stay in the baseline, so they never look like
+  # a revival.
+  defp warn_silent_revivals(observed, current, opts) do
+    if is_nil(opts[:current]) or is_nil(opts[:retire]) do
+      :ok
+    else
+      live = MapSet.new(current)
+
+      # the row form only: a boolean-form host already decides `changed?` itself,
+      # which is precisely how this is worked around today
+      suspects =
+        for {key, {false, :library}} <- observed,
+            not MapSet.member?(live, key),
+            do: key
+
+      case suspects do
+        [] ->
+          :ok
+
+        keys ->
+          Logger.warning(
+            "reactive_dag: #{length(keys)} key(s) returned by a scan were absent from the " <>
+              "supplied `:current` baseline but report UNCHANGED, so they will not " <>
+              "propagate: #{inspect(Enum.take(keys, 5))}. If your `:retire` marks rows " <>
+              "rather than destroying them, this is a revival the fingerprint cannot see " <>
+              "— coming back is a change even when the bytes did not move. Report it " <>
+              "yourself with the boolean `:upsert` form (see u2i/reactive_dag#82)."
+          )
+      end
+    end
   end
 
   # the host either wrote the row itself and told us whether it moved, or handed
   # us what it observed and let the library decide.
   defp observe(key, upsert, meta) do
     case upsert.(key) do
-      changed? when is_boolean(changed?) -> changed?
-      nil -> false
-      row when is_map(row) -> write(key, row, meta) == :changed
+      changed? when is_boolean(changed?) -> {changed?, :host}
+      nil -> {false, :host}
+      row when is_map(row) -> {write(key, row, meta) == :changed, :library}
     end
   end
 
