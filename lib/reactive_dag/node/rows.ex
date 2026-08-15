@@ -30,6 +30,8 @@ defmodule ReactiveDag.Node.Rows do
   somewhere else entirely and reads as empty. Asking is always safe.
   """
 
+  require Ash.Query
+
   alias ReactiveDag.Cell
   alias ReactiveDag.Node.Recompute.Declarative
 
@@ -74,6 +76,26 @@ defmodule ReactiveDag.Node.Rows do
   end
 
   @doc """
+  How many units the cell holds, counted by the datastore.
+
+  `Ash.count!` rather than reading the rows: an overview wants the number, and
+  loading a table to reduce it to one integer decodes every payload column on the
+  way — which for a node whose rows carry a JSON blob is the whole cost of the
+  read for none of the value.
+
+  Returns 0 for a node that keeps no rows here.
+  """
+  @spec key_count(Cell.t() | source()) :: non_neg_integer()
+  def key_count(%Cell{meta: meta}), do: key_count(meta)
+
+  def key_count(%{} = source) do
+    case queryable(source) do
+      nil -> 0
+      resource -> Ash.count!(resource)
+    end
+  end
+
+  @doc """
   `%{status => count}` over the cell's rows — the histogram `Insights` shows and
   `Verdict` folds into one answer.
 
@@ -82,24 +104,89 @@ defmodule ReactiveDag.Node.Rows do
   `%{nil => n}` rather than lying with `%{}`.
   """
   @spec status_histogram(Cell.t() | source()) :: %{(String.t() | nil) => non_neg_integer()}
-  def status_histogram(cell) do
-    cell |> all() |> Enum.frequencies_by(& &1.status)
+  def status_histogram(%Cell{meta: meta}), do: status_histogram(meta)
+
+  def status_histogram(%{} = source) do
+    case queryable(source) do
+      nil ->
+        %{}
+
+      resource ->
+        if Ash.Resource.Info.attribute(resource, :status) do
+          # One narrow query for the vocabulary, then one COUNT per value. More
+          # round trips than a single read, and none of them decode a row —
+          # which is where the cost is for a node whose payload is a blob.
+          #
+          # Ash has no arbitrary `GROUP BY … -> rows` (it is why `reduce` folds
+          # in the BEAM at all), so this is the closest pushdown available. The
+          # vocabulary is small — a handful of statuses — so N stays tiny.
+          resource
+          |> distinct_statuses()
+          |> Map.new(&{&1, count_with_status(resource, &1)})
+        else
+          # no status column: every row counts under `nil`, and the count is one
+          # query rather than a table read
+          case Ash.count!(resource) do
+            0 -> %{}
+            n -> %{nil => n}
+          end
+        end
+    end
   end
+
+  defp distinct_statuses(resource) do
+    resource
+    |> Ash.Query.select([:status])
+    |> Ash.Query.distinct([:status])
+    |> Ash.read!()
+    |> Enum.map(& &1.status)
+    |> Enum.uniq()
+  end
+
+  defp count_with_status(resource, nil),
+    do: resource |> Ash.Query.filter(is_nil(status)) |> Ash.count!()
+
+  defp count_with_status(resource, status),
+    do: resource |> Ash.Query.filter(status == ^status) |> Ash.count!()
 
   @doc """
   The keys whose status is in `statuses`, at most `limit` of them (sorted, so a
   sample is stable between calls rather than reshuffling on every render).
   """
   @spec keys_by_status(Cell.t() | source(), [String.t() | nil], keyword()) :: [String.t()]
-  def keys_by_status(cell, statuses, opts \\ []) do
-    want = MapSet.new(statuses)
+  def keys_by_status(cell_or_source, statuses, opts \\ [])
 
-    cell
-    |> all()
-    |> Enum.filter(&MapSet.member?(want, &1.status))
-    |> Enum.map(& &1.key)
-    |> Enum.sort()
-    |> take(opts[:limit])
+  def keys_by_status(%Cell{meta: meta}, statuses, opts), do: keys_by_status(meta, statuses, opts)
+
+  def keys_by_status(%{} = source, statuses, opts) do
+    case queryable(source) do
+      nil ->
+        []
+
+      resource ->
+        # The filter goes to the datastore; the KEY is still built here, because
+        # an identity-keyed node's key is a "|"-join of its identity fields and
+        # no datastore knows that. So a sample still decodes rows — but only the
+        # ones that matched, and only up to the limit, rather than the table.
+        resource
+        |> filter_statuses(statuses)
+        |> Ash.read!()
+        |> Enum.map(keyer(source))
+        |> Enum.sort()
+        |> take(opts[:limit])
+    end
+  end
+
+  # `nil` cannot go through `in`, so it is a separate predicate.
+  defp filter_statuses(resource, statuses) do
+    {nils, values} = Enum.split_with(statuses, &is_nil/1)
+
+    case {nils, values} do
+      {[], []} -> Ash.Query.filter(resource, false)
+      {[], values} -> Ash.Query.filter(resource, status in ^values)
+      {_, []} -> Ash.Query.filter(resource, is_nil(status))
+      {_, values} -> Ash.Query.filter(resource, is_nil(status) or status in ^values)
+    end
   end
 
   @doc """
@@ -338,6 +425,17 @@ defmodule ReactiveDag.Node.Rows do
       keys,
       meta[:payload_destroy] || :destroy
     )
+  end
+
+  # A node with no resource, or one with no attributes, keeps its rows somewhere
+  # this library never sees — the same guard `all/1` applies, factored out so
+  # every read path agrees on what "has no rows here" means.
+  defp queryable(source) do
+    resource = source[:resource]
+
+    if is_nil(resource) or Ash.Resource.Info.attributes(resource) == [],
+      do: nil,
+      else: resource
   end
 
   defp take(keys, nil), do: keys
