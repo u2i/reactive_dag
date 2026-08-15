@@ -155,7 +155,31 @@ This is the same `fingerprint` vocabulary `per_key` uses to skip an expensive
 action when its inputs have not moved — one concept, one implementation, at two
 rungs of the ladder.
 
-## Keeping what the upstream dropped
+## When a key stops being returned
+
+One decision, three answers. Pick by what the row is worth once the upstream
+stops listing it:
+
+| you want | you write | the row | the key propagates? |
+|---|---|---|---|
+| **destroy** it | nothing — the default | destroyed | yes |
+| **keep** it | `retain_if_vanished true` | untouched | no |
+| **mark** it | `retire:` fun + a matching `current:` | yours to write | yes |
+
+The propagation column is the part worth reading twice, because it is not
+uniform and the asymmetry is deliberate:
+
+- **Destroying** removes a unit downstream was counting, so it is a change.
+- **Keeping** changes nothing at all — the row is still there, unmodified — so
+  reporting it would be a lie, *and* would report it again on every subsequent
+  poll forever, since nothing marks it as handled.
+- **Marking** is a change you made, so the library assumes downstream should
+  hear about it. It also means you own the `:current` baseline, and one case
+  the fingerprint cannot see (below).
+
+The rest of this section is the second and third rows.
+
+### Keeping what the upstream dropped
 
 By default a key the scan stops returning has its row **destroyed**. For a
 derived node that is right: a row whose inputs are gone is stale, and a stale
@@ -195,7 +219,7 @@ For anything beyond keeping the row — a tombstone column, an audit trail —
 `:retire` still takes a `(keys -> any)` fun, and those keys **do** propagate,
 because the host did something.
 
-### If your `:retire` marks rather than destroys
+### Marking: if your `:retire` writes state rather than destroying
 
 `changed?` for the row form is a fingerprint comparison, and there is one case a
 fingerprint cannot see: a row you marked retired comes back carrying the bytes it
