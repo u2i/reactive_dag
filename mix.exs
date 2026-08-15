@@ -100,6 +100,9 @@ defmodule ReactiveDag.MixProject do
       # the drain's observability seam. Arrives transitively via Ash anyway, but
       # the drain calls :telemetry.execute directly, so it is a direct dependency.
       {:telemetry, "~> 1.1"},
+      # the scan worker. Optional: a host that schedules its own polls, or runs
+      # none, never loads `ReactiveDag.ScanWorker` and needs no Oban.
+      {:oban, "~> 2.17", optional: true},
       # TEST-ONLY: proves an ash_ai prompt-backed action composes with `run`,
       # so an LLM node needs no library code (see guides/llm-nodes.md). Never a
       # runtime dependency — hosts that want LLM nodes add ash_ai themselves.

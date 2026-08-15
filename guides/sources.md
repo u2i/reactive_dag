@@ -453,6 +453,70 @@ A cell with no scanner is absent. A scanner with no `args:`/`every:` reports
 them empty — so a cheap leaf gets a plain *refresh* and an expensive one can be
 offered its deep pass, without the UI knowing which scanners are costly.
 
+### Scheduling it: the worker
+
+`ReactiveDag.ScanWorker` is the Oban job — poll one cell's scanner, mark what
+changed, drain. Every host that scans grew this independently, and each time it
+was the same five lines of engine logic wrapped in that host's own
+observability.
+
+```elixir
+# config
+config :reactive_dag, plan_mfa: {MyApp.Dag, :plan, []}
+
+config :my_app, Oban,
+  queues: [scans: 1],
+  plugins: [
+    {Oban.Plugins.Cron,
+     crontab: ReactiveDag.Source.crontab(MyApp.Dag.plan())}
+  ]
+```
+
+`crontab/1` reads the cadence each leaf declared, so adding `every:` to a leaf
+schedules it — there is no second list to keep in step. A single-concurrency
+`:scans` queue is the usual choice: two concurrent polls of the same upstream are
+wasted requests.
+
+On demand, from a button or IEx:
+
+```elixir
+%{"cell" => "agenda_docs"} |> ReactiveDag.ScanWorker.new() |> Oban.insert()
+
+# ...or wider than the leaf's standing default
+%{"cell" => "agenda_docs", "opts" => %{"recent" => false}}
+|> ReactiveDag.ScanWorker.new()
+|> Oban.insert()
+```
+
+`Source.scan_jobs/1` is the list behind all of this — every cell that declares a
+scanner, with its args and cadence — which is also what a UI renders controls
+from.
+
+Oban is an **optional** dependency: a host that schedules its own polls, or runs
+none, never loads the worker.
+
+### Wrapping it
+
+The worker is deliberately thin. A host that audits its crawls, records a run id,
+or enqueues follow-up work writes its own worker over the same two calls rather
+than extending this one:
+
+```elixir
+def perform(%Oban.Job{args: %{"cell" => cell, "run_id" => run}}) do
+  MyApp.Audit.with_audit(cell, run, fn ->
+    {:ok, result} = ReactiveDag.Source.refresh(plan(), cell, reason: "scan:#{run}")
+    {:ok, report} = ReactiveDag.Drain.run(plan(), recompute: ..., key_rule: ...)
+    MyApp.Runs.record(run, result, report)
+  end)
+end
+```
+
+`refresh/3` is the part worth not re-deriving: it polls, normalises the two
+return shapes the `Source` contract allows, marks the frontier, and marks the
+parents — which is where the loop is easy to get subtly wrong. Marking a leaf
+without its parents strands the change one level up, and nothing downstream ever
+recomputes.
+
 ### The library does not schedule
 
 `every:` is a declaration, not a job. `crontab/2` collects them into entries you

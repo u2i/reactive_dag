@@ -266,6 +266,83 @@ defmodule ReactiveDag.Source do
   end
 
   @doc """
+  Poll a cell's scanner AND mark what changed — the whole poll half of the
+  two-phase loop, in one call.
+
+  `poll_cell/3` returns what the scanner said and stops, leaving every host to
+  hand-write the same three steps: normalise the return shape, mark the
+  frontier, propagate to parents. That loop is documented in the guide and was
+  provided nowhere, which is why every host grew a worker to hold it.
+
+      {:ok, result} = Source.refresh(plan, "agenda_docs")
+      #=> %{changed: ["a", "b"], marked: %{"agenda_docs" => ["a", "b"]},
+      #     unreachable: []}
+
+  Then drain — separately, and deliberately so. The poll/drain split is a design
+  invariant (external I/O must not sit inside a depth-ordered recompute), and a
+  host polling several sources usually wants ONE drain after all of them rather
+  than one each.
+
+  ## Return shapes
+
+  A single-leaf source returns a flat key list; a fan-out source returns
+  `%{leaf_id => keys}`. Both are in the `Source` contract, so both are
+  normalised here rather than in each host.
+
+  `:reason` labels the frontier rows (default `"scan"`), which is what makes a
+  drain's trace say *why* a cell was dirty.
+
+  Nothing is marked for an unreachable upstream, because the scanner reported no
+  keys for it — an outage propagates nothing, which is the honest gap holding by
+  construction rather than by rule.
+  """
+  @spec refresh(graph(), String.t(), keyword()) ::
+          {:ok, %{changed: [String.t()], marked: map(), unreachable: list()}}
+          | {:error, term()}
+  def refresh(graph, cell_id, opts \\ []) do
+    {reason, poll_opts} = Keyword.pop(opts, :reason, "scan")
+    key_rule = Keyword.get(poll_opts, :key_rule, ReactiveDag.KeyRule)
+    poll_opts = Keyword.delete(poll_opts, :key_rule)
+
+    case poll_cell(graph, cell_id, poll_opts) do
+      {:ok, result} ->
+        marked = mark(graph, cell_id, result, reason, key_rule)
+
+        {:ok,
+         %{
+           changed: marked |> Map.values() |> List.flatten() |> Enum.uniq(),
+           marked: marked,
+           unreachable: Map.get(result, :unreachable, [])
+         }}
+
+      {:error, reason} ->
+        {:error, reason}
+    end
+  end
+
+  # A flat list belongs to the cell that was polled; a map names its own leaves.
+  defp mark(graph, cell_id, result, reason, key_rule) do
+    by_leaf =
+      case Map.get(result, :changed, []) do
+        keys when is_list(keys) -> %{cell_id => keys}
+        %{} = by_leaf -> Map.new(by_leaf, fn {leaf, keys} -> {to_string(leaf), keys} end)
+      end
+
+    for {leaf, keys} <- by_leaf, keys != [], into: %{} do
+      ReactiveDag.Frontier.mark_dirty(leaf, keys, reason)
+
+      # `dirty_parents/5` COMPUTES each parent's claim; marking it is the
+      # caller's. Dropping the return here would mark the leaf and strand the
+      # change one level up — the cascade would stop before it started.
+      for {parent, parent_keys} <- ReactiveDag.Graph.dirty_parents(graph, leaf, keys, key_rule) do
+        ReactiveDag.Frontier.mark_dirty(parent, parent_keys, reason)
+      end
+
+      {leaf, keys}
+    end
+  end
+
+  @doc """
   What a host needs to render a scan control for each cell that has one:
   `%{cell_id => %{source:, args:, every:, origin:}}`.
 
@@ -298,6 +375,36 @@ defmodule ReactiveDag.Source do
   end
 
   @doc """
+  Every scannable unit of work in the plan: `%{cell:, source:, args:, every:}`.
+
+  One entry per cell that declares a `scan`, whether or not it declares a
+  cadence. This is the list a host schedules from, renders controls from, and
+  triggers ad-hoc runs from — `crontab/2` is a projection of the subset that
+  declared `every:`.
+
+      Source.scan_jobs(plan)
+      #=> [%{cell: "agenda_docs", source: MyApp.Crawler,
+      #      args: [recent: true], every: "0 * * * *"}]
+
+  Keyed by CELL rather than by source, because a source feeding several leaves
+  is several units of work — each with its own declared bound.
+  """
+  @spec scan_jobs(graph()) :: [%{cell: String.t(), source: module(), args: keyword(), every: String.t() | nil}]
+  def scan_jobs(graph) do
+    for {id, cell} <- graph.cells,
+        mod = cell.meta[:scan],
+        not is_nil(mod) do
+      %{
+        cell: id,
+        source: mod,
+        args: cell.meta[:scan_args] || [],
+        every: cell.meta[:scan_every]
+      }
+    end
+    |> Enum.sort_by(& &1.cell)
+  end
+
+  @doc """
   The Oban-style crontab entries a plan's leaves declare, as
   `{cron, worker, args: %{"source" => id}}`.
 
@@ -319,15 +426,10 @@ defmodule ReactiveDag.Source do
   likes.
   """
   @spec crontab(graph(), module()) :: [{String.t(), module(), keyword()}]
-  def crontab(graph, worker) do
-    for cell <- Map.values(graph.cells),
-        every = cell.meta[:scan_every],
-        not is_nil(every),
-        mod = cell.meta[:scan],
-        not is_nil(mod) do
-      {every, worker, args: %{"source" => to_string(mod.id())}}
+  def crontab(graph, worker \\ ReactiveDag.ScanWorker) do
+    for %{every: every, cell: cell} <- scan_jobs(graph), not is_nil(every) do
+      {every, worker, args: %{"cell" => cell}}
     end
-    |> Enum.uniq()
   end
 
   @doc """
