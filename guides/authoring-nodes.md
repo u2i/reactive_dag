@@ -18,6 +18,17 @@ Every node emits **rows**. A node whose answer is one word emits a row with a
 
 ## Declaring the computation
 
+> #### `op` is a label, not a selector {: .info}
+>
+> `op :map` reads like the field that decides how a node recomputes. It is not.
+> Recompute dispatches on the **entity** — `aggregate` / `reduce` / `join` /
+> `union` / `per_key` / `run` / `compute` — and never on `op`, which is a free
+> atom for documentation, load-bearing only for a host `RecomputeStrategy` that
+> chooses to read it (`ReactiveDag.SetOp` does).
+>
+> A block with an `op` and no entity declares no computation at all, and is
+> rejected at compile time.
+
 Authoring is **Ash-first**: start from what Ash can express declaratively and
 work outward — each step down the ladder trades declarativeness for power, and
 you take only the steps your shape needs. Every form reads its input, computes

@@ -279,9 +279,12 @@ defmodule ReactiveDag.Node do
     schema: [
       op: [
         type: :atom,
-        required: true,
+        required: false,
         doc:
-          "free-atom label for this intermediate cell (positional; see `ReactiveDag.Cell` for what `op` means)"
+          "OPTIONAL free-atom label for this intermediate cell. Dispatches nothing here — " <>
+            "recompute selects on the entity, not on `op` — so it is documentation, " <>
+            "load-bearing only for a `RecomputeStrategy` that reads it (e.g. " <>
+            "`ReactiveDag.SetOp`). See `ReactiveDag.Cell`."
       ],
       compute: [type: :atom, doc: "the recompute module for this intermediate cell"],
       as: [type: :atom, doc: "an explicit id for this intermediate cell"],

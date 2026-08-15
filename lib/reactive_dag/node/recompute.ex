@@ -152,8 +152,19 @@ defmodule ReactiveDag.Node.Recompute do
     end
   end
 
+  # A DSL-authored node cannot reach here — `VerifyReactive` rejects a block with
+  # no computation at compile time. This is the hand-assembled path: a host that
+  # builds `%Cell{}` structs itself has no verifier, so the pass-through stays,
+  # loudly, rather than becoming a crash in the one place the substrate is
+  # deliberately unopinionated.
   def recompute(%Cell{meta: %{compute: nil}, id: id}, keys) do
-    Logger.warning("reactive_dag: node #{inspect(id)} has no compute module; passing keys through")
+    Logger.warning(
+      "reactive_dag: node #{inspect(id)} declares no computation; passing its keys " <>
+        "through unchanged, so anything downstream recomputes against inputs that never " <>
+        "moved. A hand-assembled cell needs `meta.compute`; a DSL-authored one is caught " <>
+        "at compile time."
+    )
+
     {:ok, keys}
   end
 

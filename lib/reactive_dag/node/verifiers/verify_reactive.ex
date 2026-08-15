@@ -9,7 +9,18 @@ defmodule ReactiveDag.Node.Verifiers.VerifyReactive do
   use Spark.Dsl.Verifier
 
   alias ReactiveDag.Node.Recompute.Declarative
-  alias ReactiveDag.Node.{Compose, Compute, Context, Join, PerKey, RecomputeBy, Reduce, Ref, Run}
+  alias ReactiveDag.Node.{
+    Compose,
+    Compute,
+    Context,
+    Join,
+    PerKey,
+    RecomputeBy,
+    Reduce,
+    Ref,
+    Run,
+    Union
+  }
   alias Spark.Dsl.Verifier
 
   @impl true
@@ -27,11 +38,12 @@ defmodule ReactiveDag.Node.Verifiers.VerifyReactive do
       Enum.filter(
         entities,
         &(match?(%Reduce{}, &1) or match?(%Join{}, &1) or match?(%Compute{}, &1) or
-            match?(%Run{}, &1) or match?(%PerKey{}, &1) or
+            match?(%Run{}, &1) or match?(%PerKey{}, &1) or match?(%Union{}, &1) or
             match?(%ReactiveDag.Node.Aggregate{}, &1))
       )
 
     with :ok <- one_computation(dsl, computations),
+         :ok <- some_computation(dsl, computations),
          :ok <- verify_combinators(dsl, computations) do
       :ok
     end
@@ -48,6 +60,37 @@ defmodule ReactiveDag.Node.Verifiers.VerifyReactive do
   end
 
   defp one_computation(_dsl, _), do: :ok
+
+  # A node with no computation is not an error in itself — a LEAF is fed from
+  # outside, and a `compose` node's legs do the work. Anything else, though, is
+  # a cell that will pass its claimed keys through untouched, so its consumers
+  # recompute against inputs that never moved. That used to surface as a
+  # `Logger.warning` at drain time, which is the wrong moment and the wrong
+  # channel: you learn about it from stale data, long after the deploy that
+  # caused it.
+  defp some_computation(dsl, []) do
+    cond do
+      Verifier.get_option(dsl, [:reactive], :leaf?) == true ->
+        :ok
+
+      Enum.any?(Verifier.get_entities(dsl, [:reactive]), &match?(%Compose{}, &1)) ->
+        :ok
+
+      true ->
+        error(
+          dsl,
+          "this node declares no computation, so it would pass its dirty keys through " <>
+            "unchanged and everything downstream would recompute against inputs that " <>
+            "never moved.\n\nDeclare one of `aggregate` / `reduce` / `join` / `union` / " <>
+            "`per_key` / `run` / `compute`, or say what this node is instead: `leaf? true` " <>
+            "for a node fed from outside the graph, or a `compose` block whose legs do the " <>
+            "work.\n\n(`op` is a label and does not declare a computation — recompute " <>
+            "dispatches on the entity, not on `op`.)"
+        )
+    end
+  end
+
+  defp some_computation(_dsl, _), do: :ok
 
   defp verify_combinators(dsl, computations) do
     Enum.reduce_while(computations, :ok, fn entity, :ok ->
