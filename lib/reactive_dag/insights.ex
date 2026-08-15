@@ -84,9 +84,14 @@ defmodule ReactiveDag.Insights do
   it currently holds (status histogram, key count, and a small sample of failing
   keys for the drawer).
 
-  Reads the node's own resource, so this is a query per cell — call it for the
-  cells being displayed, not the whole graph, unless the graph is small
-  (`summary/1` does exactly that, with the same caveat).
+  Reads the node's own resource, and pushes the reduction into the datastore: a
+  histogram is a `DISTINCT` plus one `COUNT` per status, and the failing sample
+  is a filtered `LIMIT`. No row is loaded to be counted, which matters most for
+  a node whose payload is a blob — decoding it to discard it was the bulk of the
+  old cost.
+
+  Still several small queries per cell, so `summary/1` over a large graph is
+  many round trips. That is the remaining cost, and it is a different one.
   """
   @spec cell_status(Plan.t(), String.t()) :: cell_status() | nil
   def cell_status(%Plan{cells: cells, depths: depths}, cell_id) do
@@ -108,6 +113,8 @@ defmodule ReactiveDag.Insights do
       # two, but the struct is the honest read here)
       op: cell.op,
       statuses: statuses,
+      # summed from the histogram rather than counted again: the histogram is
+      # already one COUNT per status, so the total is free.
       key_count: statuses |> Map.values() |> Enum.sum(),
       failing_sample: failing_sample(cell, statuses)
     }
