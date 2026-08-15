@@ -139,9 +139,11 @@ defmodule ReactiveDag.Node.Rows do
   |---|---|---|---|
   | **destroy** it | nothing — the default | destroyed | yes |
   | **keep** it | `retain_if_vanished true` on the node | untouched | no |
-  | **mark** it | a `:retire` fun + a matching `:current` | yours to write | yes |
+  | **mark** it | `retain_if_vanished mark: &tombstone/1` | yours to write | yes |
 
-  The propagation column is not uniform, and the asymmetry is deliberate:
+  Keep and mark are the same operation with one question between them — *do we
+  write something to say it is gone?* — and propagation follows from the answer
+  rather than being a separate switch:
 
     * **destroying** removes a unit downstream was counting, so it is a change;
     * **keeping** changes nothing — the row is still there, unmodified — so
@@ -274,15 +276,12 @@ defmodule ReactiveDag.Node.Rows do
     end
   end
 
-  # A RETAINED key is not a change: the row is still there, unmodified, so from a
-  # consumer's side nothing happened. It also keeps re-polling quiet — reporting
-  # it would report it again on every subsequent poll, forever, since nothing
-  # marks it as already handled.
-  #
-  # An explicit `:retire` fun means the host did something, so the keys
-  # propagate as they always have.
+  # Propagation FOLLOWS from whether anything was written. Nothing written means
+  # nothing changed — the row is still there, unmodified — so reporting it would
+  # be a lie, and would report it again on every poll forever since nothing marks
+  # it handled. Anything written is a change the host made, so downstream hears.
   defp propagated(vanished, meta, opts) do
-    if meta[:retain_if_vanished] == true and is_nil(opts[:retire]) do
+    if meta[:retain_if_vanished] == :keep and is_nil(opts[:retire]) do
       []
     else
       vanished
@@ -290,10 +289,16 @@ defmodule ReactiveDag.Node.Rows do
   end
 
   defp retire([], _how, _meta), do: :ok
+
+  # a per-call `:retire` still wins: the node declares the policy, a caller may
+  # override it for one poll.
   defp retire(keys, fun, _meta) when is_function(fun, 1), do: fun.(keys)
 
-  # the node keeps what its upstream dropped — nothing to do.
-  defp retire(_keys, nil, %{retain_if_vanished: true}), do: :ok
+  # KEEP — the row stands as it is. Nothing to write, nothing to report.
+  defp retire(_keys, nil, %{retain_if_vanished: :keep}), do: :ok
+
+  # MARK — keep the row, and record that the upstream dropped it.
+  defp retire(keys, nil, %{retain_if_vanished: {:mark, fun}}), do: fun.(keys)
 
   defp retire(keys, _nil, meta) do
     ReactiveDag.Node.Payload.retire(

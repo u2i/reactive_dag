@@ -164,18 +164,31 @@ stops listing it:
 |---|---|---|---|
 | **destroy** it | nothing — the default | destroyed | yes |
 | **keep** it | `retain_if_vanished true` | untouched | no |
-| **mark** it | `retire:` fun + a matching `current:` | yours to write | yes |
+| **mark** it | `retain_if_vanished mark: &tombstone/1` | yours to write | yes |
 
-The propagation column is the part worth reading twice, because it is not
-uniform and the asymmetry is deliberate:
+Keep and mark are the same operation with one question between them: **do we
+write something to say it is gone?** Propagation follows from the answer rather
+than being a separate switch —
 
-- **Destroying** removes a unit downstream was counting, so it is a change.
-- **Keeping** changes nothing at all — the row is still there, unmodified — so
-  reporting it would be a lie, *and* would report it again on every subsequent
-  poll forever, since nothing marks it as handled.
-- **Marking** is a change you made, so the library assumes downstream should
-  hear about it. It also means you own the `:current` baseline, and one case
-  the fingerprint cannot see (below).
+- **destroying** removes a unit downstream was counting, so it is a change;
+- **keeping** writes nothing, so nothing changed — reporting it would be a lie,
+  *and* would report it again on every poll forever, since nothing marks it as
+  handled;
+- **marking** writes something, so downstream hears about it.
+
+```elixir
+reactive do
+  leaf? true
+  scan MyApp.DocCrawler
+
+  retain_if_vanished true                        # keep, silent
+  # retain_if_vanished mark: &MyApp.tombstone/1  # ...or mark, and propagate
+end
+```
+
+`mark:` receives the vanished keys and does whatever your policy is — set a
+status, stamp a timestamp, write an audit row. The library never learns what it
+means, which is why the column names stay yours.
 
 The rest of this section is the second and third rows.
 

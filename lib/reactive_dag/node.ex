@@ -934,15 +934,21 @@ defmodule ReactiveDag.Node do
       ],
       leaf?: [type: :boolean, default: false, doc: "true for a source-fed leaf (no compute)"],
       retain_if_vanished: [
-        type: :boolean,
+        type: {:or, [:boolean, :keyword_list]},
         default: false,
         doc:
           "keep the row when a scan stops returning its key, instead of destroying it. For a " <>
             "leaf whose upstream WITHDRAWS items but whose artifacts you keep — the listing " <>
-            "dropped the document, the PDF you fetched is still yours. The key is NOT reported " <>
-            "as changed: the row is still there, so from a consumer's side nothing happened, " <>
-            "and re-polling stays quiet. Leave it false on a DERIVED node, where a row whose " <>
-            "inputs are gone is stale rather than archival."
+            "dropped the document, the PDF you fetched is still yours. " <>
+            "`true` keeps the row untouched, and the key is NOT reported as changed: nothing " <>
+            "about the row moved, so from a consumer's side nothing happened — and reporting " <>
+            "it would report it again on every poll forever, since nothing marks it handled. " <>
+            "`mark: fun` keeps the row AND records that the upstream dropped it " <>
+            "(`retain_if_vanished mark: &MyApp.tombstone/1`, receiving the vanished keys); " <>
+            "because something was written, the keys DO propagate. That is the whole " <>
+            "decision — *do we write something to say it is gone?* — with propagation " <>
+            "following from the answer rather than being a separate switch. Leave it false " <>
+            "on a DERIVED node, where a row whose inputs are gone is stale, not archival."
       ],
       dirties_on: [
         type: {:list, {:one_of, [:create, :update, :destroy]}},
@@ -1552,6 +1558,31 @@ defmodule ReactiveDag.Node do
     Ext.get_entities(resource, [:reactive]) |> Enum.find(&match?(%Aggregate{}, &1))
   end
 
+  # Normalise the retention declaration to `nil | :keep | {:mark, fun}`. The two
+  # forms are one decision — *do we write something to say it is gone?* — and
+  # whether the key propagates follows from that rather than being separate.
+  defp retain_policy(resource) do
+    case Ext.get_opt(resource, [:reactive], :retain_if_vanished, false) do
+      true ->
+        :keep
+
+      opts when is_list(opts) ->
+        case Keyword.get(opts, :mark) do
+          fun when is_function(fun, 1) ->
+            {:mark, fun}
+
+          other ->
+            raise ArgumentError,
+                  "reactive_dag: `retain_if_vanished` takes `true` or `mark: fun/1`, got " <>
+                    "#{inspect(other)}. `mark:` receives the vanished keys and records that " <>
+                    "the upstream dropped them."
+        end
+
+      _ ->
+        nil
+    end
+  end
+
   defp identity_fields(resource) do
     case Ash.Resource.Info.primary_key(resource) do
       pk when is_list(pk) and length(pk) > 1 -> pk
@@ -1613,7 +1644,7 @@ defmodule ReactiveDag.Node do
         payload_action: Ext.get_opt(resource, [:reactive], :payload_action, nil),
         fingerprint: Ext.get_opt(resource, [:reactive], :fingerprint, nil),
         fingerprint_attribute: Ext.get_opt(resource, [:reactive], :fingerprint_attribute, nil),
-        retain_if_vanished: Ext.get_opt(resource, [:reactive], :retain_if_vanished, nil),
+        retain_if_vanished: retain_policy(resource),
         identity_fields: identity_fields(resource),
         context_inputs: context_inputs(resource)
       }
