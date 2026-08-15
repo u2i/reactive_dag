@@ -155,7 +155,44 @@ This is the same `fingerprint` vocabulary `per_key` uses to skip an expensive
 action when its inputs have not moved — one concept, one implementation, at two
 rungs of the ladder.
 
-## Keeping what the upstream dropped
+## When a key stops being returned
+
+One decision, three answers. Pick by what the row is worth once the upstream
+stops listing it:
+
+| you want | you write | the row | the key propagates? |
+|---|---|---|---|
+| **destroy** it | nothing — the default | destroyed | yes |
+| **keep** it | `retain_if_vanished true` | untouched | no |
+| **mark** it | `retain_if_vanished mark: &tombstone/1` | yours to write | yes |
+
+Keep and mark are the same operation with one question between them: **do we
+write something to say it is gone?** Propagation follows from the answer rather
+than being a separate switch —
+
+- **destroying** removes a unit downstream was counting, so it is a change;
+- **keeping** writes nothing, so nothing changed — reporting it would be a lie,
+  *and* would report it again on every poll forever, since nothing marks it as
+  handled;
+- **marking** writes something, so downstream hears about it.
+
+```elixir
+reactive do
+  leaf? true
+  scan MyApp.DocCrawler
+
+  retain_if_vanished true                        # keep, silent
+  # retain_if_vanished mark: &MyApp.tombstone/1  # ...or mark, and propagate
+end
+```
+
+`mark:` receives the vanished keys and does whatever your policy is — set a
+status, stamp a timestamp, write an audit row. The library never learns what it
+means, which is why the column names stay yours.
+
+The rest of this section is the second and third rows.
+
+### Keeping what the upstream dropped
 
 By default a key the scan stops returning has its row **destroyed**. For a
 derived node that is right: a row whose inputs are gone is stale, and a stale
@@ -194,6 +231,32 @@ an edit.
 For anything beyond keeping the row — a tombstone column, an audit trail —
 `:retire` still takes a `(keys -> any)` fun, and those keys **do** propagate,
 because the host did something.
+
+### Marking: when the row records that it is gone
+
+`retain_if_vanished mark: &tombstone/1` keeps the row and hands you the vanished
+keys to write whatever your policy is — a status, a timestamp, an audit row. The
+library never learns what it means, which is why the column names stay yours.
+
+Because something was written, the keys propagate.
+
+**Revival is handled for you.** A marked-retired row that comes back carries the
+fingerprint it left with — its content did not move, its liveness did — so a
+fingerprint comparison alone would report "unchanged" and the return would never
+reach downstream. The library reports it instead: the key was in the scan, and
+absent from the baseline you supplied, which is exactly what coming back looks
+like.
+
+```
+poll 1: [a, b]   → changed: ["a", "b"]
+poll 2: [a]      → changed: ["b"]        ← marked; you wrote the tombstone
+poll 3: [a]      → changed: []           ← already marked, and out of your baseline
+poll 4: [a, b]   → changed: ["b"]        ← REVIVED, though b's bytes never moved
+```
+
+This needs your `:current` to be the **live** set — the keys your marking left
+alone. That is the baseline the library subtracts from, so it is also how it
+recognises a return.
 
 ## The honest-gap discipline
 

@@ -94,6 +94,15 @@ defmodule ReactiveDag.RetainIfVanishedTest do
     :ok
   end
 
+  @doc false
+  # a host's marking policy: keep the row, record that the upstream dropped it
+  def tombstone(keys) do
+    for key <- keys,
+        row = Enum.find(Ash.read!(__MODULE__.Marked), &(&1.key == key)) do
+      row |> Ash.Changeset.for_update(:update, %{status: "tombstoned"}) |> Ash.update!()
+    end
+  end
+
   defp cell(mod) do
     [c] = ReactiveDag.Node.cells(mod)
     c
@@ -192,8 +201,122 @@ defmodule ReactiveDag.RetainIfVanishedTest do
     end
   end
 
-  test "the flag reaches the cell's meta" do
-    assert cell(Docs).meta[:retain_if_vanished] == true
+  test "the declaration normalises to a policy in the cell's meta" do
+    assert cell(Docs).meta[:retain_if_vanished] == :keep
     refute cell(Plain).meta[:retain_if_vanished]
+  end
+
+  describe "mark: — keep the row AND say the upstream dropped it" do
+    defmodule Marked do
+      use Ash.Resource,
+        domain: ReactiveDag.RetainIfVanishedTest.Domain,
+        data_layer: Ash.DataLayer.Ets,
+        extensions: [ReactiveDag.Node]
+
+      ets do
+      end
+
+      attributes do
+        attribute :key, :string, primary_key?: true, allow_nil?: false, public?: true
+        attribute :body, :string, public?: true
+        attribute :content_md5, :string, public?: true
+        attribute :status, :string, public?: true
+        attribute :fingerprint, :string, public?: true
+      end
+
+      actions do
+        defaults [:read, :destroy, update: [:status]]
+
+        create :upsert do
+          upsert?(true)
+          accept([:key, :body, :content_md5, :status, :fingerprint])
+        end
+      end
+
+      reactive do
+        id(:marked)
+        leaf?(true)
+        fingerprint([:content_md5])
+        retain_if_vanished(mark: &ReactiveDag.RetainIfVanishedTest.tombstone/1)
+      end
+    end
+
+    setup do
+      for row <- Ash.read!(Marked), do: Ash.destroy!(row)
+      :ok
+    end
+
+    defp marked_cell do
+      [c] = ReactiveDag.Node.cells(Marked)
+      c
+    end
+
+    defp scan_marked(keys) do
+      {:ok, changed} = Rows.reconcile(marked_cell(), keys, upsert: &Map.get(@docs, &1))
+      Enum.sort(changed)
+    end
+
+    test "the row survives, and the mark fun records the drop" do
+      scan_marked(["a", "b"])
+      scan_marked(["a"])
+
+      b = Marked |> Ash.read!() |> Enum.find(&(&1.key == "b"))
+      assert b.status == "tombstoned"
+      assert b.content_md5 == "bbb", "the artifact is still ours"
+    end
+
+    test "the key DOES propagate — something was written, so downstream hears" do
+      scan_marked(["a", "b"])
+
+      assert scan_marked(["a"]) == ["b"]
+    end
+
+    test "which is the whole difference from `true`" do
+      # same operation, one question: did we write something to say it is gone?
+      scan(Docs, ["a", "b"])
+      scan_marked(["a", "b"])
+
+      assert scan(Docs, ["a"]) == [], "keep: nothing written, nothing reported"
+      assert scan_marked(["a"]) == ["b"], "mark: written, so reported"
+    end
+
+    test "it normalises to {:mark, fun} in meta" do
+      assert {:mark, fun} = marked_cell().meta[:retain_if_vanished]
+      assert is_function(fun, 1)
+    end
+  end
+
+  test "a malformed declaration raises, naming the two forms" do
+    err =
+      assert_raise ArgumentError, fn ->
+        defmodule BadRetain do
+          use Ash.Resource,
+            domain: ReactiveDag.RetainIfVanishedTest.Domain,
+            data_layer: Ash.DataLayer.Ets,
+            extensions: [ReactiveDag.Node]
+
+          ets do
+          end
+
+          attributes do
+            attribute :key, :string, primary_key?: true, allow_nil?: false, public?: true
+          end
+
+          actions do
+            defaults [:read, :destroy]
+            create :upsert, upsert?: true, accept: [:key]
+          end
+
+          reactive do
+            id(:bad_retain)
+            leaf?(true)
+            retain_if_vanished(status: :status)
+          end
+        end
+
+        ReactiveDag.Node.cells(BadRetain)
+      end
+
+    assert Exception.message(err) =~ "`true` or `mark: fun/1`"
   end
 end

@@ -122,19 +122,37 @@ defmodule ReactiveDag.Node.Rows do
     * `(key -> boolean)` — full control. Write the row yourself and say whether
       it moved. Use this when the write is not an upsert into the node's own
       resource.
-    * `:retire` — how vanished keys leave. Defaults to destroying the row via
-      the node's `payload_destroy` action, or to doing NOTHING when the node
-      declares `retain_if_vanished true`. A host wanting something else — a
-      tombstone column, an audit row — passes a `(keys -> any)` fun.
+    * `:retire` — how vanished keys leave. See the table below.
     * `:current` — the baseline `vanished` is computed against. Defaults to the
-      cell's current keys. A host whose *live* set is narrower than all its rows
-      passes it explicitly — a retain-if-vanish leaf passes its non-tombstoned
-      keys, so already-retired keys are neither re-retired nor reported as newly
-      vanished.
+      cell's current keys. Pass it when your live set is narrower than all your
+      rows, or when the scan asked a NARROWER QUESTION than "everything" — a
+      date-scoped scan with a whole-table baseline retires everything outside
+      its window.
 
-  Vanished keys propagate: something disappearing is a change. The exception is
-  a node declaring `retain_if_vanished true`, where nothing disappeared — the row
-  is still there, so the key is not reported and re-polling stays quiet.
+  ## When a key stops being returned
+
+  One decision, three answers:
+
+  | you want | you write | the row | propagates? |
+  |---|---|---|---|
+  | **destroy** it | nothing — the default | destroyed | yes |
+  | **keep** it | `retain_if_vanished true` on the node | untouched | no |
+  | **mark** it | `retain_if_vanished mark: &tombstone/1` | yours to write | yes |
+
+  Keep and mark are the same operation with one question between them — *do we
+  write something to say it is gone?* — and propagation follows from the answer
+  rather than being a separate switch:
+
+    * **destroying** removes a unit downstream was counting, so it is a change;
+    * **keeping** changes nothing — the row is still there, unmodified — so
+      reporting it would be a lie, and would report it again on every poll
+      forever, since nothing marks it as handled;
+    * **marking** is a change you made, so downstream hears about it. It also
+      means you own `:current`, and inherit one case a fingerprint cannot see:
+      a marked-retired row returning with unmoved bytes. `changed?` compares
+      fingerprints, so the revival is invisible — the library warns when it
+      sees that shape but cannot fix it (u2i/reactive_dag#82). Report it
+      yourself with the boolean `:upsert` form.
 
   A leaf declaring `fingerprint` needs no `:upsert` at all for the row-returning
   form to be worth using — that is the point: `poll/1` becomes fetch, build
@@ -153,27 +171,64 @@ defmodule ReactiveDag.Node.Rows do
     upsert = Keyword.fetch!(opts, :upsert)
     want_set = MapSet.new(want_keys)
 
-    changed_up =
-      want_set
-      |> MapSet.to_list()
-      |> Enum.sort()
-      |> Enum.filter(&(observe(&1, upsert, meta) == true))
+    want = want_set |> MapSet.to_list() |> Enum.sort()
+
+    # `{key, {changed?, who_decided}}` — the second element matters for revival:
+    # only a LIBRARY verdict comes from a fingerprint comparison, which is the
+    # one that cannot see a row coming back.
+    observed = Enum.map(want, fn key -> {key, observe(key, upsert, meta)} end)
+    changed_up = for {key, {true, _}} <- observed, do: key
 
     current = Keyword.get_lazy(opts, :current, fn -> Enum.map(all(cell), & &1.key) end)
     vanished = Enum.reject(current, &MapSet.member?(want_set, &1))
 
     retire(vanished, Keyword.get(opts, :retire), meta)
 
-    {:ok, changed_up ++ propagated(vanished, meta, opts)}
+    {:ok,
+     changed_up ++ revived(observed, current, meta, opts) ++ propagated(vanished, meta, opts)}
+  end
+
+  # COMING BACK is a change, even when the bytes did not move.
+  #
+  # Under a marking policy the row survives retirement, so a key that returns
+  # carries the fingerprint it left with — its content did not move, its liveness
+  # did. A fingerprint comparison therefore reports "unchanged", and without this
+  # the revival would never propagate: no dirty key, no drain step, nothing in
+  # the trace. Silent staleness.
+  #
+  # Everything needed is already in hand — the baseline was computed above, and
+  # `observed` records which verdicts came from the library rather than the host
+  # — so this is a filter, not a query.
+  #
+  # Only a MARKING policy can produce it. A destroying one leaves no row to come
+  # back; `retain_if_vanished true` leaves the key in its own baseline, so a
+  # returning key never looks absent. And a host that decided `changed?` itself
+  # (the boolean form) has already said what it thinks.
+  defp revived(observed, current, meta, opts) do
+    if marking?(meta, opts) do
+      live = MapSet.new(current)
+
+      for {key, {false, :library}} <- observed, not MapSet.member?(live, key), do: key
+    else
+      []
+    end
+  end
+
+  # Does retirement WRITE something? Only a marking policy can produce a silent
+  # revival: a destroying one leaves no row to come back, and `:keep` leaves the
+  # key in the baseline so it never looks absent. Declared on the node, or passed
+  # per-call — both spellings, or the warning misses the case it exists for.
+  defp marking?(meta, opts) do
+    match?({:mark, _}, meta[:retain_if_vanished]) or is_function(opts[:retire], 1)
   end
 
   # the host either wrote the row itself and told us whether it moved, or handed
   # us what it observed and let the library decide.
   defp observe(key, upsert, meta) do
     case upsert.(key) do
-      changed? when is_boolean(changed?) -> changed?
-      nil -> false
-      row when is_map(row) -> write(key, row, meta) == :changed
+      changed? when is_boolean(changed?) -> {changed?, :host}
+      nil -> {false, :host}
+      row when is_map(row) -> {write(key, row, meta) == :changed, :library}
     end
   end
 
@@ -205,15 +260,12 @@ defmodule ReactiveDag.Node.Rows do
     end
   end
 
-  # A RETAINED key is not a change: the row is still there, unmodified, so from a
-  # consumer's side nothing happened. It also keeps re-polling quiet — reporting
-  # it would report it again on every subsequent poll, forever, since nothing
-  # marks it as already handled.
-  #
-  # An explicit `:retire` fun means the host did something, so the keys
-  # propagate as they always have.
+  # Propagation FOLLOWS from whether anything was written. Nothing written means
+  # nothing changed — the row is still there, unmodified — so reporting it would
+  # be a lie, and would report it again on every poll forever since nothing marks
+  # it handled. Anything written is a change the host made, so downstream hears.
   defp propagated(vanished, meta, opts) do
-    if meta[:retain_if_vanished] == true and is_nil(opts[:retire]) do
+    if meta[:retain_if_vanished] == :keep and is_nil(opts[:retire]) do
       []
     else
       vanished
@@ -221,10 +273,16 @@ defmodule ReactiveDag.Node.Rows do
   end
 
   defp retire([], _how, _meta), do: :ok
+
+  # a per-call `:retire` still wins: the node declares the policy, a caller may
+  # override it for one poll.
   defp retire(keys, fun, _meta) when is_function(fun, 1), do: fun.(keys)
 
-  # the node keeps what its upstream dropped — nothing to do.
-  defp retire(_keys, nil, %{retain_if_vanished: true}), do: :ok
+  # KEEP — the row stands as it is. Nothing to write, nothing to report.
+  defp retire(_keys, nil, %{retain_if_vanished: :keep}), do: :ok
+
+  # MARK — keep the row, and record that the upstream dropped it.
+  defp retire(keys, nil, %{retain_if_vanished: {:mark, fun}}), do: fun.(keys)
 
   defp retire(keys, _nil, meta) do
     ReactiveDag.Node.Payload.retire(
