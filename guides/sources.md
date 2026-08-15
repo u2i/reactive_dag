@@ -232,33 +232,31 @@ For anything beyond keeping the row — a tombstone column, an audit trail —
 `:retire` still takes a `(keys -> any)` fun, and those keys **do** propagate,
 because the host did something.
 
-### Marking: if your `:retire` writes state rather than destroying
+### Marking: when the row records that it is gone
 
-`changed?` for the row form is a fingerprint comparison, and there is one case a
-fingerprint cannot see: a row you marked retired comes back carrying the bytes it
-left with. Its *liveness* moved; its content did not. The library reports nothing
-and the revival never propagates — silently, with no dirty key and no drain step.
+`retain_if_vanished mark: &tombstone/1` keeps the row and hands you the vanished
+keys to write whatever your policy is — a status, a timestamp, an audit row. The
+library never learns what it means, which is why the column names stay yours.
 
-The library warns when it sees that shape — a key the scan returned, absent from
-your `:current`, reporting unchanged — but it cannot fix it: it does not know
-what your `mark:` wrote. Report the revival yourself with the boolean form,
-which is what the warning tells you to do:
+Because something was written, the keys propagate.
 
-```elixir
-upsert: fn key ->
-  revived? = Map.get(prior_status, key) == "tombstoned"
-  write_row(key)
-  revived? or fingerprint_moved?(key)
-end
+**Revival is handled for you.** A marked-retired row that comes back carries the
+fingerprint it left with — its content did not move, its liveness did — so a
+fingerprint comparison alone would report "unchanged" and the return would never
+reach downstream. The library reports it instead: the key was in the scan, and
+absent from the baseline you supplied, which is exactly what coming back looks
+like.
+
+```
+poll 1: [a, b]   → changed: ["a", "b"]
+poll 2: [a]      → changed: ["b"]        ← marked; you wrote the tombstone
+poll 3: [a]      → changed: []           ← already marked, and out of your baseline
+poll 4: [a, b]   → changed: ["b"]        ← REVIVED, though b's bytes never moved
 ```
 
-You reach this only with `mark:`. `retain_if_vanished true` keeps the key in its
-own baseline, so a returning key never looks absent and there is nothing to
-miss; and a destroying policy leaves no row to come back.
-
-If you only want the row kept, prefer `retain_if_vanished true` — a retained key
-stays in the baseline, so nothing ever looks like a revival and none of this
-applies. This is for a policy that genuinely marks state.
+This needs your `:current` to be the **live** set — the keys your marking left
+alone. That is the baseline the library subtracts from, so it is also how it
+recognises a return.
 
 ## The honest-gap discipline
 
