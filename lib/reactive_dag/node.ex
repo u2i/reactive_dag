@@ -137,7 +137,7 @@ defmodule ReactiveDag.Node do
     args: [:to],
     describe: "A by-name input edge to another node (a RECOMPUTE edge — changes propagate).",
     schema: [
-      to: [type: :atom, required: true, doc: "the referenced node's id"],
+      to: [type: :atom, required: true, doc: "the referenced node's id"]
     ]
   }
 
@@ -412,7 +412,11 @@ defmodule ReactiveDag.Node do
         doc:
           "the group → MANY-rows shape: `(group_term, [item] -> [row])`, each returned " <>
             "row carrying its own `:key` (one group fans out to many keys, so keys cannot " <>
-            "derive). Mutually exclusive with `into`/`status`."
+            "derive). Mutually exclusive with `into`/`status`. Return `{:skip, key}` in " <>
+            "place of a row to DECLINE a claimed key — \"this one is not mine\", as " <>
+            "distinct from \"this one is gone\": returning nothing for it retires it, " <>
+            "which reports a change and repeats on every pass. A node projecting one kind " <>
+            "out of a shared input needs this."
       ],
       upsert: [
         type: {:fun, 2},
@@ -1166,8 +1170,9 @@ defmodule ReactiveDag.Node do
       # and the drain overwrite each other — the drain reprices from inputs and
       # discards whatever the poll wrote. That is never intended, so it fails
       # here rather than as data that mysteriously reverts.
-      if computation = cell.meta[:reduce] || cell.meta[:join] || cell.meta[:per_key] ||
-                         cell.meta[:aggregate] || cell.meta[:run] || cell.meta[:compute] do
+      if computation =
+           cell.meta[:reduce] || cell.meta[:join] || cell.meta[:per_key] ||
+             cell.meta[:aggregate] || cell.meta[:run] || cell.meta[:compute] do
         raise ArgumentError,
               "reactive_dag: cell #{inspect(id)} declares `scan #{inspect(mod)}` AND a " <>
                 "computation (#{inspect(kind_of(computation, cell))}). A scanner writes " <>
@@ -1221,8 +1226,9 @@ defmodule ReactiveDag.Node do
                 "reactive_dag: #{cell.id} unions over #{inspect(input)}, " <>
                   if(is_nil(source),
                     do: "which is not a cell in this graph.",
-                    else: "which has no rows to read — a union reads its inputs' rows, " <>
-                            "and #{inspect(resource)} declares no attributes."
+                    else:
+                      "which has no rows to read — a union reads its inputs' rows, " <>
+                        "and #{inspect(resource)} declares no attributes."
                   ) <>
                   " Point `from:` at nodes with payload attributes."
         end
@@ -1363,8 +1369,12 @@ defmodule ReactiveDag.Node do
 
     Enum.reduce(names, [], fn name, loads ->
       cond do
-        Ash.Resource.Info.attribute(resource, name) -> loads
-        Ash.Resource.Info.calculation(resource, name) -> [name | loads]
+        Ash.Resource.Info.attribute(resource, name) ->
+          loads
+
+        Ash.Resource.Info.calculation(resource, name) ->
+          [name | loads]
+
         true ->
           raise ArgumentError,
                 "reactive_dag: #{cell.id} names #{inspect(name)}, which " <>
@@ -1488,9 +1498,8 @@ defmodule ReactiveDag.Node do
     all_refs = legs ++ flat_refs ++ combinator_refs
 
     {:op, root_id, Ext.get_opt(resource, [:reactive], :op, nil), compute_module(resource),
-     effective_key_rule(resource),
-     Ext.get_opt(resource, [:reactive], :leaf?, false), resource, all_refs,
-     extra_meta(resource, all_refs)}
+     effective_key_rule(resource), Ext.get_opt(resource, [:reactive], :leaf?, false), resource,
+     all_refs, extra_meta(resource, all_refs)}
   end
 
   # the combinator's `key_rule:` (declared WITH the computation it must agree
@@ -1561,7 +1570,8 @@ defmodule ReactiveDag.Node do
             "`to:` (the input node id), or the combinator an `over:`."
   end
 
-  defp edge!(%RecomputeBy{to: to}, %{over: over}, resource) when not is_nil(to) and not is_nil(over) do
+  defp edge!(%RecomputeBy{to: to}, %{over: over}, resource)
+       when not is_nil(to) and not is_nil(over) do
     raise ArgumentError,
           "reactive_dag: #{inspect(resource)} names the input TWICE — " <>
             "`recompute_by to: #{inspect(to)}` and `over: #{inspect(over)}`. Declare it once."
@@ -1719,7 +1729,8 @@ defmodule ReactiveDag.Node do
         source: Ext.get_opt(resource, [:reactive], :source, nil),
         driver: Ext.get_opt(resource, [:reactive], :driver, nil),
         over: Ext.get_opt(resource, [:reactive], :over, nil),
-        payload_key: Ext.get_opt(resource, [:reactive], :payload_key, nil) || derived_payload_key(resource),
+        payload_key:
+          Ext.get_opt(resource, [:reactive], :payload_key, nil) || derived_payload_key(resource),
         payload_action: Ext.get_opt(resource, [:reactive], :payload_action, nil),
         fingerprint: Ext.get_opt(resource, [:reactive], :fingerprint, nil),
         fingerprint_attribute: Ext.get_opt(resource, [:reactive], :fingerprint_attribute, nil),
