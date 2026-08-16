@@ -158,8 +158,7 @@ defmodule ReactiveDag.Node do
     name: :context,
     target: Context,
     args: [:to],
-    describe:
-      "A by-name CONTEXT edge: read the target as settled context; its changes do NOT recompute this node.",
+    describe: "A by-name CONTEXT edge: read the target as settled context; its changes do NOT recompute this node.",
     schema: [
       to: [type: :atom, required: true, doc: "the target node's id (read-only context)"]
     ]
@@ -508,8 +507,7 @@ defmodule ReactiveDag.Node do
       key_prefix: [
         type: :string,
         required: false,
-        doc:
-          "prepend `\"<prefix>|\"` to the DEFAULT key. Not combinable with an explicit `key:` fn."
+        doc: "prepend `\"<prefix>|\"` to the DEFAULT key. Not combinable with an explicit `key:` fn."
       ],
       into: [
         type: {:or, [{:fun, 3}, :keyword_list]},
@@ -525,8 +523,7 @@ defmodule ReactiveDag.Node do
       outer: [
         type: :boolean,
         default: false,
-        doc:
-          "FULL OUTER: right-only keys also emit, via `into.(jk, nil, right_item)`. Default false (left join)."
+        doc: "FULL OUTER: right-only keys also emit, via `into.(jk, nil, right_item)`. Default false (left join)."
       ],
       upsert: [
         type: {:fun, 2},
@@ -976,8 +973,7 @@ defmodule ReactiveDag.Node do
         over: [
           type: :atom,
           required: true,
-          doc:
-            "a `has_many`/`has_one` relationship on THIS resource — the rows to aggregate per group."
+          doc: "a `has_many`/`has_one` relationship on THIS resource — the rows to aggregate per group."
         ]
       ] ++
         Enum.map(@agg_kinds, fn kind ->
@@ -1223,6 +1219,42 @@ defmodule ReactiveDag.Node do
 
       ReactiveDag.Source.verify_poll!(mod, id)
     end
+
+    verify_one_node_per_source!(plan)
+
+    plan
+  end
+
+  # A source is a NODE, so one scanner belongs to one cell.
+  #
+  # Before rc.21 the same module on several leaves was the fan-out shape — the
+  # scanner declared `leaf_cells/1` and wrote them all. Now everything reading a
+  # source is an ordinary edge, so two nodes naming one module means the upstream
+  # is polled twice: `crontab/2` emits an entry per node, and a poll writing rows
+  # for both cells does it once per entry.
+  #
+  # Nothing downstream can notice that — `cells_of/2` returns both, the plan
+  # assembles, and the duplication only shows up as an upstream complaining about
+  # request volume. So it fails here.
+  defp verify_one_node_per_source!(%ReactiveDag.Plan{} = plan) do
+    plan.cells
+    |> Enum.filter(fn {_id, cell} -> cell.meta[:scan] end)
+    |> Enum.group_by(fn {_id, cell} -> cell.meta[:scan] end, &elem(&1, 0))
+    |> Enum.each(fn
+      {_mod, [_one]} ->
+        :ok
+
+      {mod, ids} ->
+        raise ArgumentError,
+              "reactive_dag: #{inspect(mod)} is declared by #{length(ids)} nodes " <>
+                "(#{ids |> Enum.sort() |> Enum.join(", ")}). A source is a node, so one " <>
+                "scanner feeds one cell — and each of these gets its own crontab entry, " <>
+                "so the upstream is polled #{length(ids)} times.\n\n" <>
+                "If one crawl produces rows for several cells, keep the `poll` on ONE node " <>
+                "and let the others read it:\n\n" <>
+                "    reduce over: :#{ids |> Enum.sort() |> hd()}, group_by: :key, expand: &project/2\n\n" <>
+                "A consumer declines what is not its own with `{:skip, key}`."
+    end)
 
     plan
   end
@@ -1536,9 +1568,8 @@ defmodule ReactiveDag.Node do
 
     all_refs = legs ++ flat_refs ++ combinator_refs
 
-    {:op, root_id, Ext.get_opt(resource, [:reactive], :op, nil), compute_module(resource),
-     effective_key_rule(resource), Ext.get_opt(resource, [:reactive], :leaf?, false), resource,
-     all_refs, extra_meta(resource, all_refs)}
+    {:op, root_id, Ext.get_opt(resource, [:reactive], :op, nil), compute_module(resource), effective_key_rule(resource),
+     Ext.get_opt(resource, [:reactive], :leaf?, false), resource, all_refs, extra_meta(resource, all_refs)}
   end
 
   # the combinator's `key_rule:` (declared WITH the computation it must agree
@@ -1700,11 +1731,26 @@ defmodule ReactiveDag.Node do
   # on nothing and silently selects every row.
   defp slices(resource) do
     for %Slice{} = sl <- Ext.get_entities(resource, [:reactive]) do
-      if is_nil(Ash.Resource.Info.attribute(resource, sl.column)) do
-        raise ArgumentError,
-              "reactive_dag: `slice #{inspect(sl.column)}` on #{inspect(resource)}, which " <>
-                "has no such attribute. A slice filters this node's own rows by that " <>
-                "column, so it must be one of them."
+      cond do
+        Ash.Resource.Info.attributes(resource) == [] ->
+          # A slice SELECTS rows, and this node has none of its own —
+          # `Rows.keys_where/2` queries the node's resource, so every button
+          # would select nothing. Worth naming precisely: "no such attribute" is
+          # true but misleading when the answer is "no attributes at all".
+          raise ArgumentError,
+                "reactive_dag: `slice #{inspect(sl.column)}` on #{inspect(resource)}, which " <>
+                  "keeps no rows of its own (no attributes — a write-elsewhere or " <>
+                  "escape-hatch node). A slice filters this node's OWN rows, so there is " <>
+                  "nothing here to select. Declare it on the node that holds the rows."
+
+        is_nil(Ash.Resource.Info.attribute(resource, sl.column)) ->
+          raise ArgumentError,
+                "reactive_dag: `slice #{inspect(sl.column)}` on #{inspect(resource)}, which " <>
+                  "has no such attribute. A slice filters this node's own rows by that " <>
+                  "column, so it must be one of them."
+
+        true ->
+          :ok
       end
 
       %{column: sl.column, values: sl.values, label: sl.label || to_string(sl.column)}
@@ -1767,8 +1813,7 @@ defmodule ReactiveDag.Node do
       %{
         source: Ext.get_opt(resource, [:reactive], :source, nil),
         over: Ext.get_opt(resource, [:reactive], :over, nil),
-        payload_key:
-          Ext.get_opt(resource, [:reactive], :payload_key, nil) || derived_payload_key(resource),
+        payload_key: Ext.get_opt(resource, [:reactive], :payload_key, nil) || derived_payload_key(resource),
         payload_action: Ext.get_opt(resource, [:reactive], :payload_action, nil),
         fingerprint: Ext.get_opt(resource, [:reactive], :fingerprint, nil),
         fingerprint_attribute: Ext.get_opt(resource, [:reactive], :fingerprint_attribute, nil),

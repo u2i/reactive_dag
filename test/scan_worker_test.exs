@@ -99,8 +99,17 @@ defmodule ReactiveDag.ScanWorkerTest do
 
     reactive do
       id(:notices)
-      leaf?(true)
-      poll(ReactiveDag.ScanWorkerTest.Crawler)
+
+      # a CONSUMER of the crawl, not a second declaration of it. One scanner is
+      # one node now; two nodes naming the same module means the upstream is
+      # polled twice, and `verify_one_node_per_source!/1` rejects it.
+      reduce(
+        over: :docs,
+        group_by: :key,
+        expand: fn key, rows ->
+          for r <- rows, r.category == "notice", do: %{key: key, category: r.category}
+        end
+      )
     end
   end
 

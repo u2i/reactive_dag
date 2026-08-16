@@ -204,6 +204,38 @@ defmodule ReactiveDag.SliceTest do
     end
   end
 
+  test "a slice on a node with NO rows of its own raises, naming that" do
+    # `keys_where/2` queries the node's own resource, so on a write-elsewhere
+    # or escape-hatch node every button would select nothing.
+    #
+    # NOTE this pins the MESSAGE, not new behaviour: the column check already
+    # raised here, just saying "no such attribute", which is true and
+    # misleading when the answer is "no attributes at all". Disabling the
+    # tableless branch still raises, so this test cannot fail on the
+    # distinction — it guards the wording only.
+    err =
+      assert_raise ArgumentError, fn ->
+        defmodule Tableless do
+          use Ash.Resource,
+            domain: ReactiveDag.SliceTest.Domain,
+            data_layer: Ash.DataLayer.Simple,
+            extensions: [ReactiveDag.Node]
+
+          reactive do
+            id(:tableless)
+            leaf?(true)
+            slice(:fiscal_year)
+          end
+        end
+
+        ReactiveDag.Node.cells(Tableless)
+      end
+
+    msg = Exception.message(err)
+    assert msg =~ "keeps no rows of its own"
+    assert msg =~ "Declare it on the node that holds the rows"
+  end
+
   test "selection and reprocessing compose: pick a slice, mark those keys" do
     # the whole point — a UI picks FY25, and exactly those units are queued
     keys = Rows.keys_where(cell(Lines), fiscal_year: "FY25")
