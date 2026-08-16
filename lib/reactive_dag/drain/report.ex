@@ -38,6 +38,8 @@ defmodule ReactiveDag.Drain.Report do
           changed: [String.t()],
           triggered_by: String.t() | nil,
           duration_us: non_neg_integer(),
+          op: atom() | nil,
+          depth: non_neg_integer() | nil,
           meta: map()
         }
 

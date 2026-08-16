@@ -39,11 +39,21 @@ if Code.ensure_loaded?(Oban.Worker) do
 
     The plan, because a job argument cannot carry one — see `:plan_mfa` below.
 
-    Domain observability. A host that audits its crawls, records a run id, or
-    enqueues follow-up work wraps this rather than extending it: call
-    `ReactiveDag.Source.refresh/3` and `ReactiveDag.Drain.run/2` directly inside
-    your own worker, which is all this module does. It exists to save you writing
-    it, not to stop you.
+    Domain observability — auditing crawls, recording run ids, enqueuing
+    follow-up work. Not because those belong outside a library, but because this
+    module is a convenience over two public calls and has no opinion about them.
+
+    Most of that needs one thing: *the loop finished, here is what happened*.
+    `[:reactive_dag, :scan, :stop]` carries the cell, the changed count, the
+    unreachable list and the whole `%Report{}`, so a broadcast, a durable scan
+    record, or a follow-up enqueue is a telemetry handler rather than a fork of
+    this worker. Anything inside the poll itself — wrapping each HTTP request,
+    mirroring listing pages — belongs in your `poll/1`, which the library never
+    looks inside.
+
+    Where that is not enough, call `ReactiveDag.Source.refresh/3` and
+    `ReactiveDag.Drain.run/2` directly: that is all this module does. It exists
+    to save you writing the loop, not to stop you writing a different one.
 
     ## Telemetry
 

@@ -219,6 +219,13 @@ defmodule ReactiveDag.Drain do
                 changed: changed,
                 triggered_by: Map.get(cause, cell_id),
                 duration_us: us,
+                # `op` and `depth` are both in hand here and neither is
+                # recoverable from a step alone — a consumer would need the plan
+                # to look them up, and a durable processing log is usually read
+                # long after the plan that produced it has moved on
+                # (u2i/reactive_dag#114).
+                op: cell.op,
+                depth: Map.get(plan.depths, cell_id),
                 meta: meta
               }
 
