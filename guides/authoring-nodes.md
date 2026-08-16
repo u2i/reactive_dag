@@ -486,6 +486,29 @@ a processing version is not temporal at all. Time is one instance of slicing —
 a node declaring `slice :published_on` gets a date control — rather than its
 shape.
 
+#### Reprocessing a slice
+
+Selecting is a read; doing it is a job:
+
+```elixir
+%{"cell" => "budget_rollups", "where" => %{"fiscal_year" => "FY25"}}
+|> ReactiveDag.ReprocessWorker.new()
+|> Oban.insert()
+```
+
+That marks exactly those keys, drains, and reports `claimed` against `changed`
+in `[:reactive_dag, :reprocess, :stop]`. Pass `"keys"` instead when a UI has
+already chosen them. Omit both and it claims the whole cell — which propagates
+`:all`, so everything beneath it re-derives too. That is usually what "the code
+changed" means, and occasionally much more work than intended.
+
+**A `per_key` node's fingerprint still applies.** It skips rows whose declared
+inputs have not moved, and after a prompt change they have not — so a reprocess
+of such a node can claim 400 keys and change none. The claimed-vs-changed numbers
+are what make that visible rather than mistaken for success: a fingerprint
+answers *"did the input move?"*, which is the wrong question here and the right
+one everywhere else.
+
 ## Input edges
 
 ```elixir

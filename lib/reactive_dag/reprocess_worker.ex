@@ -1,0 +1,119 @@
+if Code.ensure_loaded?(Oban.Worker) do
+  defmodule ReactiveDag.ReprocessWorker do
+    @moduledoc """
+    Re-derive a cell's rows without any input having changed — *the code moved,
+    not the data*.
+
+    The frontier says "an input moved, redo this". That is the wrong sentence for
+    a changed prompt, a fixed fold, or a suspect result: the inputs are identical
+    and the function is not. Mechanically the mark is the same, but the reason
+    matters, and a job is the honest place to put it.
+
+    ## Selecting what to redo
+
+    Whole cell, and everything below it:
+
+        %{"cell" => "budget_rollups"} |> ReactiveDag.ReprocessWorker.new() |> Oban.insert()
+
+    A slice — the common case, and what `slice` exists for:
+
+        %{"cell" => "budget_rollups", "where" => %{"fiscal_year" => "FY25"}}
+        |> ReactiveDag.ReprocessWorker.new()
+        |> Oban.insert()
+
+    Or exact keys, when a UI has already chosen them:
+
+        %{"cell" => "budget_rollups", "keys" => ["gf|FY25", "water|FY25"]}
+
+    ## Whole-cell means everything downstream
+
+    A `"*"` claim propagates `:all`, so reprocessing a cell re-derives every cell
+    beneath it. That is usually what "the code changed" means and occasionally
+    much more work than intended — a slice or an explicit key list keeps it
+    proportional, which is the whole point of the engine.
+
+    ## The fingerprint still applies
+
+    A `per_key` node skips rows whose declared inputs have not moved, and after a
+    prompt change they have not. So reprocessing such a node marks its keys and
+    the recompute skips them — the job reports how many were claimed against how
+    many actually moved, so a no-op is visible rather than mistaken for success.
+    Making the recompute ignore its fingerprint is a separate, deliberate change.
+
+    ## Telemetry
+
+    `[:reactive_dag, :reprocess, :stop]` with `claimed` and `changed`, so a
+    dashboard can say *"queued 412, 88 actually moved"*.
+    """
+    use Oban.Worker, queue: :scans, max_attempts: 1
+
+    require Logger
+
+    alias ReactiveDag.{Drain, Frontier, Graph, Job}
+    alias ReactiveDag.Node.Rows
+
+    @impl Oban.Worker
+    def perform(%Oban.Job{args: args}) do
+      cell_id = Map.fetch!(args, "cell")
+      plan = Job.plan(args, __MODULE__)
+      reason = Map.get(args, "reason", "reprocess")
+
+      case plan.cells[cell_id] do
+        nil ->
+          # Not a failure to retry: the graph will not grow this cell on the next
+          # attempt either.
+          Logger.warning("reactive_dag: cannot reprocess #{cell_id} — no such cell in this plan")
+          :ok
+
+        cell ->
+          keys = select(cell, args)
+          mark(plan, cell_id, keys, reason)
+
+          t0 = System.monotonic_time(:microsecond)
+          {:ok, report} = Drain.run(plan, Job.drain_opts(args))
+
+          :telemetry.execute(
+            [:reactive_dag, :reprocess, :stop],
+            %{
+              duration_us: System.monotonic_time(:microsecond) - t0,
+              claimed: claimed_count(keys),
+              changed: ReactiveDag.Drain.Report.changed_total(report),
+              passes: report.passes
+            },
+            %{cell: cell_id, reason: reason, report: report}
+          )
+
+          :ok
+      end
+    end
+
+    # Explicit keys win; a `where` filter selects them from the node's own rows;
+    # neither means the whole cell.
+    defp select(_cell, %{"keys" => keys}) when is_list(keys) and keys != [], do: keys
+
+    defp select(cell, %{"where" => %{} = where}) when map_size(where) > 0 do
+      Rows.keys_where(cell, Enum.map(where, fn {k, v} -> {String.to_existing_atom(k), v} end))
+    end
+
+    defp select(_cell, _args), do: ["*"]
+
+    # A whole-cell claim propagates `:all` to parents; specific keys go through
+    # the key rule, exactly as a scan's would. Marking the leaf without its
+    # parents would strand the change one level up.
+    defp mark(_plan, _cell_id, [], _reason), do: :ok
+
+    defp mark(plan, cell_id, keys, reason) do
+      Frontier.mark_dirty(cell_id, keys, reason)
+
+      for {parent, parent_keys} <-
+            Graph.dirty_parents(plan, cell_id, keys, ReactiveDag.Node.KeyRule) do
+        Frontier.mark_dirty(parent, parent_keys, reason)
+      end
+
+      :ok
+    end
+
+    defp claimed_count(["*"]), do: nil
+    defp claimed_count(keys), do: length(keys)
+  end
+end
