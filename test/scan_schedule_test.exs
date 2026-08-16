@@ -61,18 +61,21 @@ defmodule ReactiveDag.ScanScheduleTest do
   end
 
   defmodule Agendas do
-    use Ash.Resource, domain: Domain, data_layer: Ash.DataLayer.Ets, extensions: [ReactiveDag.Node]
+    use Ash.Resource,
+      domain: Domain,
+      data_layer: Ash.DataLayer.Ets,
+      extensions: [ReactiveDag.Node]
 
     ets do
     end
 
     attributes do
-      attribute :key, :string, primary_key?: true, allow_nil?: false, public?: true
+      attribute(:key, :string, primary_key?: true, allow_nil?: false, public?: true)
     end
 
     actions do
-      defaults [:read, :destroy]
-      create :upsert, upsert?: true, accept: [:key]
+      defaults([:read, :destroy])
+      create(:upsert, upsert?: true, accept: [:key])
     end
 
     reactive do
@@ -83,18 +86,21 @@ defmodule ReactiveDag.ScanScheduleTest do
   end
 
   defmodule Transcripts do
-    use Ash.Resource, domain: Domain, data_layer: Ash.DataLayer.Ets, extensions: [ReactiveDag.Node]
+    use Ash.Resource,
+      domain: Domain,
+      data_layer: Ash.DataLayer.Ets,
+      extensions: [ReactiveDag.Node]
 
     ets do
     end
 
     attributes do
-      attribute :key, :string, primary_key?: true, allow_nil?: false, public?: true
+      attribute(:key, :string, primary_key?: true, allow_nil?: false, public?: true)
     end
 
     actions do
-      defaults [:read, :destroy]
-      create :upsert, upsert?: true, accept: [:key]
+      defaults([:read, :destroy])
+      create(:upsert, upsert?: true, accept: [:key])
     end
 
     reactive do
@@ -105,24 +111,27 @@ defmodule ReactiveDag.ScanScheduleTest do
   end
 
   defmodule Derived do
-    use Ash.Resource, domain: Domain, data_layer: Ash.DataLayer.Ets, extensions: [ReactiveDag.Node]
+    use Ash.Resource,
+      domain: Domain,
+      data_layer: Ash.DataLayer.Ets,
+      extensions: [ReactiveDag.Node]
 
     ets do
     end
 
     attributes do
-      attribute :key, :string, primary_key?: true, allow_nil?: false, public?: true
-      attribute :n, :integer, public?: true
+      attribute(:key, :string, primary_key?: true, allow_nil?: false, public?: true)
+      attribute(:n, :integer, public?: true)
     end
 
     actions do
-      defaults [:read, :destroy]
-      create :upsert, upsert?: true, accept: [:key, :n]
+      defaults([:read, :destroy])
+      create(:upsert, upsert?: true, accept: [:key, :n])
     end
 
     reactive do
       id(:derived)
-      reduce over: :agendas, group_by: :key, into: [count: :n]
+      reduce(over: :agendas, group_by: :key, into: [count: :n])
     end
   end
 
@@ -188,6 +197,23 @@ defmodule ReactiveDag.ScanScheduleTest do
 
     test "a plan with no cadence at all yields no entries" do
       assert ReactiveDag.Node.graph([Transcripts]) |> Source.crontab(MyWorker) == []
+    end
+
+    test "a host can add its own standing args" do
+      # a crontab entry is built once at config time, so anything it carries is
+      # fixed for every firing — but a host routing crawls to their own queue
+      # should not have to rebuild the list to say so
+      assert Source.crontab(plan(), MyWorker, args: %{"queue" => "crawls"}) == [
+               {"0 * * * *", MyWorker, args: %{"cell" => "agendas", "queue" => "crawls"}}
+             ]
+    end
+
+    test "and cannot retarget the job by supplying its own cell" do
+      # merged UNDER the computed cell, so a stale copy-paste fails loudly at the
+      # worker rather than silently polling the wrong leaf forever
+      assert Source.crontab(plan(), MyWorker, args: %{"cell" => "wrong"}) == [
+               {"0 * * * *", MyWorker, args: %{"cell" => "agendas"}}
+             ]
     end
 
     test "it emits DATA, not jobs — nothing was scheduled or polled" do
