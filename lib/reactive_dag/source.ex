@@ -312,7 +312,12 @@ defmodule ReactiveDag.Source do
          %{
            changed: marked |> Map.values() |> List.flatten() |> Enum.uniq(),
            marked: marked,
-           unreachable: Map.get(result, :unreachable, [])
+           unreachable: Map.get(result, :unreachable, []),
+           # A scanner using `Rows.reconcile/3` gets a `%{created:, updated:,
+           # revived:, retired:}` breakdown; it reaches here only if the scanner
+           # passes it back in its poll result, since `poll/1` is the host's own
+           # function and the library never sees the reconcile.
+           detail: Map.get(result, :detail)
          }}
 
       {:error, reason} ->

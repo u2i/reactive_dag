@@ -34,7 +34,7 @@ defmodule ReactiveDag.Node.Recompute.Aggregate do
       payload = project(row, key_attr, identity_fields(cell), loads)
 
       case write(resource, cell, key_attr, cell_key, payload, action) do
-        :changed -> [cell_key]
+        v when v in [:created, :changed] -> [cell_key]
         :unchanged -> []
       end
     end)

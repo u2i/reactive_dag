@@ -71,7 +71,7 @@ defmodule ReactiveDag.PartialObservationTest do
   }
 
   defp scan(keys, opts \\ []) do
-    {:ok, changed} = Rows.reconcile(cell(), keys, [upsert: &Map.get(@rows, &1)] ++ opts)
+    {:ok, changed, _} = Rows.reconcile(cell(), keys, [upsert: &Map.get(@rows, &1)] ++ opts)
     Enum.sort(changed)
   end
 
@@ -114,7 +114,7 @@ defmodule ReactiveDag.PartialObservationTest do
 
       moved = Map.put(@rows, "a", %{key: "a", content_md5: "MOVED"})
 
-      {:ok, changed} =
+      {:ok, changed, _} =
         Rows.reconcile(cell(), ["a"], upsert: &Map.get(moved, &1), observed: :partial)
 
       assert changed == ["a"]
