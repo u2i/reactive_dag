@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.17.0-rc.14](https://github.com/u2i/reactive_dag/compare/v0.17.0-rc.13...v0.17.0-rc.14) (2026-08-16)
+
+
+### Features
+
+* a reprocess invalidates the fingerprint, so the work actually re-runs ([94399da](https://github.com/u2i/reactive_dag/commit/94399da0fc2566fe6f18850ebfd5b22352544034))
+* a reprocess invalidates the fingerprint, so the work actually re-runs ([4f98aa8](https://github.com/u2i/reactive_dag/commit/4f98aa889c3b6b26454ac0b37e5b90d5a2c73857))
+
 ## [0.17.0-rc.13](https://github.com/u2i/reactive_dag/compare/v0.17.0-rc.12...v0.17.0-rc.13) (2026-08-16)
 
 
