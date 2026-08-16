@@ -763,4 +763,62 @@ defmodule ReactiveDag.ScanWorkerTest do
       assert_received {:src, Crawler}
     end
   end
+
+  describe "the shapes a poll may report changed keys in" do
+    # A bare list was documented in `mark/5`'s own comment and unreachable in
+    # its code: `Map.get(result, :changed, [])` ran FIRST and raises
+    # `BadMapError` on a list, before the `is_list` clause guarding it could
+    # match. Every scan of such a source died on attempt 1, and through
+    # `ScanWorker` that reads as a button doing nothing (u2i/reactive_dag#138).
+    test "a bare list belongs to the cell that was polled" do
+      Crawler.returns(["d1", "d2"])
+
+      {:ok, result} = Source.refresh(plan(), "docs")
+
+      assert result.marked == %{"docs" => ["d1", "d2"]}
+    end
+
+    test "and reaches the frontier, not just the return value" do
+      Crawler.returns(["d1"])
+
+      {:ok, _} = Source.refresh(plan(), "docs", reason: "flat")
+
+      assert {"docs", "d1", "flat"} in FakeRepo.marks()
+    end
+
+    test "an empty bare list marks nothing, rather than crashing" do
+      # the reported stack trace was on `[]` — a poll that found nothing
+      Crawler.returns([])
+
+      assert {:ok, result} = Source.refresh(plan(), "docs")
+      assert result.marked == %{}
+    end
+
+    test "`%{changed: keys}` still works" do
+      Crawler.returns(%{changed: ["d1"]})
+
+      {:ok, result} = Source.refresh(plan(), "docs")
+
+      assert result.marked == %{"docs" => ["d1"]}
+    end
+
+    test "and the by-leaf map still works" do
+      Crawler.returns(%{changed: %{"docs" => ["d1"], "notices" => ["n1"]}})
+
+      {:ok, result} = Source.refresh(plan(), "docs")
+
+      assert result.marked == %{"docs" => ["d1"], "notices" => ["n1"]}
+    end
+
+    test "anything else names the three accepted shapes" do
+      Crawler.returns("nope")
+
+      err = assert_raise ArgumentError, fn -> Source.refresh(plan(), "docs") end
+      msg = Exception.message(err)
+
+      assert msg =~ "\"nope\""
+      assert msg =~ "%{changed: keys}"
+      assert msg =~ "leaf_id => keys"
+    end
+  end
 end
