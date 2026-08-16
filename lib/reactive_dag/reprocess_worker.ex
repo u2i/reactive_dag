@@ -56,7 +56,17 @@ if Code.ensure_loaded?(Oban.Worker) do
     Both carry `cell`, `reason` and the job's own `args` — a reprocess is
     usually one leg of something a host named, and only the job knows what.
     """
-    use Oban.Worker, queue: :scans, max_attempts: 1
+    # Unique on the same terms as `ScanWorker`: a reprocess of the same cell and
+    # selection, queued twice, is the same work twice. Two DIFFERENT selections
+    # of one cell are different args and both run.
+    use Oban.Worker,
+      queue: :scans,
+      max_attempts: 1,
+      unique: [
+        period: :infinity,
+        fields: [:args, :queue, :worker],
+        states: :incomplete
+      ]
 
     require Logger
 

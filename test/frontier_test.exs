@@ -99,4 +99,71 @@ defmodule ReactiveDag.FrontierTest do
       Frontier.mark_dirty("a", ["k"], "seed")
     end
   end
+
+  describe "with_lock/2 — one drain at a time, across a cluster" do
+    # The per-cell claim is atomic, so no key is processed twice. But two
+    # concurrent drains can pick the same CELL and split its keys, recomputing
+    # it twice for a disjoint slice each. `Drain` has always said "run one drain
+    # at a time per graph"; this is how a host running more than one node
+    # actually gets that.
+    defmodule LockRepo do
+      def start_link(granted), do: Agent.start_link(fn -> {granted, []} end, name: __MODULE__)
+      def calls, do: Agent.get(__MODULE__, &elem(&1, 1)) |> Enum.reverse()
+
+      def query!("SELECT pg_try_advisory_lock" <> _, [key]) do
+        granted = Agent.get_and_update(__MODULE__, fn {g, c} -> {g, {g, [{:lock, key} | c]}} end)
+        %{rows: [[granted]]}
+      end
+
+      def query!("SELECT pg_advisory_unlock" <> _, [key]) do
+        Agent.update(__MODULE__, fn {g, c} -> {g, [{:unlock, key} | c]} end)
+        %{rows: [[true]]}
+      end
+    end
+
+    setup context do
+      start_supervised!(%{id: LockRepo, start: {LockRepo, :start_link, [context[:granted]]}})
+      prev = Application.get_env(:reactive_dag, :repo)
+      Application.put_env(:reactive_dag, :repo, LockRepo)
+      on_exit(fn -> Application.put_env(:reactive_dag, :repo, prev) end)
+      :ok
+    end
+
+    @tag granted: true
+    test "runs the function and releases the lock" do
+      assert {:ok, :did_it} = Frontier.with_lock(fn -> :did_it end)
+
+      assert [{:lock, key}, {:unlock, key}] = LockRepo.calls()
+    end
+
+    @tag granted: true
+    test "releases even when the function raises" do
+      # a drain that blows up must not leave the graph locked for every other
+      # node until someone notices
+      assert_raise RuntimeError, fn -> Frontier.with_lock(fn -> raise "boom" end) end
+
+      assert [{:lock, _}, {:unlock, _}] = LockRepo.calls()
+    end
+
+    @tag granted: false
+    test "reports :busy without running the function" do
+      assert :busy = Frontier.with_lock(fn -> flunk("must not run") end)
+    end
+
+    @tag granted: false
+    test "and does not unlock a lock it never held" do
+      Frontier.with_lock(fn -> :nope end)
+
+      refute Enum.any?(LockRepo.calls(), &match?({:unlock, _}, &1))
+    end
+
+    @tag granted: true
+    test "the key is derived from the dirty table, so two graphs do not block each other" do
+      Frontier.with_lock(fn -> :a end)
+      Frontier.with_lock(fn -> :b end, scope: "other_graph_dirty")
+
+      [{:lock, k1}, {:unlock, _}, {:lock, k2}, {:unlock, _}] = LockRepo.calls()
+      refute k1 == k2
+    end
+  end
 end

@@ -154,6 +154,10 @@ defmodule ReactiveDag.ScanWorkerTest do
     end
 
     def query!("SELECT COUNT" <> _, _), do: %{rows: [[Agent.get(__MODULE__, &MapSet.size/1)]]}
+
+    # the sweep takes a cluster-wide advisory lock; granted in tests
+    def query!("SELECT pg_try_advisory_lock" <> _, _), do: %{rows: [[true]]}
+    def query!("SELECT pg_advisory_unlock" <> _, _), do: %{rows: [[true]]}
   end
 
   setup do
@@ -471,6 +475,51 @@ defmodule ReactiveDag.ScanWorkerTest do
                })
 
       assert length(Crawler.polls()) == 1, "one poll per source, not per fed cell"
+    end
+
+    test "another node holding the lock is a stand-down, not a failure" do
+      # the frontier is a SET, not a queue: whatever this sweep would have
+      # claimed is still there for whoever holds the lock. Returning an error
+      # would make Oban retry work that is already happening.
+      defmodule BusyRepo do
+        def query!("SELECT pg_try_advisory_lock" <> _, _), do: %{rows: [[false]]}
+        def query!("SELECT DISTINCT cell_id" <> _, _), do: %{rows: []}
+        def query!("SELECT COUNT" <> _, _), do: %{rows: [[0]]}
+      end
+
+      Application.put_env(:reactive_dag, :repo, BusyRepo)
+      Crawler.returns(%{changed: %{"docs" => ["d1"]}})
+
+      assert :ok =
+               ReactiveDag.ScanWorker.perform(%Oban.Job{
+                 args: %{
+                   "sweep" => true,
+                   "plan_mfa" => ["ReactiveDag.ScanWorkerTest", "plan_for_worker", []]
+                 }
+               })
+
+      assert Crawler.polls() == [], "did not poll: the other node is doing it"
+    end
+
+    test "the lock covers the POLL, not just the drain" do
+      # two nodes polling the same upstreams at the same minute is duplicated
+      # external I/O, which is the expensive half
+      defmodule BusyRepo2 do
+        def query!("SELECT pg_try_advisory_lock" <> _, _), do: %{rows: [[false]]}
+        def query!("SELECT DISTINCT cell_id" <> _, _), do: %{rows: []}
+        def query!("SELECT COUNT" <> _, _), do: %{rows: [[0]]}
+      end
+
+      Application.put_env(:reactive_dag, :repo, BusyRepo2)
+
+      ReactiveDag.ScanWorker.perform(%Oban.Job{
+        args: %{
+          "sweep" => true,
+          "plan_mfa" => ["ReactiveDag.ScanWorkerTest", "plan_for_worker", []]
+        }
+      })
+
+      assert Crawler.polls() == []
     end
 
     test "telemetry names the sweep rather than a cell" do

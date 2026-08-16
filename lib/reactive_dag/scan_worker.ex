@@ -78,7 +78,28 @@ if Code.ensure_loaded?(Oban.Worker) do
     `[:reactive_dag, :drain, :stop]` sees the recompute trace without attaching
     here at all.
     """
-    use Oban.Worker, queue: :scans, max_attempts: 1
+    # UNIQUE per (args, queue, worker) while a job is available or executing.
+    #
+    # Two things this covers. A cron entry that fires while the previous run of
+    # it is still going — a crawl taking longer than its own cadence — enqueues
+    # a duplicate that would poll the same upstreams concurrently. And on a
+    # MULTI-NODE cluster every node's Cron plugin inserts the entry at the same
+    # minute, so without this an N-node deploy runs every sweep N times.
+    #
+    # `states: :incomplete` rather than the default `:successful`: the question
+    # is "is this already queued or running", not "did an identical job succeed
+    # recently". A sweep SHOULD run again next hour; it should not run twice at
+    # once. (Oban's named group, rather than a hand-listed set — it warns that a
+    # literal list misses `:suspended`, which is exactly the kind of gap that
+    # would show up only under load.)
+    use Oban.Worker,
+      queue: :scans,
+      max_attempts: 1,
+      unique: [
+        period: :infinity,
+        fields: [:args, :queue, :worker],
+        states: :incomplete
+      ]
 
     require Logger
 
@@ -88,7 +109,6 @@ if Code.ensure_loaded?(Oban.Worker) do
     def perform(%Oban.Job{args: %{"sweep" => true} = args}) do
       plan = ReactiveDag.Job.plan(args, __MODULE__)
       opts = poll_opts(args)
-      t0 = System.monotonic_time(:microsecond)
 
       :telemetry.execute(
         [:reactive_dag, :scan, :start],
@@ -100,30 +120,20 @@ if Code.ensure_loaded?(Oban.Worker) do
       # sequentially in this process, so a source declaring `depends_on` another
       # genuinely sees what it wrote — which N independent cron entries cannot
       # promise however they are sorted.
-      case Source.poll_all(plan, opts) do
-        {:ok, results} ->
-          {:ok, report} = Drain.run(plan, ReactiveDag.Job.drain_opts(args))
+      # The lock is around the WHOLE sweep, not just the drain: two nodes polling
+      # the same upstreams at the same minute is duplicated external I/O, which
+      # is the expensive half. Oban's uniqueness already stops the duplicate
+      # ENQUEUE; this covers a host that triggers a sweep by hand, or one whose
+      # jobs were inserted before the unique constraint existed.
+      case ReactiveDag.Frontier.with_lock(fn -> sweep(plan, opts, args) end) do
+        {:ok, result} ->
+          result
 
-          changed =
-            results |> Map.values() |> Enum.flat_map(&Map.get(&1, :changed, [])) |> Enum.uniq()
-
-          :telemetry.execute(
-            [:reactive_dag, :scan, :stop],
-            %{
-              duration_us: System.monotonic_time(:microsecond) - t0,
-              changed: length(changed),
-              passes: report.passes
-            },
-            %{cell: :sweep, args: args, sources: Map.keys(results), report: report}
-          )
-
+        :busy ->
+          # not a failure: another node is running this sweep, and the frontier
+          # is a set — nothing is lost by standing down
+          Logger.info("reactive_dag: sweep skipped, another node holds the lock")
           :ok
-
-        {:error, failures} ->
-          # one bad source does not cancel the others' work: `poll_all/2` has
-          # already polled everything it could
-          Logger.warning("reactive_dag: sweep had failing sources: #{inspect(failures)}")
-          {:error, failures}
       end
     end
 
@@ -193,6 +203,36 @@ if Code.ensure_loaded?(Oban.Worker) do
     # An outage is not a quiet success: the poll wrote nothing for the upstreams
     # it could not reach, so those keys are STALE rather than absent, and nothing
     # downstream will recompute to reveal it.
+    defp sweep(plan, opts, args) do
+      t0 = System.monotonic_time(:microsecond)
+
+      case Source.poll_all(plan, opts) do
+        {:ok, results} ->
+          {:ok, report} = Drain.run(plan, ReactiveDag.Job.drain_opts(args))
+
+          changed =
+            results |> Map.values() |> Enum.flat_map(&Map.get(&1, :changed, [])) |> Enum.uniq()
+
+          :telemetry.execute(
+            [:reactive_dag, :scan, :stop],
+            %{
+              duration_us: System.monotonic_time(:microsecond) - t0,
+              changed: length(changed),
+              passes: report.passes
+            },
+            %{cell: :sweep, args: args, sources: Map.keys(results), report: report}
+          )
+
+          :ok
+
+        {:error, failures} ->
+          # one bad source does not cancel the others' work: `poll_all/2` has
+          # already polled everything it could
+          Logger.warning("reactive_dag: sweep had failing sources: #{inspect(failures)}")
+          {:error, failures}
+      end
+    end
+
     defp warn_unreachable(_cell_id, %{unreachable: []}), do: :ok
 
     defp warn_unreachable(cell_id, %{unreachable: upstreams}) do

@@ -118,6 +118,48 @@ defmodule ReactiveDag.Frontier do
     n == 0
   end
 
+  @doc """
+  Run `fun` holding a cluster-wide lock on this graph's frontier, or skip.
+
+  The per-cell claim is atomic, so two concurrent drains never process a key
+  twice — but they CAN pick the same cell and split its keys, recomputing it
+  twice for a disjoint slice each. `ReactiveDag.Drain` has always said "run one
+  drain at a time per graph"; this is how a host actually gets that when it runs
+  more than one node.
+
+  A Postgres advisory lock, because the requirement is exactly what they are
+  for: cluster-wide, held on a connection, and released automatically if that
+  connection dies — a node crashing mid-drain does not leave the graph locked,
+  which a lock table would.
+
+  Returns `{:ok, result}`, or `:busy` when another node holds it. **Busy is not
+  an error**: the other drain is doing this drain's work, and the frontier is a
+  set rather than a queue — anything this one would have claimed is still there
+  for whoever holds the lock. A caller that treats `:busy` as a failure will
+  retry work that is already happening.
+
+      case Frontier.with_lock(fn -> Drain.run(plan, opts) end) do
+        {:ok, {:ok, report}} -> report
+        :busy -> :already_draining
+      end
+  """
+  @spec with_lock((-> result), keyword()) :: {:ok, result} | :busy when result: term()
+  def with_lock(fun, opts \\ []) when is_function(fun, 0) do
+    key = :erlang.phash2(Keyword.get(opts, :scope, dirty()))
+
+    case query!("SELECT pg_try_advisory_lock($1)", [key]) do
+      %{rows: [[true]]} ->
+        try do
+          {:ok, fun.()}
+        after
+          query!("SELECT pg_advisory_unlock($1)", [key])
+        end
+
+      _ ->
+        :busy
+    end
+  end
+
   defp query!(sql, params), do: repo().query!(sql, params)
 
   defp repo do

@@ -31,9 +31,23 @@ defmodule ReactiveDag.Drain do
   The per-cell claim is atomic (a `DELETE … RETURNING`): a dirty KEY is
   consumed exactly once. But the pick-then-claim PAIR is not serialized — two
   concurrent drains over the same graph can select the same cell and both
-  recompute it (each claiming a disjoint slice of its keys). Run ONE drain at a
-  time per graph (both hosts do: a single worker), or make recomputes
-  idempotent so a doubled recompute is merely wasted work.
+  recompute it (each claiming a disjoint slice of its keys).
+
+  So run ONE drain at a time per graph. On a single node that is a single
+  worker; across a CLUSTER it is `ReactiveDag.Frontier.with_lock/2`, a Postgres
+  advisory lock that `ReactiveDag.ScanWorker`'s sweep already takes:
+
+      case Frontier.with_lock(fn -> Drain.run(plan, opts) end) do
+        {:ok, {:ok, report}} -> report
+        :busy -> :already_draining
+      end
+
+  `:busy` is not an error. The frontier is a set rather than a queue, so
+  anything this drain would have claimed is still there for whoever holds the
+  lock — a caller that retries on `:busy` retries work already in progress.
+
+  Failing that, make recomputes idempotent so a doubled recompute is merely
+  wasted work.
 
   `run/2` opts:
     * `:recompute` — a `ReactiveDag.RecomputeStrategy` module (required unless the
