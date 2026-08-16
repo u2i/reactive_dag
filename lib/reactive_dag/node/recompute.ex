@@ -428,14 +428,14 @@ defmodule ReactiveDag.Node.Recompute do
         case meta[:identity_fields] do
           fields when is_list(fields) ->
             fn _key, row ->
-              ReactiveDag.Node.Payload.upsert_identity(resource, fields, row, action) == :changed
+              ReactiveDag.Node.Payload.upsert_identity(resource, fields, row, action) != :unchanged
             end
 
           _ ->
             key_attr = meta[:payload_key] || :key
 
             fn key, row ->
-              ReactiveDag.Node.Payload.upsert(resource, key_attr, key, row, action) == :changed
+              ReactiveDag.Node.Payload.upsert(resource, key_attr, key, row, action) != :unchanged
             end
         end
     end

@@ -453,6 +453,28 @@ A cell with no scanner is absent. A scanner with no `args:`/`every:` reports
 them empty — so a cheap leaf gets a plain *refresh* and an expensive one can be
 offered its deep pass, without the UI knowing which scanners are costly.
 
+### What a scan did
+
+`reconcile/3` returns `{:ok, changed, detail}`. `changed` is the flat list that
+propagates; `detail` says why each key is in it:
+
+```elixir
+{:ok, changed, detail} = Rows.reconcile(cell, keys, upsert: &fetch/1)
+
+detail
+#=> %{created: ["new-doc"], updated: ["edited-doc"],
+#     revived: ["returned-doc"], retired: ["withdrawn-doc"]}
+```
+
+That breakdown is what a scan report shows — *this run found 3 new documents,
+2 changed, 1 came back, 1 withdrawn* — and it is free: the reconcile computes
+those four sets to build `changed` anyway.
+
+It is also the one thing you cannot reconstruct afterwards. By the time you look
+at the rows, they are already written; nothing distinguishes a row created by
+this poll from one that was there before. A host wanting this used to arm a
+collector around the call and have its own write path report into it.
+
 ### Scheduling it: the worker
 
 `ReactiveDag.ScanWorker` is the Oban job — poll one cell's scanner, mark what

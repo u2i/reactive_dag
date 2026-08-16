@@ -193,6 +193,15 @@ defmodule ReactiveDag.Node.Rows do
   Reconcile a leaf's rows against the key set a scan found — the algorithm every
   leaf driver otherwise hand-rolls.
 
+  Returns `{:ok, changed, detail}` — `changed` is the flat list that propagates,
+  and `detail` is `%{created:, updated:, revived:, retired:}` saying WHY each key
+  is in it.
+
+  The detail is free: `reconcile/3` computes those four sets to build `changed`
+  and used to flatten them away, leaving a host to rebuild the classification a
+  scan report shows. It cannot be reconstructed afterwards — by the time you
+  look, the rows are already written.
+
       current  = the cell's current keys (read from its resource)
       want     = `want_keys`, what the scan found
       upsert   each want key   → the host writes the row, returns true iff CHANGED
@@ -293,8 +302,6 @@ defmodule ReactiveDag.Node.Rows do
     # only a LIBRARY verdict comes from a fingerprint comparison, which is the
     # one that cannot see a row coming back.
     observed = Enum.map(want, fn key -> {key, observe(key, upsert, meta)} end)
-    changed_up = for {key, {true, _}} <- observed, do: key
-
     case Keyword.get(opts, :observed, :all) do
       :partial ->
         # A PARTIAL observation cannot say anything vanished — absence from
@@ -302,7 +309,8 @@ defmodule ReactiveDag.Node.Rows do
         # computation is skipped rather than fed an empty baseline. Revival is
         # skipped for the same reason: it is derived from absence from the
         # baseline, and here absence carries no information.
-        {:ok, changed_up}
+        {changed, detail} = classify(observed, [], [])
+        {:ok, changed, detail}
 
       :all ->
         current = Keyword.get_lazy(opts, :current, fn -> Enum.map(all(cell), & &1.key) end)
@@ -310,8 +318,14 @@ defmodule ReactiveDag.Node.Rows do
 
         retire(vanished, Keyword.get(opts, :retire), meta)
 
-        {:ok,
-         changed_up ++ revived(observed, current, meta, opts) ++ propagated(vanished, meta, opts)}
+        {changed, detail} =
+          classify(
+            observed,
+            revived(observed, current, meta, opts),
+            propagated(vanished, meta, opts)
+          )
+
+        {:ok, changed, detail}
 
       other ->
         raise ArgumentError,
@@ -319,6 +333,24 @@ defmodule ReactiveDag.Node.Rows do
                 "#{inspect(other)}. `:partial` says this scan looked at only part of the " <>
                 "upstream, so nothing can be inferred to have vanished."
     end
+  end
+
+  # The four sets `reconcile/3` already computes, kept apart instead of flattened.
+  #
+  # It knew all of this: which keys were written for the first time, which moved,
+  # which came back, which went away. Returning one list threw the distinction
+  # away and left a host to rebuild it — which is what a "new / superseded /
+  # vanished" report is, and it cannot be reconstructed afterwards because the
+  # rows have already been written.
+  #
+  # `changed` is every key that propagates, and stays the flat list a caller
+  # already destructures. The rest is why.
+  defp classify(observed, revived, retired) do
+    created = for {key, {:created, _}} <- observed, do: key
+    updated = for {key, {:changed, _}} <- observed, do: key
+
+    {created ++ updated ++ revived ++ retired,
+     %{created: created, updated: updated, revived: revived, retired: retired}}
   end
 
   # COMING BACK is a change, even when the bytes did not move.
@@ -341,7 +373,7 @@ defmodule ReactiveDag.Node.Rows do
     if marking?(meta, opts) do
       live = MapSet.new(current)
 
-      for {key, {false, :library}} <- observed, not MapSet.member?(live, key), do: key
+      for {key, {:unchanged, :library}} <- observed, not MapSet.member?(live, key), do: key
     else
       []
     end
@@ -359,9 +391,9 @@ defmodule ReactiveDag.Node.Rows do
   # us what it observed and let the library decide.
   defp observe(key, upsert, meta) do
     case upsert.(key) do
-      changed? when is_boolean(changed?) -> {changed?, :host}
-      nil -> {false, :host}
-      row when is_map(row) -> {write(key, row, meta) == :changed, :library}
+      changed? when is_boolean(changed?) -> {if(changed?, do: :changed, else: :unchanged), :host}
+      nil -> {:unchanged, :host}
+      row when is_map(row) -> {write(key, row, meta), :library}
     end
   end
 

@@ -114,7 +114,7 @@ defmodule ReactiveDag.RetainIfVanishedTest do
   }
 
   defp scan(mod, keys, opts \\ []) do
-    {:ok, changed} =
+    {:ok, changed, _} =
       Rows.reconcile(cell(mod), keys, [upsert: &Map.get(@docs, &1)] ++ opts)
 
     Enum.sort(changed)
@@ -173,7 +173,7 @@ defmodule ReactiveDag.RetainIfVanishedTest do
 
       moved = Map.put(@docs, "b", %{key: "b", body: "new", content_md5: "MOVED"})
 
-      {:ok, changed} = Rows.reconcile(cell(Docs), ["a", "b"], upsert: &Map.get(moved, &1))
+      {:ok, changed, _} = Rows.reconcile(cell(Docs), ["a", "b"], upsert: &Map.get(moved, &1))
 
       assert changed == ["b"], "retention must not mask a real content change"
     end
@@ -182,7 +182,7 @@ defmodule ReactiveDag.RetainIfVanishedTest do
       scan(Docs, ["a", "b"])
 
       moved = Map.put(@docs, "a", %{key: "a", body: "edited", content_md5: "CHANGED"})
-      {:ok, changed} = Rows.reconcile(cell(Docs), ["a", "b"], upsert: &Map.get(moved, &1))
+      {:ok, changed, _} = Rows.reconcile(cell(Docs), ["a", "b"], upsert: &Map.get(moved, &1))
 
       assert changed == ["a"]
     end
@@ -252,7 +252,7 @@ defmodule ReactiveDag.RetainIfVanishedTest do
     end
 
     defp scan_marked(keys) do
-      {:ok, changed} = Rows.reconcile(marked_cell(), keys, upsert: &Map.get(@docs, &1))
+      {:ok, changed, _} = Rows.reconcile(marked_cell(), keys, upsert: &Map.get(@docs, &1))
       Enum.sort(changed)
     end
 

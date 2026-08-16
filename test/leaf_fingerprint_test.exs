@@ -141,11 +141,11 @@ defmodule ReactiveDag.LeafFingerprintTest do
       crawled = fn seen, etag -> %{key: "d1", title: "Budget", content_md5: "abc", last_seen_at: seen, etag: etag} end
 
       # first observation
-      {:ok, changed} = Rows.reconcile(cell, ["d1"], upsert: fn _ -> crawled.(t(0), "W/\"1\"") end)
+      {:ok, changed, _} = Rows.reconcile(cell, ["d1"], upsert: fn _ -> crawled.(t(0), "W/\"1\"") end)
       assert changed == ["d1"]
 
       # re-crawl: identical bytes, new timestamp, server re-issued the etag
-      {:ok, changed} = Rows.reconcile(cell, ["d1"], upsert: fn _ -> crawled.(t(3600), "W/\"2\"") end)
+      {:ok, changed, _} = Rows.reconcile(cell, ["d1"], upsert: fn _ -> crawled.(t(3600), "W/\"2\"") end)
 
       assert changed == [], "a document that did not move must not fire the cascade"
 
@@ -160,9 +160,9 @@ defmodule ReactiveDag.LeafFingerprintTest do
       # the behaviour being fixed, pinned so the fix is visibly load-bearing
       cell = cell(Plain)
 
-      {:ok, _} = Rows.reconcile(cell, ["d1"], upsert: fn _ -> %{key: "d1", content_md5: "abc", last_seen_at: t(0)} end)
+      {:ok, _, _} = Rows.reconcile(cell, ["d1"], upsert: fn _ -> %{key: "d1", content_md5: "abc", last_seen_at: t(0)} end)
 
-      {:ok, changed} =
+      {:ok, changed, _} =
         Rows.reconcile(cell, ["d1"], upsert: fn _ -> %{key: "d1", content_md5: "abc", last_seen_at: t(3600)} end)
 
       assert changed == ["d1"]
@@ -171,9 +171,9 @@ defmodule ReactiveDag.LeafFingerprintTest do
     test "content that actually moved IS a change" do
       cell = cell(Docs)
 
-      {:ok, _} = Rows.reconcile(cell, ["d1"], upsert: fn _ -> %{key: "d1", content_md5: "abc", last_seen_at: t(0)} end)
+      {:ok, _, _} = Rows.reconcile(cell, ["d1"], upsert: fn _ -> %{key: "d1", content_md5: "abc", last_seen_at: t(0)} end)
 
-      {:ok, changed} =
+      {:ok, changed, _} =
         Rows.reconcile(cell, ["d1"], upsert: fn _ -> %{key: "d1", content_md5: "DIFFERENT", last_seen_at: t(1)} end)
 
       assert changed == ["d1"]
@@ -182,11 +182,11 @@ defmodule ReactiveDag.LeafFingerprintTest do
     test "a field OUTSIDE the fingerprint does not fire it — the host chose what counts" do
       cell = cell(Docs)
 
-      {:ok, _} =
+      {:ok, _, _} =
         Rows.reconcile(cell, ["d1"], upsert: fn _ -> %{key: "d1", title: "Budget", content_md5: "abc"} end)
 
       # the title moved; the fingerprint is [:content_md5], so this leaf says no
-      {:ok, changed} =
+      {:ok, changed, _} =
         Rows.reconcile(cell, ["d1"], upsert: fn _ -> %{key: "d1", title: "Budget (revised)", content_md5: "abc"} end)
 
       assert changed == []
@@ -198,10 +198,10 @@ defmodule ReactiveDag.LeafFingerprintTest do
     test "a re-titled document re-fires even though its bytes are identical" do
       cell = cell(Agendas)
 
-      {:ok, _} =
+      {:ok, _, _} =
         Rows.reconcile(cell, ["a1"], upsert: fn _ -> %{key: "a1", title: "Jan 3", content_md5: "abc"} end)
 
-      {:ok, changed} =
+      {:ok, changed, _} =
         Rows.reconcile(cell, ["a1"], upsert: fn _ -> %{key: "a1", title: "Jan 3 (amended)", content_md5: "abc"} end)
 
       assert changed == ["a1"], "the title is folded into the digest, so this moved"
@@ -211,15 +211,15 @@ defmodule ReactiveDag.LeafFingerprintTest do
       cell = cell(Agendas)
       row = fn seen -> %{key: "a1", title: "Jan 3", content_md5: "abc", last_seen_at: seen} end
 
-      {:ok, _} = Rows.reconcile(cell, ["a1"], upsert: fn _ -> row.(t(0)) end)
-      {:ok, changed} = Rows.reconcile(cell, ["a1"], upsert: fn _ -> row.(t(9999)) end)
+      {:ok, _, _} = Rows.reconcile(cell, ["a1"], upsert: fn _ -> row.(t(0)) end)
+      {:ok, changed, _} = Rows.reconcile(cell, ["a1"], upsert: fn _ -> row.(t(9999)) end)
 
       assert changed == []
     end
 
     test "the value lands in the named attribute" do
       cell = cell(Agendas)
-      {:ok, _} = Rows.reconcile(cell, ["a1"], upsert: fn _ -> %{key: "a1", title: "Jan 3", content_md5: "abc"} end)
+      {:ok, _, _} = Rows.reconcile(cell, ["a1"], upsert: fn _ -> %{key: "a1", title: "Jan 3", content_md5: "abc"} end)
 
       [row] = Ash.read!(Agendas)
       assert row.digest == "abc|#{:erlang.phash2("Jan 3")}"
@@ -230,7 +230,7 @@ defmodule ReactiveDag.LeafFingerprintTest do
     test "returning nil skips the key entirely — an unobservable unit is not news" do
       cell = cell(Docs)
 
-      {:ok, changed} =
+      {:ok, changed, _} =
         Rows.reconcile(cell, ["d1", "d2"],
           upsert: fn
             "d1" -> %{key: "d1", content_md5: "abc"}
@@ -246,7 +246,7 @@ defmodule ReactiveDag.LeafFingerprintTest do
     test "a boolean return still works — the host wrote the row itself" do
       cell = cell(Docs)
 
-      {:ok, changed} =
+      {:ok, changed, _} =
         Rows.reconcile(cell, ["d1", "d2"], upsert: fn key -> key == "d1" end)
 
       assert changed == ["d1"]
@@ -257,7 +257,7 @@ defmodule ReactiveDag.LeafFingerprintTest do
     test "a returned row is written, so a poll is fetch → build → reconcile" do
       cell = cell(Docs)
 
-      {:ok, changed} =
+      {:ok, changed, _} =
         Rows.reconcile(cell, ["d1", "d2"],
           upsert: fn key -> %{key: key, content_md5: "hash-#{key}"} end
         )
@@ -269,11 +269,11 @@ defmodule ReactiveDag.LeafFingerprintTest do
     test "vanished keys still retire alongside a row-returning upsert" do
       cell = cell(Docs)
 
-      {:ok, _} =
+      {:ok, _, _} =
         Rows.reconcile(cell, ["d1", "d2"], upsert: fn key -> %{key: key, content_md5: "x"} end)
 
       # the scan now finds only d1
-      {:ok, changed} =
+      {:ok, changed, _} =
         Rows.reconcile(cell, ["d1"], upsert: fn key -> %{key: key, content_md5: "x"} end)
 
       assert changed == ["d2"]
@@ -286,14 +286,15 @@ defmodule ReactiveDag.LeafFingerprintTest do
       row = fn seen -> %{key: "d1", content_md5: "abc", last_seen_at: seen} end
       opts = [fingerprint: [:content_md5]]
 
-      assert Payload.upsert(Docs, :key, "d1", row.(t(0)), :upsert, opts) == :changed
+      # the first write CREATES; the second finds an unmoved fingerprint
+      assert Payload.upsert(Docs, :key, "d1", row.(t(0)), :upsert, opts) == :created
       assert Payload.upsert(Docs, :key, "d1", row.(t(500)), :upsert, opts) == :unchanged
     end
 
     test "no options → the old behaviour exactly" do
       row = fn seen -> %{key: "d1", content_md5: "abc", last_seen_at: seen} end
 
-      assert Payload.upsert(Docs, :key, "d1", row.(t(0))) == :changed
+      assert Payload.upsert(Docs, :key, "d1", row.(t(0))) == :created
       assert Payload.upsert(Docs, :key, "d1", row.(t(500))) == :changed
     end
 
@@ -301,7 +302,8 @@ defmodule ReactiveDag.LeafFingerprintTest do
       # a source that cannot determine its fingerprint must not read as unchanged
       opts = [fingerprint: fn _row -> nil end]
 
-      assert Payload.upsert(Docs, :key, "d1", %{key: "d1", content_md5: "abc"}, :upsert, opts) == :changed
+      assert Payload.upsert(Docs, :key, "d1", %{key: "d1", content_md5: "abc"}, :upsert, opts) ==
+               :created
 
       assert Payload.upsert(Docs, :key, "d1", %{key: "d1", content_md5: "MOVED"}, :upsert, opts) ==
                :changed

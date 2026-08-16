@@ -179,7 +179,7 @@ defmodule ReactiveDag.RowsTest do
   describe "reconcile/3 — the leaf-write skeleton" do
     test "retires what vanished, and propagates both sides" do
       # the scan found travel + a new one; meals and lodging are gone
-      {:ok, changed} =
+      {:ok, changed, _} =
         Rows.reconcile(cell(Health), ["travel", "parking"],
           upsert: fn key -> key == "parking" end
         )
@@ -194,7 +194,7 @@ defmodule ReactiveDag.RowsTest do
     test "a retire fun replaces destruction — the retain-if-vanish policy" do
       test_pid = self()
 
-      {:ok, changed} =
+      {:ok, changed, _} =
         Rows.reconcile(cell(Health), ["travel"],
           upsert: fn _ -> false end,
           retire: fn keys -> send(test_pid, {:tombstoned, Enum.sort(keys)}) end
@@ -208,7 +208,7 @@ defmodule ReactiveDag.RowsTest do
     end
 
     test "an explicit :current narrows the baseline — already-retired keys stay put" do
-      {:ok, changed} =
+      {:ok, changed, _} =
         Rows.reconcile(cell(Health), ["travel"],
           upsert: fn _ -> false end,
           current: ["travel", "meals"]
@@ -220,7 +220,7 @@ defmodule ReactiveDag.RowsTest do
     end
 
     test "nothing vanished → nothing retired, only real upserts propagate" do
-      {:ok, changed} =
+      {:ok, changed, _} =
         Rows.reconcile(cell(Health), ["travel", "meals", "lodging"],
           upsert: fn key -> key == "meals" end
         )
@@ -230,11 +230,89 @@ defmodule ReactiveDag.RowsTest do
     end
 
     test "an identity-keyed leaf reconciles on its serialized keys" do
-      {:ok, changed} =
+      {:ok, changed, _} =
         Rows.reconcile(cell(Rollup), ["gf|2025"], upsert: fn _ -> false end)
 
       assert changed == ["water|2025"]
       assert Enum.map(Rows.all(cell(Rollup)), & &1.key) == ["gf|2025"]
     end
   end
+
+  describe "reconcile/3's detail — why each key changed" do
+    test "separates created from updated" do
+      {:ok, changed, detail} =
+        Rows.reconcile(cell(Health), ["travel", "brand-new"],
+          upsert: fn
+            "travel" -> %{key: "travel", status: "MOVED"}
+            "brand-new" -> %{key: "brand-new", status: "present"}
+          end
+        )
+
+      assert detail.created == ["brand-new"]
+      assert detail.updated == ["travel"]
+      # both propagate; `changed` is still the flat list a caller destructures
+      assert Enum.sort(changed) == ["brand-new", "lodging", "meals", "travel"]
+    end
+
+    test "an unchanged key appears in neither" do
+      {:ok, _changed, detail} =
+        Rows.reconcile(cell(Health), ["travel", "meals", "lodging"],
+          upsert: fn key -> %{key: key, status: status_of(key)} end
+        )
+
+      assert detail.created == []
+      assert detail.updated == []
+    end
+
+    test "retired keys are named, not merely counted" do
+      {:ok, _changed, detail} =
+        Rows.reconcile(cell(Health), ["travel"],
+          upsert: fn key -> %{key: key, status: status_of(key)} end
+        )
+
+      assert Enum.sort(detail.retired) == ["lodging", "meals"]
+      assert detail.created == []
+    end
+
+    test "the four sets add up to `changed`" do
+      {:ok, changed, d} =
+        Rows.reconcile(cell(Health), ["travel", "new-one"],
+          upsert: fn
+            "travel" -> %{key: "travel", status: "MOVED"}
+            "new-one" -> %{key: "new-one", status: "present"}
+          end
+        )
+
+      assert Enum.sort(changed) ==
+               Enum.sort(d.created ++ d.updated ++ d.revived ++ d.retired)
+    end
+
+    test "a partial observation reports what it wrote, and retires nothing" do
+      {:ok, changed, detail} =
+        Rows.reconcile(cell(Health), ["travel"],
+          observed: :partial,
+          upsert: fn key -> %{key: key, status: "MOVED"} end
+        )
+
+      assert changed == ["travel"]
+      assert detail.updated == ["travel"]
+      assert detail.retired == [], "nothing can vanish from a partial observation"
+    end
+
+    test "the boolean :upsert form still classifies as updated" do
+      # the host said "changed" without saying whether it created — the library
+      # cannot know, and reports the honest answer rather than guessing
+      {:ok, _changed, detail} =
+        Rows.reconcile(cell(Health), ["travel"],
+          observed: :partial,
+          upsert: fn _key -> true end
+        )
+
+      assert detail.updated == ["travel"]
+      assert detail.created == []
+    end
+  end
+
+  defp status_of("travel"), do: "failing"
+  defp status_of(_), do: "present"
 end

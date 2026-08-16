@@ -135,19 +135,19 @@ defmodule ReactiveDag.RevivalTest do
         Marked |> Ash.read!() |> Enum.reject(&(&1.status == "tombstoned")) |> Enum.map(& &1.key)
       end
 
-      {:ok, _} = Rows.reconcile(cell, ["a", "b"], upsert: &Map.get(@rows, &1))
-      {:ok, _} = Rows.reconcile(cell, ["a"], upsert: &Map.get(@rows, &1), current: live.())
+      {:ok, _, _} = Rows.reconcile(cell, ["a", "b"], upsert: &Map.get(@rows, &1))
+      {:ok, _, _} = Rows.reconcile(cell, ["a"], upsert: &Map.get(@rows, &1), current: live.())
 
-      {:ok, changed} =
+      {:ok, changed, _} =
         Rows.reconcile(cell, ["a", "b"], upsert: &Map.get(@rows, &1), current: live.())
 
       assert changed == ["b"], "b came back; its bytes never moved"
     end
 
     test "under a per-call :retire fun" do
-      {:ok, _} = Rows.reconcile(cell(), ["a", "b"], upsert: &Map.get(@rows, &1))
+      {:ok, _, _} = Rows.reconcile(cell(), ["a", "b"], upsert: &Map.get(@rows, &1))
 
-      {:ok, _} =
+      {:ok, _, _} =
         Rows.reconcile(cell(), ["a"],
           upsert: &Map.get(@rows, &1),
           current: live_keys(),
@@ -155,7 +155,7 @@ defmodule ReactiveDag.RevivalTest do
         )
 
       # b comes back byte-identical: the fingerprint cannot see it, the baseline can
-      {:ok, changed} =
+      {:ok, changed, _} =
         Rows.reconcile(cell(), ["a", "b"],
           upsert: &Map.get(@rows, &1),
           current: live_keys(),
@@ -168,20 +168,20 @@ defmodule ReactiveDag.RevivalTest do
 
   describe "and nothing else is treated as one" do
     test "no marking policy — the library destroyed the row, so it is a CREATE" do
-      {:ok, _} = Rows.reconcile(cell(), ["a", "b"], upsert: &Map.get(@rows, &1))
-      {:ok, _} = Rows.reconcile(cell(), ["a"], upsert: &Map.get(@rows, &1))
+      {:ok, _, _} = Rows.reconcile(cell(), ["a", "b"], upsert: &Map.get(@rows, &1))
+      {:ok, _, _} = Rows.reconcile(cell(), ["a"], upsert: &Map.get(@rows, &1))
 
       # b's row was destroyed, so writing it again is a new row — already
       # reported by the ordinary path, and it must not be counted twice
-      {:ok, changed} = Rows.reconcile(cell(), ["a", "b"], upsert: &Map.get(@rows, &1))
+      {:ok, changed, _} = Rows.reconcile(cell(), ["a", "b"], upsert: &Map.get(@rows, &1))
 
       assert changed == ["b"]
     end
 
     test "no supplied :current — every row is the baseline, so nothing looks absent" do
-      {:ok, _} = Rows.reconcile(cell(), ["a", "b"], upsert: &Map.get(@rows, &1))
+      {:ok, _, _} = Rows.reconcile(cell(), ["a", "b"], upsert: &Map.get(@rows, &1))
 
-      {:ok, changed} =
+      {:ok, changed, _} =
         Rows.reconcile(cell(), ["a", "b"],
           upsert: &Map.get(@rows, &1),
           retire: &tombstone/1
@@ -191,15 +191,15 @@ defmodule ReactiveDag.RevivalTest do
     end
 
     test "the boolean form — the host decides, and is not second-guessed" do
-      {:ok, _} = Rows.reconcile(cell(), ["a", "b"], upsert: &Map.get(@rows, &1))
-      {:ok, _} =
+      {:ok, _, _} = Rows.reconcile(cell(), ["a", "b"], upsert: &Map.get(@rows, &1))
+      {:ok, _, _} =
         Rows.reconcile(cell(), ["a"],
           upsert: &Map.get(@rows, &1),
           current: live_keys(),
           retire: &tombstone/1
         )
 
-      {:ok, changed} =
+      {:ok, changed, _} =
         Rows.reconcile(cell(), ["a", "b"],
           # the host says "revived" itself
           upsert: fn key -> key == "b" end,
@@ -211,8 +211,8 @@ defmodule ReactiveDag.RevivalTest do
     end
 
     test "a key whose bytes DID move is reported once, not twice" do
-      {:ok, _} = Rows.reconcile(cell(), ["a", "b"], upsert: &Map.get(@rows, &1))
-      {:ok, _} =
+      {:ok, _, _} = Rows.reconcile(cell(), ["a", "b"], upsert: &Map.get(@rows, &1))
+      {:ok, _, _} =
         Rows.reconcile(cell(), ["a"],
           upsert: &Map.get(@rows, &1),
           current: live_keys(),
@@ -221,7 +221,7 @@ defmodule ReactiveDag.RevivalTest do
 
       moved = Map.put(@rows, "b", %{key: "b", content_md5: "MOVED"})
 
-      {:ok, changed} =
+      {:ok, changed, _} =
         Rows.reconcile(cell(), ["a", "b"],
           upsert: &Map.get(moved, &1),
           current: live_keys(),
@@ -232,9 +232,9 @@ defmodule ReactiveDag.RevivalTest do
     end
 
     test "an ordinary unchanged poll reports nothing" do
-      {:ok, _} = Rows.reconcile(cell(), ["a", "b"], upsert: &Map.get(@rows, &1))
+      {:ok, _, _} = Rows.reconcile(cell(), ["a", "b"], upsert: &Map.get(@rows, &1))
 
-      {:ok, changed} =
+      {:ok, changed, _} =
         Rows.reconcile(cell(), ["a", "b"],
           upsert: &Map.get(@rows, &1),
           current: live_keys(),
@@ -245,15 +245,15 @@ defmodule ReactiveDag.RevivalTest do
     end
 
     test "a key the host could not observe (nil) is not a revival" do
-      {:ok, _} = Rows.reconcile(cell(), ["a", "b"], upsert: &Map.get(@rows, &1))
-      {:ok, _} =
+      {:ok, _, _} = Rows.reconcile(cell(), ["a", "b"], upsert: &Map.get(@rows, &1))
+      {:ok, _, _} =
         Rows.reconcile(cell(), ["a"],
           upsert: &Map.get(@rows, &1),
           current: live_keys(),
           retire: &tombstone/1
         )
 
-      {:ok, changed} =
+      {:ok, changed, _} =
         Rows.reconcile(cell(), ["a", "b"],
           upsert: fn key -> if key == "a", do: Map.get(@rows, key) end,
           current: live_keys(),

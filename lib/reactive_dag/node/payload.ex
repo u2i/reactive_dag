@@ -33,8 +33,12 @@ defmodule ReactiveDag.Node.Payload do
 
   @doc """
   Upsert `row` into `resource` under `cell_key` (written to `key_attr`), via
-  `action`. Returns `:changed` (created, or a writable attr differs) or
-  `:unchanged`. `row`'s `:key` field is dropped before writing.
+  `action`. `row`'s `:key` field is dropped before writing.
+
+  Returns `:created` (no row existed), `:changed` (a row existed and moved) or
+  `:unchanged`. The first two both mean "propagate"; they are distinguished
+  because a caller reporting *what a scan did* wants them apart, and this is the
+  only place that knows — one row of the check it already performs.
 
   ## Options
 
@@ -53,7 +57,7 @@ defmodule ReactiveDag.Node.Payload do
     * `:fingerprint_attribute` — where the value is stored (default
       `:fingerprint`).
   """
-  @spec upsert(module(), atom(), String.t(), map(), atom(), keyword()) :: :changed | :unchanged
+  @spec upsert(module(), atom(), String.t(), map(), atom(), keyword()) :: :created | :changed | :unchanged
   def upsert(resource, key_attr, cell_key, row, action \\ :upsert, opts \\ []) do
     attrs =
       row
@@ -61,10 +65,10 @@ defmodule ReactiveDag.Node.Payload do
       |> Map.put(key_attr, cell_key)
       |> stamp_fingerprint(row, resource, opts)
 
-    changed? =
+    verdict =
       case existing(resource, key_attr, cell_key) do
-        nil -> true
-        record -> moved?(record, attrs, opts)
+        nil -> :created
+        record -> if moved?(record, attrs, opts), do: :changed, else: :unchanged
       end
 
     {:ok, _} =
@@ -72,7 +76,7 @@ defmodule ReactiveDag.Node.Payload do
       |> Ash.Changeset.for_create(action, attrs)
       |> Ash.create()
 
-    if changed?, do: :changed, else: :unchanged
+    verdict
   end
 
   @doc """
@@ -83,14 +87,14 @@ defmodule ReactiveDag.Node.Payload do
   with the same read-compare change detection as `upsert/6`, and the same
   `:fingerprint` / `:fingerprint_attribute` options.
   """
-  @spec upsert_identity(module(), [atom()], map(), atom(), keyword()) :: :changed | :unchanged
+  @spec upsert_identity(module(), [atom()], map(), atom(), keyword()) :: :created | :changed | :unchanged
   def upsert_identity(resource, identity_fields, row, action \\ :upsert, opts \\ []) do
     attrs = row |> Map.drop([:key]) |> stamp_fingerprint(row, resource, opts)
 
-    changed? =
+    verdict =
       case existing_by(resource, Map.take(attrs, identity_fields)) do
-        nil -> true
-        record -> moved?(record, attrs, opts)
+        nil -> :created
+        record -> if moved?(record, attrs, opts), do: :changed, else: :unchanged
       end
 
     {:ok, _} =
@@ -98,7 +102,7 @@ defmodule ReactiveDag.Node.Payload do
       |> Ash.Changeset.for_create(action, attrs)
       |> Ash.create()
 
-    if changed?, do: :changed, else: :unchanged
+    verdict
   end
 
   @doc """
