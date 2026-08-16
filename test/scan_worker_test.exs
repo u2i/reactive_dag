@@ -453,4 +453,52 @@ defmodule ReactiveDag.ScanWorkerTest do
       assert meta.args["run_id"] == "run-42"
     end
   end
+
+  describe "the sweep job — single thread, graph order" do
+    # The intended shape: ONE job, every source in an order that makes sense,
+    # one drain at the end. A source that must run after another says so with
+    # `depends_on`, and because these polls run sequentially in this process it
+    # genuinely sees what the earlier one wrote.
+    test "polls every source and drains once" do
+      Crawler.returns(%{changed: %{"docs" => ["d1"]}})
+
+      assert :ok =
+               ReactiveDag.ScanWorker.perform(%Oban.Job{
+                 args: %{
+                   "sweep" => true,
+                   "plan_mfa" => ["ReactiveDag.ScanWorkerTest", "plan_for_worker", []]
+                 }
+               })
+
+      assert length(Crawler.polls()) == 1, "one poll per source, not per fed cell"
+    end
+
+    test "telemetry names the sweep rather than a cell" do
+      test_pid = self()
+
+      :telemetry.attach_many(
+        "sweep-span",
+        [[:reactive_dag, :scan, :start], [:reactive_dag, :scan, :stop]],
+        fn e, _m, meta, _ -> send(test_pid, {List.last(e), meta}) end,
+        nil
+      )
+
+      on_exit(fn -> :telemetry.detach("sweep-span") end)
+
+      ReactiveDag.ScanWorker.perform(%Oban.Job{
+        args: %{
+          "sweep" => true,
+          "run_id" => "run-3",
+          "plan_mfa" => ["ReactiveDag.ScanWorkerTest", "plan_for_worker", []]
+        }
+      })
+
+      assert_received {:start, start_meta}
+      assert_received {:stop, stop_meta}
+
+      assert start_meta.cell == :sweep
+      assert start_meta.args["run_id"] == "run-3"
+      assert is_list(stop_meta.sources)
+    end
+  end
 end

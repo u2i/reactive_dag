@@ -85,6 +85,48 @@ if Code.ensure_loaded?(Oban.Worker) do
     alias ReactiveDag.{Drain, Source}
 
     @impl Oban.Worker
+    def perform(%Oban.Job{args: %{"sweep" => true} = args}) do
+      plan = ReactiveDag.Job.plan(args, __MODULE__)
+      opts = poll_opts(args)
+      t0 = System.monotonic_time(:microsecond)
+
+      :telemetry.execute(
+        [:reactive_dag, :scan, :start],
+        %{system_time: System.system_time()},
+        %{cell: :sweep, args: args}
+      )
+
+      # ONE job, every source, in graph order, then ONE drain. Sources run
+      # sequentially in this process, so a source declaring `depends_on` another
+      # genuinely sees what it wrote — which N independent cron entries cannot
+      # promise however they are sorted.
+      case Source.poll_all(plan, opts) do
+        {:ok, results} ->
+          {:ok, report} = Drain.run(plan, ReactiveDag.Job.drain_opts(args))
+
+          changed =
+            results |> Map.values() |> Enum.flat_map(&Map.get(&1, :changed, [])) |> Enum.uniq()
+
+          :telemetry.execute(
+            [:reactive_dag, :scan, :stop],
+            %{
+              duration_us: System.monotonic_time(:microsecond) - t0,
+              changed: length(changed),
+              passes: report.passes
+            },
+            %{cell: :sweep, args: args, sources: Map.keys(results), report: report}
+          )
+
+          :ok
+
+        {:error, failures} ->
+          # one bad source does not cancel the others' work: `poll_all/2` has
+          # already polled everything it could
+          Logger.warning("reactive_dag: sweep had failing sources: #{inspect(failures)}")
+          {:error, failures}
+      end
+    end
+
     def perform(%Oban.Job{args: args}) do
       cell_id = Map.fetch!(args, "cell")
       plan = ReactiveDag.Job.plan(args, __MODULE__)
