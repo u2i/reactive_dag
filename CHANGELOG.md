@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.17.0-rc.19](https://github.com/u2i/reactive_dag/compare/v0.17.0-rc.18...v0.17.0-rc.19) (2026-08-16)
+
+
+### Features
+
+* cell status says WHY a key count is zero ([fd71bfd](https://github.com/u2i/reactive_dag/commit/fd71bfd456a811e707f0d3feb2dd2f04d53e0274))
+* cell status says WHY a key count is zero ([6ec21f7](https://github.com/u2i/reactive_dag/commit/6ec21f73f86269294074bc2421d7b819cccb5dc1))
+
 ## [0.17.0-rc.18](https://github.com/u2i/reactive_dag/compare/v0.17.0-rc.17...v0.17.0-rc.18) (2026-08-16)
 
 
