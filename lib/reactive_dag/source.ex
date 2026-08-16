@@ -170,14 +170,26 @@ defmodule ReactiveDag.Source do
   Returns `{:ok, %{module => result}}`, or `{:error, failures}` where failures
   are `{module, reason}`: one scanner failing must not silently cancel the
   others, and must not look like success.
+
+  ## Ordering
+
+  Sources are polled SEQUENTIALLY, in cell order. A host whose sweep order
+  carries meaning — observers before the nodes that read them — declares it:
+
+      Source.poll_all(plan, order: [:observations, :verdicts])
+
+  Anything unlisted follows, in cell order. Unlike `crontab/3`'s `order:`, this
+  one is a real happens-before: these polls run one after another in this
+  process, so a later source genuinely sees what an earlier one wrote.
   """
   @spec poll_all(graph(), keyword()) :: {:ok, map()} | {:error, [{module(), term()}]}
   def poll_all(graph, opts \\ []) do
     standing = standing_args(graph)
+    {order, opts} = Keyword.pop(opts, :order)
 
     {oks, errors} =
       graph
-      |> scanners()
+      |> scanners(order: order)
       |> Enum.map(fn mod ->
         # the leaf's declared `args:` are the DEFAULT; the caller's win. That is
         # what keeps a routine `poll_all(plan)` cheap without any call site
@@ -520,12 +532,36 @@ defmodule ReactiveDag.Source do
 
   @doc "The distinct scanner modules a plan's leaves declare via `scan`."
   @spec scanners(graph()) :: [module()]
-  def scanners(graph) do
+  def scanners(graph, opts \\ []) do
+    # Sorted by CELL, not taken in map order. `poll_all/2` polls these
+    # sequentially, so this is the order real work happens in — and an
+    # undeclared order there is worse than in `crontab/3`, where the entries
+    # are independent jobs anyway.
     graph.cells
-    |> Map.values()
-    |> Enum.map(& &1.meta[:scan])
+    |> Enum.sort_by(fn {id, _cell} -> id end)
+    |> Enum.map(fn {_id, cell} -> cell.meta[:scan] end)
     |> Enum.reject(&is_nil/1)
     |> Enum.uniq()
+    |> sequence(graph, Keyword.get(opts, :order))
+  end
+
+  # A host whose sweep order carries meaning — observers before the nodes that
+  # read them — declares it by CELL, the same vocabulary `crontab/3` takes.
+  defp sequence(scanners, _graph, nil), do: scanners
+
+  defp sequence(scanners, graph, declared) when is_list(declared) do
+    by_cell =
+      for {id, cell} <- graph.cells, mod = cell.meta[:scan], not is_nil(mod), into: %{} do
+        {id, mod}
+      end
+
+    ranked =
+      declared
+      |> Enum.map(&to_string/1)
+      |> Enum.map(&Map.get(by_cell, &1))
+      |> Enum.reject(&is_nil/1)
+
+    Enum.uniq(ranked ++ scanners)
   end
 
   # NB the rescue must not re-wrap: `{:error, reason}` from a well-behaved poll

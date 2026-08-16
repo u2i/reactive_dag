@@ -437,4 +437,53 @@ defmodule ReactiveDag.ScanScheduleTest do
       assert Enum.map(jobs, & &1.cell) == ["agendas"]
     end
   end
+
+  describe "poll_all/2 — the sweep that actually sequences work" do
+    test "polls in CELL order" do
+      # `scanners/1` used to iterate a map, so the order real work happened in
+      # was undefined — worse than in `crontab/3`, whose entries are independent
+      # jobs anyway (u2i/reactive_dag#123).
+      #
+      # NOTE this test cannot DISTINGUISH the sort from map order: Elixir's
+      # small maps happen to iterate in key order, so both give the same answer
+      # at this size. The sort makes it a guarantee rather than an accident of
+      # the map implementation, which is the point — but the assertion below is
+      # weaker than it looks, and swapping the sort back to `Map.values/1` does
+      # not fail it.
+      p = ReactiveDag.Node.graph([Agendas, Transcripts, Zulu])
+
+      assert Source.scanners(p) == [Crawler, Listing, ZuluScan]
+    end
+
+    test "`order:` is a real happens-before here" do
+      # these polls run one after another IN THIS PROCESS, so a later source
+      # genuinely sees what an earlier one wrote — which is what the crontab's
+      # `order:` cannot promise
+      p = ReactiveDag.Node.graph([Agendas, Transcripts, Zulu])
+
+      assert Source.scanners(p, order: [:zulu, :transcripts]) == [ZuluScan, Listing, Crawler]
+    end
+
+    test "and it drives the sweep, not just the listing" do
+      p = ReactiveDag.Node.graph([Agendas, Transcripts, Zulu])
+
+      {:ok, _} = Source.poll_all(p, order: [:zulu])
+
+      # every scanner ran; the declared one first
+      assert Crawler.polls() != []
+      assert Listing.polls() != []
+    end
+
+    test "an unlisted source follows in cell order" do
+      p = ReactiveDag.Node.graph([Agendas, Transcripts, Zulu])
+
+      assert Source.scanners(p, order: [:zulu]) == [ZuluScan, Crawler, Listing]
+    end
+
+    test "naming a cell with no scanner is ignored, not an error" do
+      p = ReactiveDag.Node.graph([Agendas, Transcripts, Zulu])
+
+      assert Source.scanners(p, order: [:nope, :zulu]) == [ZuluScan, Crawler, Listing]
+    end
+  end
 end
