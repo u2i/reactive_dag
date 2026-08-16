@@ -33,7 +33,7 @@ defmodule ReactiveDag.ScanScheduleTest do
     @impl true
     def id, do: :crawler
     @impl true
-    def leaf_cells(_g), do: ["agendas"]
+    def leaf_cells(_g), do: ["agendas", "minutes"]
     @impl true
     def origin, do: %{label: "City agenda center"}
     @impl true
@@ -57,6 +57,60 @@ defmodule ReactiveDag.ScanScheduleTest do
     def poll(opts) do
       Agent.update(__MODULE__, &[opts | &1])
       {:ok, %{changed: []}}
+    end
+  end
+
+  # the SECOND leaf of the same crawler — one crawl of one site whose rows land
+  # in two cells. cascade's agenda_center is exactly this.
+  defmodule Minutes do
+    use Ash.Resource,
+      domain: Domain,
+      data_layer: Ash.DataLayer.Ets,
+      extensions: [ReactiveDag.Node]
+
+    ets do
+    end
+
+    attributes do
+      attribute(:key, :string, primary_key?: true, allow_nil?: false, public?: true)
+    end
+
+    actions do
+      defaults([:read, :destroy])
+      create(:upsert, upsert?: true, accept: [:key])
+    end
+
+    reactive do
+      id(:minutes)
+      leaf?(true)
+      scan(ReactiveDag.ScanScheduleTest.Crawler, every: "0 * * * *")
+    end
+  end
+
+  # the same scanner on a DIFFERENT cadence — a deliberate second pass, which
+  # must survive deduplication
+  defmodule MinutesNightly do
+    use Ash.Resource,
+      domain: Domain,
+      data_layer: Ash.DataLayer.Ets,
+      extensions: [ReactiveDag.Node]
+
+    ets do
+    end
+
+    attributes do
+      attribute(:key, :string, primary_key?: true, allow_nil?: false, public?: true)
+    end
+
+    actions do
+      defaults([:read, :destroy])
+      create(:upsert, upsert?: true, accept: [:key])
+    end
+
+    reactive do
+      id(:minutes)
+      leaf?(true)
+      scan(ReactiveDag.ScanScheduleTest.Crawler, every: "0 3 * * *")
     end
   end
 
@@ -141,7 +195,7 @@ defmodule ReactiveDag.ScanScheduleTest do
     :ok
   end
 
-  defp plan, do: ReactiveDag.Node.graph([Agendas, Transcripts])
+  defp plan, do: ReactiveDag.Node.graph([Agendas, Minutes, Transcripts])
 
   describe "standing args" do
     test "a routine poll gets the leaf's declared default" do
@@ -250,7 +304,7 @@ defmodule ReactiveDag.ScanScheduleTest do
 
     test "a cell with no scanner reports it, rather than failing" do
       # a host renders this as "no refresh available", not as an error
-      p = ReactiveDag.Node.graph([Agendas, Transcripts, Derived])
+      p = ReactiveDag.Node.graph([Agendas, Minutes, Transcripts, Derived])
 
       assert Source.poll_cell(p, "derived") == {:error, :no_scanner}
     end
@@ -296,11 +350,13 @@ defmodule ReactiveDag.ScanScheduleTest do
     test "one entry per scanned cell, cadence or not" do
       jobs = Source.scan_jobs(plan())
 
-      assert Enum.map(jobs, & &1.cell) == ["agendas", "transcripts"]
+      # per CELL — a control panel gives a human a button per leaf, and each
+      # leaf declares its own bound. Only the scheduler dedupes.
+      assert Enum.map(jobs, & &1.cell) == ["agendas", "minutes", "transcripts"]
     end
 
     test "each carries what its leaf declared" do
-      [agendas, transcripts] = Source.scan_jobs(plan())
+      [agendas, _minutes, transcripts] = Source.scan_jobs(plan())
 
       assert agendas.source == Crawler
       assert agendas.args == [recent: true]
@@ -313,10 +369,30 @@ defmodule ReactiveDag.ScanScheduleTest do
     end
 
     test "crontab/2 is a projection of the subset that declared a cadence" do
+      # ...deduplicated BY SCANNER. `agendas` and `minutes` are one crawl of one
+      # site, so scheduling both would fetch it twice an hour and the second poll
+      # would mark rows the first already handled.
       with_cadence = Source.scan_jobs(plan()) |> Enum.filter(& &1.every) |> Enum.map(& &1.cell)
 
+      assert with_cadence == ["agendas", "minutes"], "both leaves declare a cadence"
+
       assert Enum.map(Source.crontab(plan(), MyWorker), fn {_c, _w, [args: a]} -> a["cell"] end) ==
-               with_cadence
+               ["agendas"]
+    end
+
+    test "two leaves on one scanner produce ONE scheduled crawl" do
+      entries = Source.crontab(plan(), MyWorker)
+
+      assert length(entries) == 1
+      assert [{"0 * * * *", MyWorker, [args: %{"cell" => "agendas"}]}] = entries
+    end
+
+    test "but two DIFFERENT cadences are two entries, because someone meant that" do
+      # declaring an hourly and a nightly pass of the same source is a choice;
+      # silently collapsing it would be the library overruling the author
+      p = ReactiveDag.Node.graph([Agendas, MinutesNightly, Transcripts])
+
+      assert length(Source.crontab(p, MyWorker)) == 2
     end
 
     test "a derived cell is not a unit of scannable work" do

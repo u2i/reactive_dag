@@ -432,6 +432,24 @@ defmodule ReactiveDag.Source do
   correct outcome for a scanner cheap enough to run on any cadence the host
   likes.
 
+  ## One entry per SCANNER, not per leaf
+
+  A source feeding several leaves — one crawl of one site whose rows land in two
+  cells — is ONE unit of scheduled work. `scan_jobs/1` lists it per-cell, which
+  is right for a control panel (a human triggers a leaf, and each leaf declares
+  its own bound), and wrong for a scheduler: two leaves declaring the same module
+  would emit two entries and crawl the same site twice an hour, each poll marking
+  both leaves and the second achieving nothing.
+
+  So entries are deduplicated by scanner. The `"cell"` carried is the first of
+  its leaves alphabetically — any of them reaches the same scanner, and
+  `refresh/3` marks every leaf the poll reports regardless of which one was
+  named.
+
+  Two leaves declaring DIFFERENT cadences for one scanner get one entry each, on
+  the assumption that a host writing two different cadences meant them; the
+  duplicate crawl is then declared rather than accidental.
+
   ## Adding your own arguments
 
   A crontab entry is built once at config time, so anything it carries is fixed
@@ -451,9 +469,18 @@ defmodule ReactiveDag.Source do
   def crontab(graph, worker \\ ReactiveDag.ScanWorker, opts \\ []) do
     extra = Keyword.get(opts, :args, %{})
 
-    for %{every: every, cell: cell} <- scan_jobs(graph), not is_nil(every) do
+    graph
+    |> scan_jobs()
+    |> Enum.reject(&is_nil(&1.every))
+    # one poll per scanner per cadence: the same source on two leaves is one
+    # crawl, and scheduling it twice is duplicated I/O whose second run marks
+    # rows the first already handled
+    |> Enum.group_by(&{&1.source, &1.every})
+    |> Enum.map(fn {{_source, every}, jobs} ->
+      cell = jobs |> Enum.map(& &1.cell) |> Enum.min()
       {every, worker, args: Map.merge(extra, %{"cell" => cell})}
-    end
+    end)
+    |> Enum.sort_by(fn {every, _w, args: %{"cell" => c}} -> {c, every} end)
   end
 
   @doc """
@@ -465,11 +492,16 @@ defmodule ReactiveDag.Source do
   """
   @spec standing_args(graph()) :: %{module() => keyword()}
   def standing_args(graph) do
+    # MERGED across the leaves sharing a scanner, not last-one-wins. A source
+    # feeding several leaves is polled ONCE, so there is one set of args for
+    # that poll; letting a second leaf's silence overwrite the first leaf's
+    # declared bound turns a cheap poll into a full crawl (or the reverse)
+    # depending on map ordering, which is not a thing anyone declared.
     for cell <- Map.values(graph.cells),
         mod = cell.meta[:scan],
         not is_nil(mod),
-        into: %{} do
-      {mod, cell.meta[:scan_args] || []}
+        reduce: %{} do
+      acc -> Map.update(acc, mod, cell.meta[:scan_args] || [], &Keyword.merge(&1, cell.meta[:scan_args] || []))
     end
   end
 
