@@ -32,13 +32,20 @@ if Code.ensure_loaded?(Oban.Worker) do
     much more work than intended — a slice or an explicit key list keeps it
     proportional, which is the whole point of the engine.
 
-    ## The fingerprint still applies
+    ## It invalidates first
 
-    A `per_key` node skips rows whose declared inputs have not moved, and after a
-    prompt change they have not. So reprocessing such a node marks its keys and
-    the recompute skips them — the job reports how many were claimed against how
-    many actually moved, so a no-op is visible rather than mistaken for success.
-    Making the recompute ignore its fingerprint is a separate, deliberate change.
+    A `per_key` node skips rows whose declared inputs have not moved — and after
+    a prompt change they have not. Marking alone would therefore skip exactly the
+    rows you asked it to redo.
+
+    So the stored fingerprint is CLEARED on the selected keys before they are
+    marked. That is not a bypass: a null fingerprint means "no valid prior
+    result", which is precisely true once the code that produced it has changed.
+    The recompute then runs for the ordinary reason, and stores a fresh
+    fingerprint as it always would.
+
+    `invalidated` in the telemetry says how many rows that touched — 0 on a node
+    with no fingerprint column, which needs no invalidation to recompute.
 
     ## Telemetry
 
@@ -67,6 +74,13 @@ if Code.ensure_loaded?(Oban.Worker) do
 
         cell ->
           keys = select(cell, args)
+
+          # Clear the stored fingerprints FIRST, or a `per_key` node skips the
+          # very rows we just claimed: its fingerprint answers "did the input
+          # move?" and after a code change it did not. A null fingerprint means
+          # "no valid prior result", which is exactly true here.
+          invalidated = invalidate(cell, keys)
+
           mark(plan, cell_id, keys, reason)
 
           t0 = System.monotonic_time(:microsecond)
@@ -77,6 +91,7 @@ if Code.ensure_loaded?(Oban.Worker) do
             %{
               duration_us: System.monotonic_time(:microsecond) - t0,
               claimed: claimed_count(keys),
+              invalidated: length(invalidated),
               changed: ReactiveDag.Drain.Report.changed_total(report),
               passes: report.passes
             },
@@ -112,6 +127,10 @@ if Code.ensure_loaded?(Oban.Worker) do
 
       :ok
     end
+
+    # `"*"` is not a key list, so everything the cell holds is invalidated.
+    defp invalidate(cell, ["*"]), do: Rows.invalidate(cell, :all)
+    defp invalidate(cell, keys), do: Rows.invalidate(cell, keys)
 
     defp claimed_count(["*"]), do: nil
     defp claimed_count(keys), do: length(keys)

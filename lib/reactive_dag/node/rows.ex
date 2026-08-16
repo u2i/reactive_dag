@@ -245,6 +245,61 @@ defmodule ReactiveDag.Node.Rows do
   defp resolve_values(values), do: values
 
   @doc """
+  Clear the stored fingerprint on `keys`, so the next recompute treats those rows
+  as needing work.
+
+  A fingerprint answers *"did the input move?"*. After a prompt change or a fixed
+  fold the input has NOT moved and the answer is still valid — it is simply the
+  wrong question, because what changed was the function. A `per_key` node would
+  therefore skip exactly the rows you asked it to redo.
+
+  Clearing the stored value makes the comparison fail honestly rather than
+  bypassing it: a null fingerprint means *"no valid prior result"*, which is
+  precisely true once the code that produced it has changed. Nothing needs a
+  force flag threaded through the recompute, and the next run stores a fresh
+  fingerprint as it always would.
+
+  A node with no fingerprint column has nothing to clear and recomputes
+  regardless, so this is a no-op there. Returns the keys it actually cleared.
+  """
+  @spec invalidate(Cell.t() | source(), [String.t()] | :all) :: [String.t()]
+  def invalidate(%Cell{meta: meta}, keys), do: invalidate(meta, keys)
+
+  def invalidate(%{} = source, keys) do
+    attr = source[:fingerprint_attribute] || ReactiveDag.Node.Fingerprint.default_attribute()
+
+    with resource when not is_nil(resource) <- queryable(source),
+         attribute when not is_nil(attribute) <- Ash.Resource.Info.attribute(resource, attr) do
+      source
+      |> rows_to_clear(keys)
+      |> Enum.map(fn row ->
+        row.record
+        |> Ash.Changeset.for_update(update_action(resource), %{attr => nil})
+        |> Ash.update!()
+
+        row.key
+      end)
+    else
+      _ -> []
+    end
+  end
+
+  defp rows_to_clear(source, :all), do: all(source)
+
+  defp rows_to_clear(source, keys) do
+    want = MapSet.new(keys)
+    source |> all() |> Enum.filter(&MapSet.member?(want, &1.key))
+  end
+
+  # a node's `:upsert` is a create action, so clearing goes through an UPDATE
+  defp update_action(resource) do
+    case Ash.Resource.Info.primary_action(resource, :update) do
+      %{name: name} -> name
+      _ -> :update
+    end
+  end
+
+  @doc """
   Reconcile a leaf's rows against the key set a scan found — the algorithm every
   leaf driver otherwise hand-rolls.
 
