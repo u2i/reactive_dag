@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.17.0-rc.20](https://github.com/u2i/reactive_dag/compare/v0.17.0-rc.19...v0.17.0-rc.20) (2026-08-16)
+
+
+### Features
+
+* scan/reprocess telemetry carries the job args, and emits :start ([d553985](https://github.com/u2i/reactive_dag/commit/d553985685d0f0fdf3339ed4d4f27311a97426ae))
+* scan/reprocess telemetry carries the job args, and emits :start ([fb54b0a](https://github.com/u2i/reactive_dag/commit/fb54b0a47815890b7457088eb9670ef8c97b8949))
+
 ## [0.17.0-rc.19](https://github.com/u2i/reactive_dag/compare/v0.17.0-rc.18...v0.17.0-rc.19) (2026-08-16)
 
 
