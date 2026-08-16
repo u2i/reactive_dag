@@ -33,7 +33,7 @@ defmodule ReactiveDag.ScanWorkerTest do
     @impl true
     def id, do: :crawler
     @impl true
-    def leaf_cells(_g), do: ["docs"]
+    def leaf_cells(_g), do: ["docs", "notices"]
     @impl true
     def poll(opts) do
       Agent.update(__MODULE__, &%{&1 | polls: [opts | &1.polls]})
@@ -42,19 +42,22 @@ defmodule ReactiveDag.ScanWorkerTest do
   end
 
   defmodule Docs do
-    use Ash.Resource, domain: Domain, data_layer: Ash.DataLayer.Ets, extensions: [ReactiveDag.Node]
+    use Ash.Resource,
+      domain: Domain,
+      data_layer: Ash.DataLayer.Ets,
+      extensions: [ReactiveDag.Node]
 
     ets do
     end
 
     attributes do
-      attribute :key, :string, primary_key?: true, allow_nil?: false, public?: true
-      attribute :category, :string, public?: true
+      attribute(:key, :string, primary_key?: true, allow_nil?: false, public?: true)
+      attribute(:category, :string, public?: true)
     end
 
     actions do
-      defaults [:read, :destroy]
-      create :upsert, upsert?: true, accept: [:key, :category]
+      defaults([:read, :destroy])
+      create(:upsert, upsert?: true, accept: [:key, :category])
     end
 
     reactive do
@@ -64,21 +67,53 @@ defmodule ReactiveDag.ScanWorkerTest do
     end
   end
 
-  defmodule Totals do
-    use Ash.Resource, domain: Domain, data_layer: Ash.DataLayer.Ets, extensions: [ReactiveDag.Node]
+  # A SECOND leaf fed by the same scanner — one crawl of one upstream that lands
+  # rows in two places. This is the shape a host means by "one poll is one unit
+  # of work": the source is the unit, and the cells are where its output goes.
+  defmodule Notices do
+    use Ash.Resource,
+      domain: Domain,
+      data_layer: Ash.DataLayer.Ets,
+      extensions: [ReactiveDag.Node]
 
     ets do
     end
 
     attributes do
-      attribute :key, :string, primary_key?: true, allow_nil?: false, public?: true
-      attribute :category, :string, public?: true
-      attribute :n, :integer, public?: true
+      attribute(:key, :string, primary_key?: true, allow_nil?: false, public?: true)
+      attribute(:category, :string, public?: true)
     end
 
     actions do
-      defaults [:read, :destroy]
-      create :upsert, upsert?: true, accept: [:key, :category, :n]
+      defaults([:read, :destroy])
+      create(:upsert, upsert?: true, accept: [:key, :category])
+    end
+
+    reactive do
+      id(:notices)
+      leaf?(true)
+      scan(ReactiveDag.ScanWorkerTest.Crawler)
+    end
+  end
+
+  defmodule Totals do
+    use Ash.Resource,
+      domain: Domain,
+      data_layer: Ash.DataLayer.Ets,
+      extensions: [ReactiveDag.Node]
+
+    ets do
+    end
+
+    attributes do
+      attribute(:key, :string, primary_key?: true, allow_nil?: false, public?: true)
+      attribute(:category, :string, public?: true)
+      attribute(:n, :integer, public?: true)
+    end
+
+    actions do
+      defaults([:read, :destroy])
+      create(:upsert, upsert?: true, accept: [:key, :category, :n])
     end
 
     reactive do
@@ -124,11 +159,58 @@ defmodule ReactiveDag.ScanWorkerTest do
     Application.put_env(:reactive_dag, :repo, FakeRepo)
     on_exit(fn -> Application.put_env(:reactive_dag, :repo, prev) end)
 
-    for r <- [Docs, Totals], row <- Ash.read!(r), do: Ash.destroy!(row)
+    for r <- [Docs, Notices, Totals], row <- Ash.read!(r), do: Ash.destroy!(row)
     :ok
   end
 
-  defp plan, do: ReactiveDag.Node.graph([Docs, Totals])
+  defp plan, do: ReactiveDag.Node.graph([Docs, Notices, Totals])
+
+  describe "one poll, several leaves" do
+    # A source feeding two leaves is ONE crawl whose rows land in two places.
+    # `scan_jobs/1` lists it per-cell — that is what a scheduler and a control
+    # panel need — but a host that treats the poll as its unit of work does not
+    # have to poll twice: a scanner returns `changed:` keyed BY LEAF and a single
+    # refresh marks them all, under one reason.
+    test "a map-shaped result marks each leaf it names" do
+      Crawler.returns(%{changed: %{"docs" => ["d1"], "notices" => ["n1"]}})
+
+      {:ok, result} = Source.refresh(plan(), "docs", reason: "scan:run-42")
+
+      assert result.marked == %{"docs" => ["d1"], "notices" => ["n1"]}
+      assert Enum.sort(result.changed) == ["d1", "n1"]
+    end
+
+    test "and the reason rides through to every one of them" do
+      # this is what makes a run id work without any library support for run ids:
+      # `:reason` is a free string, so the frontier rows say which run dirtied
+      # them, across every leaf the one poll touched
+      Crawler.returns(%{changed: %{"docs" => ["d1"], "notices" => ["n1"]}})
+
+      {:ok, _} = Source.refresh(plan(), "docs", reason: "scan:run-42")
+
+      marks = FakeRepo.marks()
+
+      assert {"docs", "d1", "scan:run-42"} in marks
+      assert {"notices", "n1", "scan:run-42"} in marks
+    end
+
+    test "a leaf the poll did not name is not marked" do
+      Crawler.returns(%{changed: %{"docs" => ["d1"]}})
+
+      {:ok, result} = Source.refresh(plan(), "docs")
+
+      refute Map.has_key?(result.marked, "notices")
+    end
+
+    test "a flat list still belongs to the cell that was polled" do
+      # the single-leaf form is unchanged: no host has to adopt the map shape
+      Crawler.returns(%{changed: ["d1"]})
+
+      {:ok, result} = Source.refresh(plan(), "docs")
+
+      assert result.marked == %{"docs" => ["d1"]}
+    end
+  end
 
   describe "refresh/3 marks what the poll changed" do
     test "a flat key list belongs to the polled cell" do

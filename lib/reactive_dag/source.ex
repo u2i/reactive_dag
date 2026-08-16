@@ -394,7 +394,9 @@ defmodule ReactiveDag.Source do
   Keyed by CELL rather than by source, because a source feeding several leaves
   is several units of work — each with its own declared bound.
   """
-  @spec scan_jobs(graph()) :: [%{cell: String.t(), source: module(), args: keyword(), every: String.t() | nil}]
+  @spec scan_jobs(graph()) :: [
+          %{cell: String.t(), source: module(), args: keyword(), every: String.t() | nil}
+        ]
   def scan_jobs(graph) do
     for {id, cell} <- graph.cells,
         mod = cell.meta[:scan],
@@ -411,7 +413,7 @@ defmodule ReactiveDag.Source do
 
   @doc """
   The Oban-style crontab entries a plan's leaves declare, as
-  `{cron, worker, args: %{"source" => id}}`.
+  `{cron, worker, args: %{"cell" => id}}`.
 
   The library **never schedules anything**. A leaf declaring `every:` states how
   often a routine poll *should* run; this collects those declarations into data
@@ -425,15 +427,32 @@ defmodule ReactiveDag.Source do
   supervision tree and out of its deploy story — and lets a host filter, rewrite
   or ignore the entries, which it could not do if they were already scheduled.
 
-  The worker receives `%{"source" => "agenda_center"}` and is expected to poll
-  that one scanner. A leaf declaring no `every:` contributes nothing, which is
-  the correct outcome for a scanner cheap enough to run on any cadence the host
+  The worker receives `%{"cell" => "agenda_docs"}` and is expected to poll that
+  one leaf. A leaf declaring no `every:` contributes nothing, which is the
+  correct outcome for a scanner cheap enough to run on any cadence the host
   likes.
+
+  ## Adding your own arguments
+
+  A crontab entry is built once at config time, so anything it carries is fixed
+  for every firing — a per-run id has to be minted when the job fires, inside
+  the worker. What a host CAN do here is add its own standing arguments, with
+  `args:`:
+
+      Source.crontab(plan, MyApp.ScanWorker, args: %{"queue" => "crawls"})
+
+  merged UNDER the `"cell"` this computes, so a typo cannot silently retarget
+  the job at a different leaf. A host that wants per-firing values wraps the
+  worker rather than the crontab: mint the id in `perform/1`, then call
+  `refresh/3` with `reason: "scan:\#{run_id}"` — `:reason` is a free string and
+  rides through to the frontier rows, so the trace says which run dirtied a cell.
   """
-  @spec crontab(graph(), module()) :: [{String.t(), module(), keyword()}]
-  def crontab(graph, worker \\ ReactiveDag.ScanWorker) do
+  @spec crontab(graph(), module(), keyword()) :: [{String.t(), module(), keyword()}]
+  def crontab(graph, worker \\ ReactiveDag.ScanWorker, opts \\ []) do
+    extra = Keyword.get(opts, :args, %{})
+
     for %{every: every, cell: cell} <- scan_jobs(graph), not is_nil(every) do
-      {every, worker, args: %{"cell" => cell}}
+      {every, worker, args: Map.merge(extra, %{"cell" => cell})}
     end
   end
 
