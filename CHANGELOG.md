@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.17.0-rc.16](https://github.com/u2i/reactive_dag/compare/v0.17.0-rc.15...v0.17.0-rc.16) (2026-08-16)
+
+
+### Bug Fixes
+
+* let the boolean :upsert form report :created ([#107](https://github.com/u2i/reactive_dag/issues/107)) ([15d37ea](https://github.com/u2i/reactive_dag/commit/15d37ea8f25f8d88edc75d953587c05614ad0232))
+* let the boolean :upsert form report :created ([#107](https://github.com/u2i/reactive_dag/issues/107)) ([3bf040e](https://github.com/u2i/reactive_dag/commit/3bf040ec6c49d07a2fd77801b0a26660f29b93f1))
+
 ## [0.17.0-rc.15](https://github.com/u2i/reactive_dag/compare/v0.17.0-rc.14...v0.17.0-rc.15) (2026-08-16)
 
 
