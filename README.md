@@ -321,13 +321,13 @@ defmodule MyApp.Docs do
 
   reactive do
     leaf? true
-    scan MyApp.DocCrawler
+    poll MyApp.DocCrawler
     fingerprint [:content_md5]     # what counts as a changed observation
   end
 end
 ```
 
-The source implements three callbacks. `poll/1` fetches, hands what it observed
+The source implements two callbacks. `poll/1` fetches, hands what it observed
 to `reconcile/3`, and returns the keys that changed:
 
 ```elixir
@@ -336,9 +336,6 @@ defmodule MyApp.DocCrawler do
 
   @impl true
   def id, do: :doc_crawler
-
-  @impl true
-  def leaf_cells(_graph), do: ["docs"]
 
   @impl true
   def origin, do: %{label: "City site · agendas", url: "https://example.gov"}
@@ -383,10 +380,13 @@ end
 ReactiveDag.Drain.run(plan, recompute: ..., key_rule: ...)
 ```
 
-`poll_all/1` finds every scanner from the plan's `scan` declarations, so there is
+`poll_all/1` finds every scanner from the plan's `poll` declarations, so there is
 no hand-kept list to fall out of date. `graph/2` has already checked that each
-declared module implements the behaviour *and* that its `leaf_cells/1` claims the
-leaf it is attached to.
+declared module implements the behaviour.
+
+A source is a NODE, so everything reading it is an ordinary edge — one crawl
+whose rows belong to several downstream nodes needs no scan-specific machinery,
+just a consumer per part.
 
 ### Two things a scanner must get right
 
@@ -418,8 +418,9 @@ the host's normal write, then a dirty mark (or `dirties_on`).
 
 **More:** [Sources and scanning](https://hexdocs.pm/reactive_dag/sources.html)
 covers the parts a real scanner runs into — why the poll/drain split is a design
-invariant rather than a convention, multi-leaf and fan-out sources
-(`leaf_cells/1` when no single leaf owns the cells), the corollary when *some*
+invariant rather than a convention, one crawl feeding several downstream nodes
+(and `{:skip, key}`, which is how a projecting node declines what is not its
+own), the corollary when *some*
 upstreams fail and others succeed, choosing between `dirties_on` and a `Source`,
 and when a scanner is the wrong tool.
 

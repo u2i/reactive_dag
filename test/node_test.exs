@@ -12,15 +12,23 @@ defmodule ReactiveDag.NodeTest do
     end
   end
 
+  defmodule FakeAgendaDriver do
+    @behaviour ReactiveDag.Source
+    @impl true
+    def id, do: :agenda_scan
+    @impl true
+    def poll(_opts), do: {:ok, %{changed: []}}
+  end
+
   defmodule AgendaDocs do
-    # an OBSERVED-style leaf: cascade's source+observed pair collapses onto the
-    # leaf resource — the driver binding (source/driver) rides on the leaf itself.
+    # a SOURCE node: its rows come from outside the graph. `poll` names the
+    # scanner, and everything reading this node is an ordinary edge.
     use Ash.Resource, domain: Domain, data_layer: Ash.DataLayer.Simple, extensions: [ReactiveDag.Node]
     reactive do
       op :leaf
       leaf? true
       source :agenda_scan
-      driver FakeAgendaDriver
+      poll ReactiveDag.NodeTest.FakeAgendaDriver
     end
   end
 
@@ -115,10 +123,10 @@ defmodule ReactiveDag.NodeTest do
     assert leaf.inputs == []
   end
 
-  test "an observed-style leaf carries its source/driver binding in meta" do
+  test "a source node carries its poll binding in meta" do
     leaf = ReactiveDag.Node.to_cell(AgendaDocs)
     assert leaf.meta.source == :agenda_scan
-    assert leaf.meta.driver == FakeAgendaDriver
+    assert leaf.meta.scan == FakeAgendaDriver
     assert leaf.meta.compute == nil
   end
 
