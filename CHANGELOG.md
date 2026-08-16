@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.17.0-rc.24](https://github.com/u2i/reactive_dag/compare/v0.17.0-rc.23...v0.17.0-rc.24) (2026-08-16)
+
+
+### Features
+
+* a sweep keeps its per-source detail, and reports progress ([b1ac8fb](https://github.com/u2i/reactive_dag/commit/b1ac8fbe60efd5af84be58cacfab4bcdf753484b))
+* a sweep keeps its per-source detail, and reports progress ([#133](https://github.com/u2i/reactive_dag/issues/133)) ([75c9fe9](https://github.com/u2i/reactive_dag/commit/75c9fe91ebb5295df87b89eb186b2e74bfb26feb))
+
 ## [0.17.0-rc.23](https://github.com/u2i/reactive_dag/compare/v0.17.0-rc.22...v0.17.0-rc.23) (2026-08-16)
 
 
