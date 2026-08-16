@@ -61,7 +61,7 @@ if Code.ensure_loaded?(Oban.Worker) do
     @impl Oban.Worker
     def perform(%Oban.Job{args: args}) do
       cell_id = Map.fetch!(args, "cell")
-      plan = plan(args)
+      plan = ReactiveDag.Job.plan(args, __MODULE__)
       opts = poll_opts(args)
 
       t0 = System.monotonic_time(:microsecond)
@@ -72,7 +72,7 @@ if Code.ensure_loaded?(Oban.Worker) do
             # Drain even when nothing changed: another source may have marked
             # cells this job is now the first to reach, and an empty frontier is
             # a no-op anyway.
-            {:ok, report} = Drain.run(plan, drain_opts(args))
+            {:ok, report} = Drain.run(plan, ReactiveDag.Job.drain_opts(args))
 
             :telemetry.execute(
               [:reactive_dag, :scan, :stop],
@@ -121,35 +121,6 @@ if Code.ensure_loaded?(Oban.Worker) do
       )
     end
 
-    # The plan is built from resource modules at runtime, so it cannot ride in a
-    # job argument. A host names the MFA once in config; a job may override it,
-    # which is what lets one app schedule scans over more than one graph.
-    defp plan(%{"plan_mfa" => [m, f, a]}), do: apply(mod(m), String.to_existing_atom(f), a)
-
-    defp plan(_args) do
-      case Application.get_env(:reactive_dag, :plan_mfa) do
-        {m, f, a} ->
-          apply(m, f, a)
-
-        nil ->
-          raise """
-          reactive_dag: ReactiveDag.ScanWorker needs a plan, and a job argument cannot \
-          carry one (a plan is built from resource modules at runtime).
-
-          Name it once:
-
-              config :reactive_dag, plan_mfa: {MyApp.Dag, :plan, []}
-
-          or per job:
-
-              %{"cell" => "docs", "plan_mfa" => ["MyApp.Dag", "plan", []]}
-          """
-      end
-    end
-
-    defp mod("Elixir." <> _ = m), do: String.to_existing_atom(m)
-    defp mod(m), do: String.to_existing_atom("Elixir." <> m)
-
     # JSON round-trips string keys; the poll contract takes a keyword list. Only
     # the keys a scanner declares are meaningful, so this is a straight
     # translation rather than a schema.
@@ -159,14 +130,5 @@ if Code.ensure_loaded?(Oban.Worker) do
 
     defp poll_opts(_args), do: []
 
-    defp drain_opts(args) do
-      [
-        recompute: module_or(args["recompute"], ReactiveDag.Node.Recompute),
-        key_rule: module_or(args["key_rule"], ReactiveDag.Node.KeyRule)
-      ]
-    end
-
-    defp module_or(nil, default), do: default
-    defp module_or(name, _default), do: mod(name)
   end
 end
