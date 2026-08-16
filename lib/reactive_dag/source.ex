@@ -181,6 +181,16 @@ defmodule ReactiveDag.Source do
   Anything unlisted follows, in cell order. Unlike `crontab/3`'s `order:`, this
   one is a real happens-before: these polls run one after another in this
   process, so a later source genuinely sees what an earlier one wrote.
+
+  ## Telemetry
+
+  `[:reactive_dag, :scan, :source_stop]` fires as each source finishes, with
+  `%{source: module, result: result}` — including the failures, since a source
+  that could not run is a thing a host wants recorded.
+
+  Sources are polled one at a time, so this doubles as PROGRESS: a sweep over
+  eight sources can run for minutes, and without it the only observable moments
+  are the beginning and the end of the whole run.
   """
   @spec poll_all(graph(), keyword()) :: {:ok, map()} | {:error, [{module(), term()}]}
   def poll_all(graph, opts \\ []) do
@@ -195,13 +205,35 @@ defmodule ReactiveDag.Source do
         # what keeps a routine `poll_all(plan)` cheap without any call site
         # remembering the bound, while still letting a deliberate deep pass say
         # so — `poll_all(plan, recent: false)`.
-        {mod, safe_poll(mod, Keyword.merge(Map.get(standing, mod, []), opts))}
+        t0 = System.monotonic_time(:microsecond)
+        result = safe_poll(mod, Keyword.merge(Map.get(standing, mod, []), opts))
+
+        # PER SOURCE, as it happens. A sweep is one job that can run for
+        # minutes, so `:start` and `:stop` on the whole run are the only two
+        # moments a host sees — and neither says which source is going now, or
+        # what the one that just finished did. This is the progress signal, and
+        # the per-source record: "machines polled at 14:03, wrote 4 rows,
+        # Huntress unreachable" (u2i/reactive_dag#133).
+        :telemetry.execute(
+          [:reactive_dag, :scan, :source_stop],
+          %{duration_us: System.monotonic_time(:microsecond) - t0},
+          %{source: mod, result: result}
+        )
+
+        {mod, result}
       end)
       |> Enum.split_with(fn {_mod, result} -> match?({:ok, _}, result) end)
 
     case errors do
-      [] -> {:ok, Map.new(oks, fn {mod, {:ok, r}} -> {mod, r} end)}
-      _ -> {:error, Enum.map(errors, fn {mod, {:error, reason}} -> {mod, reason} end)}
+      [] ->
+        {:ok, Map.new(oks, fn {mod, {:ok, r}} -> {mod, r} end)}
+
+      _ ->
+        # `{:error, failures}` and not also the successes: hosts match on this
+        # shape, and widening it is a breaking change nobody asked for. What
+        # DID land is not lost — every source emitted `:source_stop` with its
+        # own result as it finished, failures included.
+        {:error, Enum.map(errors, fn {mod, {:error, reason}} -> {mod, reason} end)}
     end
   end
 

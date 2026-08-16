@@ -56,6 +56,17 @@ if Code.ensure_loaded?(Oban.Worker) do
     `ReactiveDag.Drain.run/2` directly: that is all this module does. It exists
     to save you writing the loop, not to stop you writing a different one.
 
+    ## Watching a sweep
+
+    A sweep is one job that can run for minutes, so `:start` and `:stop` bracket
+    the whole run and say nothing about what is happening inside it.
+    `[:reactive_dag, :scan, :source_stop]` fires as each source finishes,
+    carrying that source's own result — which source went, how long it took, and
+    what it found. That is the progress signal and the per-source record both.
+
+    `:stop` then carries `results` (`%{module => result}`) as well as the
+    aggregate, so a host that only wants the end state has it in one payload.
+
     ## Three outcomes
 
     | the scanner returns | the job | why |
@@ -85,6 +96,11 @@ if Code.ensure_loaded?(Oban.Worker) do
     | `[:reactive_dag, :scan, :start]` | `system_time` | `cell`, `args` |
     | `[:reactive_dag, :scan, :stop]` | `duration_us`, `changed`, `passes` | `cell`, `args`, `unreachable`, `report` |
     | `[:reactive_dag, :scan, :exception]` | `duration_us` | `cell`, `args`, `reason` |
+    | `[:reactive_dag, :scan, :source_stop]` | `duration_us` | `source`, `result` |
+
+    `:source_stop` fires once per source inside a sweep, as it finishes. It comes
+    from `Source.poll_all/2` rather than this worker, so a host calling that
+    directly gets the same signal.
 
     A poll can run for minutes, so `:start` is what lets a page show a crawl as
     in-flight rather than appearing only once it is over.
@@ -279,7 +295,19 @@ if Code.ensure_loaded?(Oban.Worker) do
               changed: length(changed),
               passes: report.passes
             },
-            %{cell: :sweep, args: args, sources: Map.keys(results), report: report}
+            # `results` in full, not just its keys. It is `%{module => result}`
+            # — each source's own `changed`, `unreachable` and whatever else it
+            # reported — and it was computed for a total, then thrown away one
+            # line later. A host wanting a per-source record attaches one
+            # handler; one that does not, ignores the key
+            # (u2i/reactive_dag#133).
+            %{
+              cell: :sweep,
+              args: args,
+              sources: Map.keys(results),
+              results: results,
+              report: report
+            }
           )
 
           :ok
