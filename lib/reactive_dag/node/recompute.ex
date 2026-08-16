@@ -69,7 +69,9 @@ defmodule ReactiveDag.Node.Recompute do
   # reconcile shape, where an undeclared right-side member is a finding.
   # `read` may be arity-2 for dirty-key scoping (see `reduce` above).
   def recompute(%Cell{meta: %{join: %{} = j}} = cell, keys) do
-    items = Read.items(cell.meta[:over_source], j.over, j.query, scope(keys), auto_scope(cell, keys))
+    items =
+      Read.items(cell.meta[:over_source], j.over, j.query, scope(keys), auto_scope(cell, keys))
+
     left = index(items, Declarative.side_fn(j.left))
     right = index(items, Declarative.side_fn(j.right))
     key_fn = Declarative.key_fn(j.key, j.key_prefix)
@@ -111,6 +113,7 @@ defmodule ReactiveDag.Node.Recompute do
   # here where a cross-node join was not.
   def recompute(%Cell{meta: %{union: %{} = spec}} = cell, keys) do
     claimed = scope(keys)
+
     {pairs, meta} =
       ReactiveDag.Node.Recompute.Union.pairs(spec, cell.meta[:union_sources] || %{}, claimed)
 
@@ -322,6 +325,11 @@ defmodule ReactiveDag.Node.Recompute do
   # `expand:` rows fan one group out to many keys, so each row must self-key.
   defp expand_pairs(rows, cell_id) when is_list(rows) do
     Enum.map(rows, fn
+      # "this claimed key is not mine" — distinct from "this key is gone", which
+      # is what returning nothing for it would mean. See `materialize/4`.
+      {:skip, key} ->
+        {key, :skip}
+
       %{key: key} = row ->
         {key, row}
 
@@ -342,9 +350,19 @@ defmodule ReactiveDag.Node.Recompute do
   defp materialize(cell, pairs, upsert, claimed) do
     write = writer_fn(cell, upsert)
 
+    {declined, pairs} = Enum.split_with(pairs, &match?({_key, :skip}, &1))
+
     changed = Enum.flat_map(pairs, fn {key, row} -> if write.(key, row), do: [key], else: [] end)
 
-    changed ++ retire_vanished(cell, Enum.map(pairs, &elem(&1, 0)), claimed, upsert)
+    # A DECLINED key is not this node's — it was claimed because an input moved,
+    # and this node has nothing to say about it. That is not the same as a key
+    # whose rows have gone, and it must not be reconciled as one: subtracting it
+    # from the claim would retire it, report it changed, and do so again on every
+    # pass forever. So it leaves the baseline entirely.
+    kept = Enum.map(declined, &elem(&1, 0))
+    produced = Enum.map(pairs, &elem(&1, 0))
+
+    changed ++ retire_vanished(cell, produced ++ kept, claimed, upsert)
   end
 
   # RECONCILE, not just upsert. A fold writes the units it produced; a unit whose
@@ -428,7 +446,8 @@ defmodule ReactiveDag.Node.Recompute do
         case meta[:identity_fields] do
           fields when is_list(fields) ->
             fn _key, row ->
-              ReactiveDag.Node.Payload.upsert_identity(resource, fields, row, action) != :unchanged
+              ReactiveDag.Node.Payload.upsert_identity(resource, fields, row, action) !=
+                :unchanged
             end
 
           _ ->
