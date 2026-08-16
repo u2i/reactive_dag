@@ -31,13 +31,13 @@ defmodule ReactiveDag.InsightsTest do
     end
 
     attributes do
-      attribute :key, :string, primary_key?: true, allow_nil?: false, public?: true
-      attribute :category, :string, public?: true
-      attribute :amount, :float, public?: true
+      attribute(:key, :string, primary_key?: true, allow_nil?: false, public?: true)
+      attribute(:category, :string, public?: true)
+      attribute(:amount, :float, public?: true)
     end
 
     actions do
-      defaults [:read, :destroy]
+      defaults([:read, :destroy])
 
       create :create do
         accept([:key, :category, :amount])
@@ -62,18 +62,18 @@ defmodule ReactiveDag.InsightsTest do
     end
 
     attributes do
-      attribute :key, :string, primary_key?: true, allow_nil?: false, public?: true
-      attribute :category, :string, public?: true
-      attribute :total, :float, public?: true
-      attribute :n, :integer, public?: true
+      attribute(:key, :string, primary_key?: true, allow_nil?: false, public?: true)
+      attribute(:category, :string, public?: true)
+      attribute(:total, :float, public?: true)
+      attribute(:n, :integer, public?: true)
     end
 
     identities do
-      identity :by_key, [:key], pre_check_with: ReactiveDag.InsightsTest.Domain
+      identity(:by_key, [:key], pre_check_with: ReactiveDag.InsightsTest.Domain)
     end
 
     actions do
-      defaults [:read, :destroy]
+      defaults([:read, :destroy])
 
       create :upsert do
         upsert?(true)
@@ -86,8 +86,8 @@ defmodule ReactiveDag.InsightsTest do
       id(:category_totals)
       op(:fold)
 
-      recompute_by :category, to: :expenses, from: :category
-      reduce into: [sum: [amount: :total], count: :n]
+      recompute_by(:category, to: :expenses, from: :category)
+      reduce(into: [sum: [amount: :total], count: :n])
     end
   end
 
@@ -101,12 +101,12 @@ defmodule ReactiveDag.InsightsTest do
     end
 
     attributes do
-      attribute :key, :string, primary_key?: true, allow_nil?: false, public?: true
-      attribute :status, :string, public?: true
+      attribute(:key, :string, primary_key?: true, allow_nil?: false, public?: true)
+      attribute(:status, :string, public?: true)
     end
 
     actions do
-      defaults [:read, :destroy]
+      defaults([:read, :destroy])
 
       create :upsert do
         upsert?(true)
@@ -118,10 +118,20 @@ defmodule ReactiveDag.InsightsTest do
       id(:category_health)
       op(:check)
 
-      reduce over: :category_totals,
-             group_by: :key,
-             into: fn _cat, [row | _] -> %{status: if(row.total < 1000.0, do: "present", else: "failing")} end
+      reduce(
+        over: :category_totals,
+        group_by: :key,
+        into: fn _cat, [row | _] ->
+          %{status: if(row.total < 1000.0, do: "present", else: "failing")}
+        end
+      )
     end
+  end
+
+  defmodule NoopOp do
+    @behaviour ReactiveDag.Op
+    @impl true
+    def recompute(_cell, _keys), do: {:ok, []}
   end
 
   defmodule FakeRepo do
@@ -130,7 +140,9 @@ defmodule ReactiveDag.InsightsTest do
     def query!("INSERT INTO " <> _, params) do
       params
       |> Enum.chunk_every(5)
-      |> Enum.each(fn [cell, key, _r, _t, _prior] -> Agent.update(__MODULE__, &MapSet.put(&1, {cell, key})) end)
+      |> Enum.each(fn [cell, key, _r, _t, _prior] ->
+        Agent.update(__MODULE__, &MapSet.put(&1, {cell, key}))
+      end)
 
       %{rows: []}
     end
@@ -150,9 +162,9 @@ defmodule ReactiveDag.InsightsTest do
       %{rows: Enum.map(keys, &[&1, nil])}
     end
 
-    def query!("SELECT COUNT" <> _, _params), do: %{rows: [[Agent.get(__MODULE__, &MapSet.size/1)]]}
+    def query!("SELECT COUNT" <> _, _params),
+      do: %{rows: [[Agent.get(__MODULE__, &MapSet.size/1)]]}
   end
-
 
   setup do
     start_supervised!(%{id: FakeRepo, start: {FakeRepo, :start_link, []}})
@@ -198,7 +210,9 @@ defmodule ReactiveDag.InsightsTest do
     test "cell_status/2 carries the declaration AND the live coordination state" do
       p = plan()
       Frontier.mark_dirty("expenses", ["*"], "seed")
-      {:ok, _} = Drain.run(p, recompute: ReactiveDag.Node.Recompute, key_rule: ReactiveDag.Node.KeyRule)
+
+      {:ok, _} =
+        Drain.run(p, recompute: ReactiveDag.Node.Recompute, key_rule: ReactiveDag.Node.KeyRule)
 
       status = Insights.cell_status(p, "category_totals")
 
@@ -248,7 +262,7 @@ defmodule ReactiveDag.InsightsTest do
           extensions: [ReactiveDag.Node]
 
         attributes do
-          attribute :key, :string, primary_key?: true, allow_nil?: false, public?: true
+          attribute(:key, :string, primary_key?: true, allow_nil?: false, public?: true)
         end
 
         # no :read action, so Ash.read! raises
@@ -270,6 +284,72 @@ defmodule ReactiveDag.InsightsTest do
       # ...and the declaration is still there, which is the point
       assert status.id == "unreadable"
       assert status.leaf?
+
+      assert status.rows == :unreadable, "the read FAILED, and says so"
+    end
+  end
+
+  describe "why a key count is zero" do
+    # Three different states collapsed into one number. A consumer showing the
+    # same symbol for all three raises an alarm for two non-problems — and one
+    # of them is the publish root the app actually reads.
+    test "a node with rows reports :stored" do
+      status = Insights.cell_status(plan(), "expenses")
+
+      assert status.rows == :stored
+      assert status.key_count > 0
+    end
+
+    test "an EMPTY table is still :stored — zero is a real answer" do
+      for row <- Ash.read!(Expenses), do: Ash.destroy!(row)
+
+      status = Insights.cell_status(plan(), "expenses")
+
+      assert status.rows == :stored
+      assert status.key_count == 0
+    end
+
+    test "a node that keeps its rows elsewhere reports :elsewhere" do
+      # the declared write-elsewhere / escape-hatch shape: Simple, no
+      # attributes, a compute module. Nothing to read is not a failure to read.
+      defmodule Publish do
+        use Ash.Resource,
+          domain: ReactiveDag.InsightsTest.Domain,
+          data_layer: Ash.DataLayer.Simple,
+          extensions: [ReactiveDag.Node]
+
+        reactive do
+          id(:publish)
+          depends_on([:expenses])
+          compute(ReactiveDag.InsightsTest.NoopOp)
+        end
+      end
+
+      plan = ReactiveDag.Node.graph([Expenses, Publish])
+      status = Insights.cell_status(plan, "publish")
+
+      assert status.rows == :elsewhere
+      assert status.key_count == 0
+      assert status.statuses == %{}
+    end
+
+    test "and it is not confused with a failed read" do
+      defmodule Publish2 do
+        use Ash.Resource,
+          domain: ReactiveDag.InsightsTest.Domain,
+          data_layer: Ash.DataLayer.Simple,
+          extensions: [ReactiveDag.Node]
+
+        reactive do
+          id(:publish2)
+          depends_on([:expenses])
+          compute(ReactiveDag.InsightsTest.NoopOp)
+        end
+      end
+
+      plan = ReactiveDag.Node.graph([Expenses, Publish2])
+
+      refute Insights.cell_status(plan, "publish2").rows == :unreadable
     end
   end
 
