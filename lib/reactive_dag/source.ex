@@ -170,14 +170,26 @@ defmodule ReactiveDag.Source do
   Returns `{:ok, %{module => result}}`, or `{:error, failures}` where failures
   are `{module, reason}`: one scanner failing must not silently cancel the
   others, and must not look like success.
+
+  ## Ordering
+
+  Sources are polled SEQUENTIALLY, in cell order. A host whose sweep order
+  carries meaning — observers before the nodes that read them — declares it:
+
+      Source.poll_all(plan, order: [:observations, :verdicts])
+
+  Anything unlisted follows, in cell order. Unlike `crontab/3`'s `order:`, this
+  one is a real happens-before: these polls run one after another in this
+  process, so a later source genuinely sees what an earlier one wrote.
   """
   @spec poll_all(graph(), keyword()) :: {:ok, map()} | {:error, [{module(), term()}]}
   def poll_all(graph, opts \\ []) do
     standing = standing_args(graph)
+    {order, opts} = Keyword.pop(opts, :order)
 
     {oks, errors} =
       graph
-      |> scanners()
+      |> scanners(order: order)
       |> Enum.map(fn mod ->
         # the leaf's declared `args:` are the DEFAULT; the caller's win. That is
         # what keeps a routine `poll_all(plan)` cheap without any call site
@@ -431,7 +443,32 @@ defmodule ReactiveDag.Source do
       Source.crontab(plan, MyApp.ScanWorker, args: %{"queue" => "crawls"})
 
   merged UNDER the `"cell"` this computes, so a typo cannot silently retarget
-  the job at a different leaf. A host that wants per-firing values wraps the
+  the job at a different leaf.
+
+  ## One sweep, not N jobs
+
+  The default emits ONE entry per distinct cadence — a sweep. The job polls
+  every source of that cadence **sequentially, in graph order**, then drains
+  once.
+
+  That is the shape worth defaulting to, because N independent cron entries
+  cannot order themselves: they fire concurrently whatever order the list is in,
+  so a source that needs another to have run first has no way to say so. Inside
+  one job it does — `depends_on` on a source is a sequencing edge, and
+  `scanners/2` sorts by depth.
+
+      # a source that must be polled after :observations
+      reactive do
+        id :verdicts
+        leaf? true
+        poll MyApp.Sources.Verdicts, every: "0 * * * *"
+        depends_on [:observations]
+      end
+
+  `per_cell: true` opts back into one entry per source, for a host that wants
+  independent jobs — separate queues, separate retry policies — and accepts that
+  they are unordered. `order:` then applies to the emitted list, which is a
+  reading convenience rather than a happens-before. A host that wants per-firing values wraps the
   worker rather than the crontab: mint the id in `perform/1`, then call
   `refresh/3` with `reason: "scan:\#{run_id}"` — `:reason` is a free string and
   rides through to the frontier rows, so the trace says which run dirtied a cell.
@@ -440,19 +477,57 @@ defmodule ReactiveDag.Source do
   def crontab(graph, worker \\ ReactiveDag.ScanWorker, opts \\ []) do
     extra = Keyword.get(opts, :args, %{})
 
+    case Keyword.get(opts, :per_cell, false) do
+      false -> sweep_entries(graph, worker, extra)
+      true -> per_cell_entries(graph, worker, extra, Keyword.get(opts, :order))
+    end
+  end
+
+  # ONE entry per distinct cadence, each a sweep. Sources run sequentially
+  # inside the job, in graph order, followed by one drain.
+  defp sweep_entries(graph, worker, extra) do
     graph
     |> scan_jobs()
     |> Enum.reject(&is_nil(&1.every))
-    # one poll per scanner per cadence: the same source on two leaves is one
-    # crawl, and scheduling it twice is duplicated I/O whose second run marks
-    # rows the first already handled
-    |> Enum.group_by(&{&1.source, &1.every})
-    |> Enum.map(fn {{_source, every}, jobs} ->
-      cell = jobs |> Enum.map(& &1.cell) |> Enum.min()
-      {every, worker, args: Map.merge(extra, %{"cell" => cell})}
-    end)
-    |> Enum.sort_by(fn {every, _w, args: %{"cell" => c}} -> {c, every} end)
+    |> Enum.map(& &1.every)
+    |> Enum.uniq()
+    |> Enum.sort()
+    |> Enum.map(fn every -> {every, worker, args: Map.merge(extra, %{"sweep" => true})} end)
   end
+
+  defp per_cell_entries(graph, worker, extra, ordering) do
+    graph
+    |> scan_jobs()
+    |> Enum.reject(&is_nil(&1.every))
+    |> Enum.map(fn job -> {job.every, worker, args: Map.merge(extra, %{"cell" => job.cell})} end)
+    |> order(graph, ordering)
+  end
+
+  # DETERMINISTIC by default, and the default is alphabetical — which is stable
+  # but arbitrary. A host whose scan order carries meaning (observers before the
+  # nodes that read them; a sweep whose later legs need the earlier ones' rows)
+  # says so with `order:`, and anything unlisted keeps the alphabetical tail.
+  #
+  # Not derived from the graph, though the edges do encode "source before its
+  # consumers": crontab entries are independent jobs, and a host that needs one
+  # to finish before the next starts needs a queue with that property, not a
+  # list in a nicer sequence. The order here is which entries are EMITTED, and
+  # saying more than that would be a promise this cannot keep.
+  defp order(entries, _graph, nil), do: Enum.sort_by(entries, &sort_key/1)
+
+  defp order(entries, _graph, declared) when is_list(declared) do
+    declared = Enum.map(declared, &to_string/1)
+    rank = declared |> Enum.with_index() |> Map.new()
+    tail = length(declared)
+
+    Enum.sort_by(entries, fn {_every, _w, args: a} = entry ->
+      {Map.get(rank, a["cell"], tail), sort_key(entry)}
+    end)
+  end
+
+  defp order(entries, _graph, fun) when is_function(fun, 1), do: Enum.sort_by(entries, fun)
+
+  defp sort_key({every, _w, args: a}), do: {a["cell"], every}
 
   @doc """
   The standing `args:` each scanner's leaf declared, as `%{module => keyword}`.
@@ -484,12 +559,40 @@ defmodule ReactiveDag.Source do
 
   @doc "The distinct scanner modules a plan's leaves declare via `scan`."
   @spec scanners(graph()) :: [module()]
-  def scanners(graph) do
+  def scanners(graph, opts \\ []) do
+    # BY DEPTH, then by cell. `poll_all/2` polls these one at a time, so this is
+    # the order real work happens in, and the graph already knows it: a source
+    # that must run after another says so with `depends_on`, which is the
+    # vocabulary every other edge uses.
+    #
+    # Two independent sources are both depth 0 and sort alphabetically — stable,
+    # and as meaningful as their relationship actually is. `order:` overrides
+    # for the case the graph cannot know.
     graph.cells
-    |> Map.values()
-    |> Enum.map(& &1.meta[:scan])
-    |> Enum.reject(&is_nil/1)
+    |> Enum.filter(fn {_id, cell} -> cell.meta[:scan] end)
+    |> Enum.sort_by(fn {id, _cell} -> {Map.get(graph.depths, id, 0), id} end)
+    |> Enum.map(fn {_id, cell} -> cell.meta[:scan] end)
     |> Enum.uniq()
+    |> sequence(graph, Keyword.get(opts, :order))
+  end
+
+  # An explicit override, for an order the graph cannot derive — two sources
+  # with no edge between them whose sequence still matters to the host.
+  defp sequence(scanners, _graph, nil), do: scanners
+
+  defp sequence(scanners, graph, declared) when is_list(declared) do
+    by_cell =
+      for {id, cell} <- graph.cells, mod = cell.meta[:scan], not is_nil(mod), into: %{} do
+        {id, mod}
+      end
+
+    ranked =
+      declared
+      |> Enum.map(&to_string/1)
+      |> Enum.map(&Map.get(by_cell, &1))
+      |> Enum.reject(&is_nil/1)
+
+    Enum.uniq(ranked ++ scanners)
   end
 
   # NB the rescue must not re-wrap: `{:error, reason}` from a well-behaved poll
