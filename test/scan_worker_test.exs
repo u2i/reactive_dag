@@ -46,6 +46,44 @@ defmodule ReactiveDag.ScanWorkerTest do
     end
   end
 
+  # a source owning exactly ONE leaf: a flat key list is unambiguous, so the map
+  # form must not be forced on the common case
+  defmodule Solo do
+    @behaviour Source
+
+    @impl true
+    def id, do: :solo
+    @impl true
+    def leaf_cells(_g), do: ["solo_docs"]
+    @impl true
+    def poll(_opts), do: {:ok, %{changed: ["s1"]}}
+  end
+
+  defmodule SoloDocs do
+    use Ash.Resource,
+      domain: Domain,
+      data_layer: Ash.DataLayer.Ets,
+      extensions: [ReactiveDag.Node]
+
+    ets do
+    end
+
+    attributes do
+      attribute(:key, :string, primary_key?: true, allow_nil?: false, public?: true)
+    end
+
+    actions do
+      defaults([:read, :destroy])
+      create(:upsert, upsert?: true, accept: [:key])
+    end
+
+    reactive do
+      id(:solo_docs)
+      leaf?(true)
+      scan(ReactiveDag.ScanWorkerTest.Solo)
+    end
+  end
+
   defmodule Docs do
     use Ash.Resource,
       domain: Domain,
@@ -168,7 +206,7 @@ defmodule ReactiveDag.ScanWorkerTest do
     :ok
   end
 
-  defp plan, do: ReactiveDag.Node.graph([Docs, Notices, Totals])
+  defp plan, do: ReactiveDag.Node.graph([Docs, Notices, SoloDocs, Totals])
 
   describe "one poll, several leaves" do
     # A source feeding two leaves is ONE crawl whose rows land in two places.
@@ -451,6 +489,106 @@ defmodule ReactiveDag.ScanWorkerTest do
       # something to clear
       assert_received {:tel, :start, _m, meta}
       assert meta.args["run_id"] == "run-42"
+    end
+  end
+
+  describe "a source-keyed job — the fan-out unit" do
+    # `Crawler` feeds `docs` and `notices` from one poll. A cell-keyed job polls
+    # per leaf, so scheduling both fetches the same upstream twice for one
+    # source's work (u2i/reactive_dag#124).
+    defp source_job(extra \\ %{}) do
+      ReactiveDag.ScanWorker.perform(%Oban.Job{
+        args:
+          Map.merge(
+            %{
+              "source" => "ReactiveDag.ScanWorkerTest.Crawler",
+              "plan_mfa" => ["ReactiveDag.ScanWorkerTest", "plan_for_worker", []]
+            },
+            extra
+          )
+      })
+    end
+
+    test "polls the source ONCE for all its leaves" do
+      Crawler.returns(%{changed: %{"docs" => ["d1"], "notices" => ["n1"]}})
+
+      assert :ok = source_job()
+
+      assert length(Crawler.polls()) == 1, "one crawl, not one per leaf"
+    end
+
+    test "and marks every leaf it reports" do
+      # via refresh_source/3 rather than the worker: the worker drains, and the
+      # drain claims-as-deletes, so the marks are gone by the time it returns
+      Crawler.returns(%{changed: %{"docs" => ["d1"], "notices" => ["n1"]}})
+
+      {:ok, result} = Source.refresh_source(plan(), Crawler, reason: "scan:run-42")
+
+      assert result.marked == %{"docs" => ["d1"], "notices" => ["n1"]}
+      assert {"docs", "d1", "scan:run-42"} in FakeRepo.marks()
+      assert {"notices", "n1", "scan:run-42"} in FakeRepo.marks()
+    end
+
+    test "the leaf's declared standing args still apply" do
+      Crawler.returns(%{changed: %{}})
+
+      source_job()
+
+      assert [opts] = Crawler.polls()
+      assert opts[:recent] == true
+    end
+
+    test "a flat key list from a FAN-OUT source is refused, not guessed" do
+      # the keys could belong to either leaf; picking one would mark the wrong
+      # subtree and nothing downstream would say so
+      Crawler.returns(%{changed: ["d1"]})
+
+      assert {:error, msg} = source_job()
+      assert msg =~ "docs"
+      assert msg =~ "notices"
+      assert msg =~ "map form"
+    end
+
+    test "telemetry names the source, and carries the args" do
+      test_pid = self()
+
+      :telemetry.attach(
+        "source-scan",
+        [:reactive_dag, :scan, :stop],
+        fn _e, _m, meta, _ -> send(test_pid, {:stop, meta}) end,
+        nil
+      )
+
+      on_exit(fn -> :telemetry.detach("source-scan") end)
+
+      Crawler.returns(%{changed: %{"docs" => ["d1"]}})
+      source_job(%{"run_id" => "run-9"})
+
+      assert_received {:stop, meta}
+      assert meta.cell =~ "Crawler"
+      assert meta.args["run_id"] == "run-9"
+    end
+
+    test "a cell-keyed job still works, unchanged" do
+      Crawler.returns(%{changed: ["d1"]})
+
+      assert :ok =
+               ReactiveDag.ScanWorker.perform(%Oban.Job{
+                 args: %{
+                   "cell" => "docs",
+                   "plan_mfa" => ["ReactiveDag.ScanWorkerTest", "plan_for_worker", []]
+                 }
+               })
+
+      # a flat list is unambiguous here: the cell that was polled owns it
+      assert length(Crawler.polls()) == 1
+    end
+
+    test "a flat list is fine when the source owns ONE leaf" do
+      # nothing to disambiguate, so the map form is not forced on the common case
+      {:ok, result} = Source.refresh_source(plan(), Solo, reason: "scan")
+
+      assert result.marked == %{"solo_docs" => ["s1"]}
     end
   end
 end

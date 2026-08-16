@@ -237,8 +237,11 @@ defmodule ReactiveDag.ScanScheduleTest do
     test "collects the declared cadence into Oban-shaped entries" do
       # keyed by CELL, not source: a source feeding several leaves is several
       # units of work, each with its own declared bound
+      # `Crawler` feeds two leaves, so the entry names the SOURCE — nominating
+      # one leaf to stand for the crawl is the indirection this avoids
       assert Source.crontab(plan(), MyWorker) == [
-               {"0 * * * *", MyWorker, args: %{"cell" => "agendas"}}
+               {"0 * * * *", MyWorker,
+                args: %{"source" => "Elixir.ReactiveDag.ScanScheduleTest.Crawler"}}
              ]
     end
 
@@ -246,7 +249,7 @@ defmodule ReactiveDag.ScanScheduleTest do
       # the cheap scanner gets no entry — the host schedules it however it likes,
       # and offering a cadence it never asked for would be noise
       refute Source.crontab(plan(), MyWorker)
-             |> Enum.any?(fn {_c, _w, [args: %{"cell" => c}]} -> c == "transcripts" end)
+             |> Enum.any?(fn {_c, _w, [args: a]} -> a["cell"] == "transcripts" end)
     end
 
     test "a plan with no cadence at all yields no entries" do
@@ -258,7 +261,11 @@ defmodule ReactiveDag.ScanScheduleTest do
       # fixed for every firing — but a host routing crawls to their own queue
       # should not have to rebuild the list to say so
       assert Source.crontab(plan(), MyWorker, args: %{"queue" => "crawls"}) == [
-               {"0 * * * *", MyWorker, args: %{"cell" => "agendas", "queue" => "crawls"}}
+               {"0 * * * *", MyWorker,
+                args: %{
+                  "source" => "Elixir.ReactiveDag.ScanScheduleTest.Crawler",
+                  "queue" => "crawls"
+                }}
              ]
     end
 
@@ -266,7 +273,11 @@ defmodule ReactiveDag.ScanScheduleTest do
       # merged UNDER the computed cell, so a stale copy-paste fails loudly at the
       # worker rather than silently polling the wrong leaf forever
       assert Source.crontab(plan(), MyWorker, args: %{"cell" => "wrong"}) == [
-               {"0 * * * *", MyWorker, args: %{"cell" => "agendas"}}
+               {"0 * * * *", MyWorker,
+                args: %{
+                  "cell" => "wrong",
+                  "source" => "Elixir.ReactiveDag.ScanScheduleTest.Crawler"
+                }}
              ]
     end
 
@@ -376,15 +387,21 @@ defmodule ReactiveDag.ScanScheduleTest do
 
       assert with_cadence == ["agendas", "minutes"], "both leaves declare a cadence"
 
-      assert Enum.map(Source.crontab(plan(), MyWorker), fn {_c, _w, [args: a]} -> a["cell"] end) ==
-               ["agendas"]
+      assert Enum.map(Source.crontab(plan(), MyWorker), fn {_c, _w, [args: a]} ->
+               a["cell"] || a["source"]
+             end) == ["Elixir.ReactiveDag.ScanScheduleTest.Crawler"]
     end
 
     test "two leaves on one scanner produce ONE scheduled crawl" do
       entries = Source.crontab(plan(), MyWorker)
 
       assert length(entries) == 1
-      assert [{"0 * * * *", MyWorker, [args: %{"cell" => "agendas"}]}] = entries
+
+      # ...and it names the SOURCE, so the dedup reaches the JOB. Nominating a
+      # representative leaf leaves the double crawl one hand-enqueue away, and
+      # rots when the leaf set changes.
+      assert [{"0 * * * *", MyWorker, [args: %{"source" => source}]}] = entries
+      assert source == "Elixir.ReactiveDag.ScanScheduleTest.Crawler"
     end
 
     test "but two DIFFERENT cadences are two entries, because someone meant that" do

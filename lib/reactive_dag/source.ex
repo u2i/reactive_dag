@@ -325,6 +325,83 @@ defmodule ReactiveDag.Source do
     end
   end
 
+  @doc """
+  Poll a SOURCE once and mark every leaf it reports — the fan-out unit.
+
+  `refresh/3` is keyed by cell, which is right when a leaf has its own scanner
+  and wrong when one crawl feeds several. `AgendaCenterCrawler` writes both
+  `agenda_docs` and `minutes_docs` from one fetch of one site: polling per cell
+  fetches it twice for one source's work.
+
+  `poll_all/2` has always deduplicated by module for this reason, but it polls
+  EVERY scanner — there was no way to say "this one source, once". So a host
+  scheduling per source had to nominate one of its leaves as a stand-in, which
+  is an indirection that silently rots when the leaf set changes.
+
+      Source.refresh_source(plan, MyApp.Sources.AgendaCenter, reason: "scan:run-42")
+
+  ## The flat-list result
+
+  A scanner feeding one leaf may return `changed: ["k1", "k2"]`, and the cell
+  keyed form knows those belong to the cell it polled. Here there is no such
+  cell, so a flat list is only unambiguous when the source owns exactly ONE
+  leaf. A fan-out source must return the map form, `changed: %{leaf => keys}`,
+  and gets a clear error rather than a guess if it does not — attributing keys
+  to the wrong leaf would mark the wrong subtree and be invisible.
+  """
+  @spec refresh_source(graph(), module(), keyword()) ::
+          {:ok, %{changed: [String.t()], marked: map(), unreachable: list()}}
+          | {:error, term()}
+  def refresh_source(graph, source, opts \\ []) do
+    {reason, poll_opts} = Keyword.pop(opts, :reason, "scan")
+    key_rule = Keyword.get(poll_opts, :key_rule, ReactiveDag.KeyRule)
+    poll_opts = Keyword.delete(poll_opts, :key_rule)
+
+    leaves = cells_of(source, graph)
+    standing = Map.get(standing_args(graph), source, [])
+
+    with {:ok, result} <- safe_poll(source, Keyword.merge(standing, poll_opts)),
+         {:ok, by_leaf} <- attribute(result, leaves, source) do
+      marked = mark_by_leaf(graph, by_leaf, reason, key_rule)
+
+      {:ok,
+       %{
+         changed: marked |> Map.values() |> List.flatten() |> Enum.uniq(),
+         marked: marked,
+         unreachable: Map.get(result, :unreachable, []),
+         detail: Map.get(result, :detail)
+       }}
+    end
+  end
+
+  # A map names its own leaves. A flat list names none, so it is only safe when
+  # the source owns one — otherwise the keys could belong to either leaf and
+  # picking one would mark the wrong subtree.
+  defp attribute(result, leaves, source) do
+    case Map.get(result, :changed, []) do
+      %{} = by_leaf ->
+        {:ok, Map.new(by_leaf, fn {leaf, keys} -> {to_string(leaf), keys} end)}
+
+      keys when is_list(keys) ->
+        case leaves do
+          [only] ->
+            {:ok, %{only => keys}}
+
+          many ->
+            {:error,
+             """
+             reactive_dag: #{inspect(source)} feeds #{length(many)} leaves \
+             (#{Enum.join(many, ", ")}) and its poll returned a flat key list, so \
+             there is no way to tell which leaf each key belongs to.
+
+             Return the map form instead:
+
+                 {:ok, %{changed: %{"agenda_docs" => [...], "minutes_docs" => [...]}}}
+             """}
+        end
+    end
+  end
+
   # A flat list belongs to the cell that was polled; a map names its own leaves.
   defp mark(graph, cell_id, result, reason, key_rule) do
     by_leaf =
@@ -333,6 +410,10 @@ defmodule ReactiveDag.Source do
         %{} = by_leaf -> Map.new(by_leaf, fn {leaf, keys} -> {to_string(leaf), keys} end)
       end
 
+    mark_by_leaf(graph, by_leaf, reason, key_rule)
+  end
+
+  defp mark_by_leaf(graph, by_leaf, reason, key_rule) do
     for {leaf, keys} <- by_leaf, keys != [], into: %{} do
       ReactiveDag.Frontier.mark_dirty(leaf, keys, reason)
 
@@ -441,10 +522,15 @@ defmodule ReactiveDag.Source do
   would emit two entries and crawl the same site twice an hour, each poll marking
   both leaves and the second achieving nothing.
 
-  So entries are deduplicated by scanner. The `"cell"` carried is the first of
-  its leaves alphabetically — any of them reaches the same scanner, and
-  `refresh/3` marks every leaf the poll reports regardless of which one was
-  named.
+  So entries are deduplicated by scanner, and a source with SEVERAL leaves emits
+  `%{"source" => module}` rather than nominating one of them to stand for the
+  rest. `ScanWorker` polls it once and marks every leaf it reports, so the
+  deduplication reaches the job instead of stopping at the schedule — enqueue by
+  hand and the double crawl still cannot come back, and a leaf added later needs
+  no crontab change.
+
+  A source with exactly one leaf keeps `%{"cell" => id}`: there is nothing to
+  disambiguate, and the cell-keyed job stays the simpler thing to reason about.
 
   Two leaves declaring DIFFERENT cadences for one scanner get one entry each, on
   the assumption that a host writing two different cadences meant them; the
@@ -476,11 +562,22 @@ defmodule ReactiveDag.Source do
     # crawl, and scheduling it twice is duplicated I/O whose second run marks
     # rows the first already handled
     |> Enum.group_by(&{&1.source, &1.every})
-    |> Enum.map(fn {{_source, every}, jobs} ->
-      cell = jobs |> Enum.map(& &1.cell) |> Enum.min()
-      {every, worker, args: Map.merge(extra, %{"cell" => cell})}
+    |> Enum.map(fn {{source, every}, jobs} ->
+      # A source on several leaves is ONE crawl, so the job names the SOURCE
+      # rather than nominating one of its leaves to stand for it. rc.17 grouped
+      # here so the schedule stopped emitting duplicates; naming the source
+      # carries that through to the job, so enqueueing by hand cannot
+      # reintroduce the double crawl — and a leaf added later is picked up
+      # without touching the crontab.
+      args =
+        case jobs do
+          [one] -> %{"cell" => one.cell}
+          _many -> %{"source" => to_string(source)}
+        end
+
+      {every, worker, args: Map.merge(extra, args)}
     end)
-    |> Enum.sort_by(fn {every, _w, args: %{"cell" => c}} -> {c, every} end)
+    |> Enum.sort_by(fn {every, _w, args: a} -> {a["cell"] || a["source"], every} end)
   end
 
   @doc """
@@ -501,7 +598,13 @@ defmodule ReactiveDag.Source do
         mod = cell.meta[:scan],
         not is_nil(mod),
         reduce: %{} do
-      acc -> Map.update(acc, mod, cell.meta[:scan_args] || [], &Keyword.merge(&1, cell.meta[:scan_args] || []))
+      acc ->
+        Map.update(
+          acc,
+          mod,
+          cell.meta[:scan_args] || [],
+          &Keyword.merge(&1, cell.meta[:scan_args] || [])
+        )
     end
   end
 

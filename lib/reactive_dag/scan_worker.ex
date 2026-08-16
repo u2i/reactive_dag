@@ -86,9 +86,9 @@ if Code.ensure_loaded?(Oban.Worker) do
 
     @impl Oban.Worker
     def perform(%Oban.Job{args: args}) do
-      cell_id = Map.fetch!(args, "cell")
       plan = ReactiveDag.Job.plan(args, __MODULE__)
       opts = poll_opts(args)
+      target = target(args)
 
       t0 = System.monotonic_time(:microsecond)
 
@@ -98,11 +98,11 @@ if Code.ensure_loaded?(Oban.Worker) do
       :telemetry.execute(
         [:reactive_dag, :scan, :start],
         %{system_time: System.system_time()},
-        %{cell: cell_id, args: args}
+        %{cell: label(target), args: args}
       )
 
       try do
-        case Source.refresh(plan, cell_id, opts) do
+        case poll(plan, target, opts) do
           {:ok, result} ->
             # Drain even when nothing changed: another source may have marked
             # cells this job is now the first to reach, and an empty frontier is
@@ -121,16 +121,16 @@ if Code.ensure_loaded?(Oban.Worker) do
               # handler knows which cell finished and not which run it belonged
               # to, so it cannot write the row, address the broadcast, or group
               # the trace — and the work has to fork the worker instead.
-              %{cell: cell_id, args: args, unreachable: result.unreachable, report: report}
+              %{cell: label(target), args: args, unreachable: result.unreachable, report: report}
             )
 
-            warn_unreachable(cell_id, result)
+            warn_unreachable(label(target), result)
             :ok
 
           {:error, :no_scanner} ->
             # Not a failure to retry: the graph says this cell has no scanner, and
             # it will not have one on the next attempt either.
-            Logger.warning("reactive_dag: #{cell_id} has no scanner; nothing to poll")
+            Logger.warning("reactive_dag: #{label(target)} has no scanner; nothing to poll")
             :ok
 
           {:error, reason} ->
@@ -141,12 +141,25 @@ if Code.ensure_loaded?(Oban.Worker) do
           :telemetry.execute(
             [:reactive_dag, :scan, :exception],
             %{duration_us: System.monotonic_time(:microsecond) - t0},
-            %{cell: cell_id, args: args, reason: e}
+            %{cell: label(target), args: args, reason: e}
           )
 
           reraise e, __STACKTRACE__
       end
     end
+
+    # A job names EITHER a cell or a source. A cell-keyed job polls that leaf's
+    # scanner; a source-keyed one polls the source once and marks every leaf it
+    # reports — which is the honest unit when one crawl feeds several, and the
+    # thing `poll_all/2` has always deduplicated for.
+    defp target(%{"source" => module}), do: {:source, ReactiveDag.Job.module(module)}
+    defp target(args), do: {:cell, Map.fetch!(args, "cell")}
+
+    defp poll(plan, {:cell, cell_id}, opts), do: Source.refresh(plan, cell_id, opts)
+    defp poll(plan, {:source, module}, opts), do: Source.refresh_source(plan, module, opts)
+
+    defp label({:cell, cell_id}), do: cell_id
+    defp label({:source, module}), do: inspect(module)
 
     # An outage is not a quiet success: the poll wrote nothing for the upstreams
     # it could not reach, so those keys are STALE rather than absent, and nothing
