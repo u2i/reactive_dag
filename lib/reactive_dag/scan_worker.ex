@@ -56,6 +56,28 @@ if Code.ensure_loaded?(Oban.Worker) do
     `ReactiveDag.Drain.run/2` directly: that is all this module does. It exists
     to save you writing the loop, not to stop you writing a different one.
 
+    ## Three outcomes
+
+    | the scanner returns | the job | why |
+    |---|---|---|
+    | `{:ok, result}` | `:ok` | it looked |
+    | `{:error, :not_scannable}` | `{:cancel, reason}` | it cannot look, and retrying will not change that |
+    | `{:error, {:not_scannable, why}}` | `{:cancel, reason}` | …and it can say why |
+    | `{:error, reason}` | `{:error, reason}` | it failed; a retry might work |
+
+    A source with no credential configured, or an integration not enabled for
+    this tenant, is not a fault: retrying cannot conjure a missing credential,
+    and burning every attempt to land in `discarded` reads as *"something is
+    broken"* when the honest answer is *"this was never going to work"*.
+
+    The judgement belongs to the SCANNER, because only it knows the difference
+    between an upstream that is down and one that was never configured.
+
+    `:stop` still fires for an unscannable source, carrying `not_scannable:` in
+    its metadata — it is a completed scan that found nothing, and a host
+    recording scan results wants the row. An outage is not a quiet success, and
+    neither is a missing credential.
+
     ## Telemetry
 
     | event | measurements | metadata |
@@ -180,13 +202,13 @@ if Code.ensure_loaded?(Oban.Worker) do
             :ok
 
           {:error, :no_scanner} ->
-            # Not a failure to retry: the graph says this cell has no scanner, and
-            # it will not have one on the next attempt either.
+            # The graph says this cell has no scanner, and it will not have one
+            # on the next attempt either.
             Logger.warning("reactive_dag: #{cell_id} has no scanner; nothing to poll")
-            :ok
+            {:cancel, :no_scanner}
 
           {:error, reason} ->
-            {:error, reason}
+            unscannable(reason, cell_id, args, t0)
         end
       rescue
         e ->
@@ -198,6 +220,43 @@ if Code.ensure_loaded?(Oban.Worker) do
 
           reraise e, __STACKTRACE__
       end
+    end
+
+    # THREE outcomes, not two. A scan can succeed, fail in a way that retrying
+    # might fix (a timeout, a 503), or be structurally unscannable — no
+    # credential configured, an integration not enabled for this tenant. The
+    # third is not a fault: retrying cannot conjure a missing credential, and
+    # burning every attempt to land in `discarded` reads as "something is
+    # broken" when the honest answer is "this was never going to work"
+    # (u2i/reactive_dag#122).
+    #
+    # A scanner says so by returning `{:error, :not_scannable}` — or
+    # `{:error, {:not_scannable, reason}}` when it can say why. The judgement
+    # belongs to the scanner because only it knows the difference between an
+    # upstream that is down and one that was never configured.
+    #
+    # `:stop` still fires: an unscannable source is a COMPLETED scan that found
+    # nothing, and a host recording scan results wants the row.
+    defp unscannable({:not_scannable, why} = reason, cell_id, args, t0) do
+      Logger.info("reactive_dag: #{cell_id} is not scannable (#{inspect(why)}); not retrying")
+      emit_stop(cell_id, args, t0, reason)
+      {:cancel, reason}
+    end
+
+    defp unscannable(:not_scannable, cell_id, args, t0) do
+      Logger.info("reactive_dag: #{cell_id} is not scannable; not retrying")
+      emit_stop(cell_id, args, t0, :not_scannable)
+      {:cancel, :not_scannable}
+    end
+
+    defp unscannable(reason, _cell_id, _args, _t0), do: {:error, reason}
+
+    defp emit_stop(cell_id, args, t0, reason) do
+      :telemetry.execute(
+        [:reactive_dag, :scan, :stop],
+        %{duration_us: System.monotonic_time(:microsecond) - t0, changed: 0, passes: 0},
+        %{cell: cell_id, args: args, unreachable: [], report: nil, not_scannable: reason}
+      )
     end
 
     # An outage is not a quiet success: the poll wrote nothing for the upstreams
