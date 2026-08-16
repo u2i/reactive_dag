@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.17.0-rc.13](https://github.com/u2i/reactive_dag/compare/v0.17.0-rc.12...v0.17.0-rc.13) (2026-08-16)
+
+
+### Features
+
+* ReprocessWorker — queue a re-derive and drain it now ([184b123](https://github.com/u2i/reactive_dag/commit/184b123718ec8032363d75dcae4bc863a4eed21e))
+* ReprocessWorker — queue a re-derive and drain it now ([4dff714](https://github.com/u2i/reactive_dag/commit/4dff714e47718b447e070cbd506829d4cc9ae503))
+
 ## [0.17.0-rc.12](https://github.com/u2i/reactive_dag/compare/v0.17.0-rc.11...v0.17.0-rc.12) (2026-08-16)
 
 
