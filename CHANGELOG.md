@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.17.0-rc.15](https://github.com/u2i/reactive_dag/compare/v0.17.0-rc.14...v0.17.0-rc.15) (2026-08-16)
+
+
+### Features
+
+* crontab/3 takes host args; prove one poll can mark several leaves ([52b3013](https://github.com/u2i/reactive_dag/commit/52b3013d28de134d831884029a13f1152e313cd8))
+* crontab/3 takes host args; prove one poll can mark several leaves ([ab189d5](https://github.com/u2i/reactive_dag/commit/ab189d53f4e62269074f6464ce51bdf3717835d7))
+
 ## [0.17.0-rc.14](https://github.com/u2i/reactive_dag/compare/v0.17.0-rc.13...v0.17.0-rc.14) (2026-08-16)
 
 
