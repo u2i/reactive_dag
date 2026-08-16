@@ -502,12 +502,17 @@ already chosen them. Omit both and it claims the whole cell — which propagates
 `:all`, so everything beneath it re-derives too. That is usually what "the code
 changed" means, and occasionally much more work than intended.
 
-**A `per_key` node's fingerprint still applies.** It skips rows whose declared
-inputs have not moved, and after a prompt change they have not — so a reprocess
-of such a node can claim 400 keys and change none. The claimed-vs-changed numbers
-are what make that visible rather than mistaken for success: a fingerprint
-answers *"did the input move?"*, which is the wrong question here and the right
-one everywhere else.
+**It invalidates the fingerprint first.** A `per_key` node skips rows whose
+declared inputs have not moved, and after a prompt change they have not — so
+marking alone would skip exactly the rows you asked it to redo.
+
+So the stored fingerprint is cleared on the selected keys before they are marked.
+That is not a bypass: a null fingerprint means *"no valid prior result"*, which is
+precisely true once the code that produced it has changed. The recompute then runs
+for the ordinary reason and stores a fresh fingerprint as it always would — so a
+reprocess is a one-shot, not a mode. The telemetry's `invalidated` says how many
+rows that touched, and is 0 on a node with no fingerprint column, which recomputes
+regardless.
 
 ## Input edges
 
