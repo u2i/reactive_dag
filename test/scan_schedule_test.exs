@@ -83,7 +83,7 @@ defmodule ReactiveDag.ScanScheduleTest do
     reactive do
       id(:minutes)
       leaf?(true)
-      scan(ReactiveDag.ScanScheduleTest.Crawler, every: "0 * * * *")
+      poll(ReactiveDag.ScanScheduleTest.Crawler, every: "0 * * * *")
     end
   end
 
@@ -110,7 +110,7 @@ defmodule ReactiveDag.ScanScheduleTest do
     reactive do
       id(:minutes)
       leaf?(true)
-      scan(ReactiveDag.ScanScheduleTest.Crawler, every: "0 3 * * *")
+      poll(ReactiveDag.ScanScheduleTest.Crawler, every: "0 3 * * *")
     end
   end
 
@@ -135,7 +135,7 @@ defmodule ReactiveDag.ScanScheduleTest do
     reactive do
       id(:agendas)
       leaf?(true)
-      scan(ReactiveDag.ScanScheduleTest.Crawler, args: [recent: true], every: "0 * * * *")
+      poll(ReactiveDag.ScanScheduleTest.Crawler, args: [recent: true], every: "0 * * * *")
     end
   end
 
@@ -160,7 +160,7 @@ defmodule ReactiveDag.ScanScheduleTest do
     reactive do
       id(:transcripts)
       leaf?(true)
-      scan(ReactiveDag.ScanScheduleTest.Listing)
+      poll(ReactiveDag.ScanScheduleTest.Listing)
     end
   end
 

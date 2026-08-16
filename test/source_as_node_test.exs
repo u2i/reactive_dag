@@ -96,20 +96,20 @@ defmodule ReactiveDag.SourceAsNodeTest do
     end
 
     attributes do
-      attribute(:key, :string, primary_key?: true, allow_nil?: false, public?: true)
-      attribute(:kind, :string, public?: true)
-      attribute(:filed_as, :string, public?: true)
-      attribute(:body, :string, public?: true)
+      attribute :key, :string, primary_key?: true, allow_nil?: false, public?: true
+      attribute :kind, :string, public?: true
+      attribute :filed_as, :string, public?: true
+      attribute :body, :string, public?: true
     end
 
     actions do
-      defaults([:read, :destroy])
-      create(:upsert, upsert?: true, accept: [:key, :kind, :filed_as, :body])
+      defaults [:read, :destroy]
+      create :upsert, upsert?: true, accept: [:key, :kind, :filed_as, :body]
     end
 
     reactive do
-      id(:documents)
-      leaf?(true)
+      id :documents
+      leaf? true
     end
   end
 
@@ -123,17 +123,17 @@ defmodule ReactiveDag.SourceAsNodeTest do
     end
 
     attributes do
-      attribute(:key, :string, primary_key?: true, allow_nil?: false, public?: true)
-      attribute(:body, :string, public?: true)
+      attribute :key, :string, primary_key?: true, allow_nil?: false, public?: true
+      attribute :body, :string, public?: true
     end
 
     actions do
-      defaults([:read, :destroy])
-      create(:upsert, upsert?: true, accept: [:key, :body])
+      defaults [:read, :destroy]
+      create :upsert, upsert?: true, accept: [:key, :body]
     end
 
     reactive do
-      id(:agenda_docs)
+      id :agenda_docs
 
       # a projection of one kind out of the crawl. `expand` because a group
       # yields zero rows or one — a document that is not this kind simply is
@@ -163,17 +163,17 @@ defmodule ReactiveDag.SourceAsNodeTest do
     end
 
     attributes do
-      attribute(:key, :string, primary_key?: true, allow_nil?: false, public?: true)
-      attribute(:body, :string, public?: true)
+      attribute :key, :string, primary_key?: true, allow_nil?: false, public?: true
+      attribute :body, :string, public?: true
     end
 
     actions do
-      defaults([:read, :destroy])
-      create(:upsert, upsert?: true, accept: [:key, :body])
+      defaults [:read, :destroy]
+      create :upsert, upsert?: true, accept: [:key, :body]
     end
 
     reactive do
-      id(:minutes_docs)
+      id :minutes_docs
 
       # a projection of one kind out of the crawl. `expand` because a group
       # yields zero rows or one — a document that is not this kind simply is

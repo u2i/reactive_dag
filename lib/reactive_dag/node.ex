@@ -785,49 +785,58 @@ defmodule ReactiveDag.Node do
     ]
   }
 
-  defmodule Scan do
+  defmodule Poll do
     @moduledoc """
-    The SCANNER that feeds this leaf: `scan MuniWatch.Crawler`.
+    This node's rows come from OUTSIDE the graph: `poll MuniWatch.Crawler`.
 
-    A leaf's keys come from outside the graph — a crawled website, an S3
-    listing, an API. `ReactiveDag.Source` is the behaviour that fetches them,
-    and it deliberately runs in a POLL phase outside the drain (external I/O
-    must not sit inside a depth-ordered recompute). What was missing was the
-    library knowing *which* scanner feeds *which* leaf: the binding lived in
-    the scanner's own `leaf_cells/1` and in an opaque `source :atom` label,
-    joined by string matching, with `Source.verify!/2` existing to catch the
-    mismatches that arrangement invites.
+    A source is an ordinary node whose rows a scanner writes rather than a
+    combinator computing them. `ReactiveDag.Source` is the behaviour that
+    fetches them, and it deliberately runs outside the drain — external I/O must
+    not sit inside a depth-ordered recompute.
 
-    Declaring it here makes the pairing a fact of the graph. `graph/2` verifies
-    it during assembly (a `scan` naming a module that is not a `Source`, or a
-    scanner whose `leaf_cells/1` disowns this leaf, raises there), and
-    `ReactiveDag.Source.poll_all/2` can find every scanner from the plan instead
-    of a hand-kept list that drifts.
+    Everything downstream is then an ORDINARY EDGE. A leaf holding one kind of
+    what the crawl found reads the source like any other input:
 
-    This is the SINGLE-LEAF spelling — one scanner, one leaf. A source that
-    feeds MANY leaves (one per discovered kind, or a generator's instances)
-    still implements `leaf_cells/1` and is passed to `verify!/2` directly:
-    `leaf_cells/1` takes the lowered graph precisely because those leaves come
-    from live data, which no compile-time declaration can name.
+        # the source
+        reactive do
+          id :agenda_center
+          poll MuniWatch.Sources.AgendaCenter, every: "0 12 * * *", args: [recent: true]
+        end
+
+        # a consumer of it
+        reactive do
+          id :agenda_docs
+          reduce over: :agenda_center, group_by: :key, expand: &agenda_only/2
+        end
+
+    This replaced `scan Mod` on each fed leaf plus `leaf_cells/1` on the module
+    plus `verify_scan!/3` to police the two agreeing — the same fact written
+    twice, with a verifier for when the copies drifted. The cells a source feeds
+    are now `plan.parents[id]`, which cannot disagree with anything.
+
+    `every:` and `args:` belong here rather than on the fed leaves, because they
+    describe the POLL: one crawl has one cadence and one bound. Spread across
+    leaves they had to be reassembled, and a source feeding two leaves could
+    silently lose the args one of them declared.
     """
     defstruct [:module, :args, :every, :__identifier__, :__spark_metadata__]
   end
 
-  @scan %Spark.Dsl.Entity{
-    name: :scan,
-    target: Scan,
+  @poll %Spark.Dsl.Entity{
+    name: :poll,
+    target: Poll,
     args: [:module],
     describe:
-      "The `ReactiveDag.Source` that feeds this leaf. Makes the scanner\u2194leaf pairing a " <>
-        "fact of the graph: assembly verifies it, and `Source.poll_all/2` finds scanners " <>
-        "from the plan. Single-leaf; a multi-leaf source uses `leaf_cells/1` + `verify!/2`.",
+      "The `ReactiveDag.Source` that fetches this node's rows. Makes the node a source: " <>
+        "its rows come from outside the graph, and everything reading it is an ordinary " <>
+        "edge. `Source.poll_all/2` and `crontab/2` find sources from the plan.",
     schema: [
       module: [
         type: :atom,
         required: true,
         doc:
           "a module implementing `ReactiveDag.Source`. Verified at assembly — it must " <>
-            "implement the behaviour, and its `leaf_cells/1` must include this leaf."
+            "implement the behaviour."
       ],
       args: [
         type: :keyword_list,
@@ -836,17 +845,47 @@ defmodule ReactiveDag.Node do
           "the STANDING options for a routine poll, merged into `Source.poll_all/2`'s opts " <>
             "with the caller's winning. This is where a cheap default lives: a crawler whose " <>
             "full pass costs a request per board per year declares `args: [recent: true]`, so " <>
-            "the routine call stays `poll_all(plan)` and no call site can forget the bound. " <>
-            "A scanner cheap enough to run whole declares nothing."
+            "the routine call stays `poll_all(plan)` and no call site can forget the bound."
       ],
       every: [
         type: :string,
         required: false,
         doc:
           "how often a routine poll SHOULD run, as a cron expression. The library never " <>
-            "schedules anything — this is a declaration, collected by " <>
-            "`ReactiveDag.Source.crontab/2` into entries the host hands to its own scheduler. " <>
-            "Declaring it beside the leaf means reading the resource tells you the cadence."
+            "schedules anything: `Source.crontab/2` collects these into data the host hands " <>
+            "to its own scheduler. One poll, one cadence."
+      ]
+    ]
+  }
+
+  @slice %Spark.Dsl.Entity{
+    name: :slice,
+    target: Slice,
+    args: [:column],
+    describe:
+      "A dimension a human may select this node by — `slice :fiscal_year` — so a UI can " <>
+        "offer 'reprocess just this year'. Distinct from `recompute_by`, which is the unit " <>
+        "a CHANGE invalidates; this is the unit a PERSON picks, and they are rarely the " <>
+        "same. `values:` enumerates the options so the control is a choice rather than a " <>
+        "text box.",
+    schema: [
+      column: [
+        type: :atom,
+        required: true,
+        doc: "an attribute on THIS node's resource, filtered with `==` to select rows."
+      ],
+      values: [
+        type: {:or, [{:list, :any}, {:tuple, [:atom, :atom, {:list, :any}]}]},
+        required: false,
+        doc:
+          "the selectable options: a literal list, or an `{module, function, args}` " <>
+            "returning one. Only the host knows which values exist — omit it and a UI " <>
+            "must take free text."
+      ],
+      label: [
+        type: :string,
+        required: false,
+        doc: "what to call this dimension in a UI (default: the column name)."
       ]
     ]
   }
@@ -977,7 +1016,7 @@ defmodule ReactiveDag.Node do
       @aggregate,
       @compute,
       @run,
-      @scan,
+      @poll,
       @slice
     ],
     schema: [
@@ -1067,10 +1106,6 @@ defmodule ReactiveDag.Node do
         type: :atom,
         doc: "convenience: a leaf's source binding id (also merged into meta)"
       ],
-      driver: [
-        type: :atom,
-        doc: "convenience: a leaf's driver module (also merged into meta)"
-      ],
       meta: [
         type: :keyword_list,
         default: [],
@@ -1159,10 +1194,14 @@ defmodule ReactiveDag.Node do
     |> verify_scans!()
   end
 
-  # `scan Mod` on a leaf: the pairing is now a fact of the graph, so check it
-  # HERE rather than leaving it to a host remembering to call
-  # `Source.verify!/2`. Runs on the built plan because that is when cell ids are
-  # final (a generator's instances only exist after expansion).
+  # `poll Mod` makes a node a SOURCE. Two things are worth failing at assembly;
+  # a third used to be here and no longer can be.
+  #
+  # The one that went: "this scanner disowns this leaf". That error existed
+  # because the pairing was written twice — `scan Mod` on the leaf and
+  # `leaf_cells/1` on the module — and it caught the copies drifting. The cells
+  # a source feeds are now `plan.parents[id]`, so there is one declaration and
+  # nothing to disagree with.
   defp verify_scans!(%ReactiveDag.Plan{} = plan) do
     for {id, cell} <- plan.cells, mod = cell.meta[:scan] do
       # A scanner writes a cell's tuples from OUTSIDE the graph; a combinator
@@ -1174,15 +1213,15 @@ defmodule ReactiveDag.Node do
            cell.meta[:reduce] || cell.meta[:join] || cell.meta[:per_key] ||
              cell.meta[:aggregate] || cell.meta[:run] || cell.meta[:compute] do
         raise ArgumentError,
-              "reactive_dag: cell #{inspect(id)} declares `scan #{inspect(mod)}` AND a " <>
+              "reactive_dag: cell #{inspect(id)} declares `poll #{inspect(mod)}` AND a " <>
                 "computation (#{inspect(kind_of(computation, cell))}). A scanner writes " <>
-                "this cell's tuples from outside the graph; a computation derives them " <>
+                "this cell's rows from outside the graph; a computation derives them " <>
                 "from its inputs — declared together, the poll and the drain overwrite " <>
-                "each other. Keep the scan (making this a leaf), or drop it and let the " <>
+                "each other. Keep the poll (making this a source), or drop it and let the " <>
                 "node compute."
       end
 
-      ReactiveDag.Source.verify_scan!(mod, id, plan)
+      ReactiveDag.Source.verify_poll!(mod, id)
     end
 
     plan
@@ -1714,8 +1753,8 @@ defmodule ReactiveDag.Node do
       end
 
     scan_meta =
-      case Ext.get_entities(resource, [:reactive]) |> Enum.find(&match?(%Scan{}, &1)) do
-        %Scan{module: m, args: a, every: e} ->
+      case Ext.get_entities(resource, [:reactive]) |> Enum.find(&match?(%Poll{}, &1)) do
+        %Poll{module: m, args: a, every: e} ->
           %{scan: m, scan_args: a || [], scan_every: e}
 
         nil ->
@@ -1727,7 +1766,6 @@ defmodule ReactiveDag.Node do
     |> Map.merge(
       %{
         source: Ext.get_opt(resource, [:reactive], :source, nil),
-        driver: Ext.get_opt(resource, [:reactive], :driver, nil),
         over: Ext.get_opt(resource, [:reactive], :over, nil),
         payload_key:
           Ext.get_opt(resource, [:reactive], :payload_key, nil) || derived_payload_key(resource),

@@ -30,7 +30,6 @@ defmodule MyApp.Sources.FleetScan do
   def id, do: :fleet_scan
 
   @impl true
-  def leaf_cells(_graph), do: ["machines"]
 
   @impl true
   def origin, do: %{label: "Fleet · endpoint inventory", store: "Fleet MDM"}
@@ -57,21 +56,30 @@ end
 those dirty, which is what keeps the cascade proportional to real change rather
 than to scan size.
 
-## Binding a source to its leaf
+## A source is a node
 
-The scanner↔leaf binding has one home, chosen by cardinality:
+Declare the scanner on the node whose rows it fetches:
 
-- **1:1 (the common case)** — inline on the leaf: `source :fleet_scan` /
-  `driver MyApp.Sources.FleetScan` in the leaf's `reactive` block. The leaf and
-  its scanner travel together; `ReactiveDag.Source.drivers/2` reads the
-  bindings off the graph.
-- **fan-out (rare)** — a scanner that writes cells no single leaf owns names
-  them via its own `leaf_cells/1` and is passed to the host as an *extra*
-  driver.
+```elixir
+reactive do
+  id :fleet
+  leaf? true
+  poll MyApp.Sources.FleetScan, every: "0 * * * *", args: [recent: true]
+end
+```
 
-Either way, `ReactiveDag.Source.verify!/2` confirms at startup that every
-declared leaf is a real cell in the built plan — a renamed cell fails loudly
-instead of a scanner silently writing rows nothing reads.
+Everything downstream is then an ordinary edge — a node reading `over: :fleet`
+is no different from one reading any other input. So the cells a source feeds
+are its children, and `ReactiveDag.Source.cells_of/2` reads them off the plan.
+
+`every:` and `args:` belong here because they describe the **poll**: one crawl
+has one cadence and one bound.
+
+> #### One declaration {: .info}
+>
+> This used to be two — `scan Mod` on each fed leaf, `leaf_cells/1` on the
+> module — with a verifier to catch them disagreeing. There is now one place the
+> pairing is written and one place it is read, so it cannot go stale.
 
 ## Reconcile: the leaf-write skeleton
 
@@ -130,7 +138,7 @@ Name the one value that decides instead:
 reactive do
   id :agenda_docs
   leaf? true
-  scan MyApp.Sources.AgendaCenter
+  poll MyApp.Sources.AgendaCenter
 
   fingerprint [:content_md5]        # hashed and stored on the row
 end
@@ -179,7 +187,7 @@ than being a separate switch —
 ```elixir
 reactive do
   leaf? true
-  scan MyApp.DocCrawler
+  poll MyApp.DocCrawler
 
   retain_if_vanished true                        # keep, silent
   # retain_if_vanished mark: &MyApp.tombstone/1  # ...or mark, and propagate
@@ -204,7 +212,7 @@ fetched is still yours — and may not be re-fetchable. Declare it:
 ```elixir
 reactive do
   leaf? true
-  scan MyApp.DocCrawler
+  poll MyApp.DocCrawler
   retain_if_vanished true
 end
 ```
@@ -354,7 +362,7 @@ A typical host wraps poll + propagate + drain in one function:
 def refresh(source, plan) do
   {:ok, result} = source.poll([])
 
-  for leaf <- source.leaf_cells(plan) do
+  for leaf <- ReactiveDag.Source.cells_of(source, plan) do
     ReactiveDag.Graph.dirty_parents(plan, leaf, result.changed, MyApp.KeyRule)
   end
 
@@ -374,7 +382,7 @@ free; a crawler whose discovery is one request per board per year is not. The
 routine check should be cheap, and the expensive pass should be something you
 ask for — one scanner with two ways to call it, not two scanners.
 
-Both options go on the `scan` declaration, so everything about a leaf reads in
+Both options go on the `poll` declaration, so everything about a source reads in
 one place: what feeds it, what a routine check costs, how often it should
 happen, and what counts as a change.
 
@@ -397,7 +405,7 @@ defmodule MyApp.Docs do
   reactive do
     leaf? true
 
-    scan MyApp.DocCrawler,
+    poll MyApp.DocCrawler,
       args: [recent: true],       # the standing default for a routine poll
       every: "0 * * * *"          # how often a routine poll SHOULD run
 
@@ -588,26 +596,24 @@ MyApp.Machines
 |> Ash.read!()
 ```
 
-## Declaring the scanner: `scan`
+## Declaring the scanner: `poll`
 
-A leaf says which scanner feeds it:
+A source node says which scanner fetches its rows:
 
 ```elixir
 reactive do
-  id :agenda_docs
+  id :agenda_center
   leaf? true
-  scan MuniWatch.Crawler
+  poll MuniWatch.Crawler, every: "0 12 * * *", args: [recent: true]
 end
 ```
 
-That makes the scanner↔leaf pairing **a fact of the graph**, which buys two
-things:
+That makes the source **a node in the graph**, which buys three things:
 
-- **`ReactiveDag.Node.graph/2` verifies it.** The module must implement `ReactiveDag.Source`,
-  and its own `leaf_cells/1` must claim this leaf. A scanner refactored to feed
-  `"agenda_docs_v2"` while a resource still declares `scan` fails at assembly,
-  rather than polling into a cell nobody reads. No `verify!/2` call needed.
-- **`Source.poll_all/2` finds scanners from the plan**, not from a list kept
+- **`ReactiveDag.Node.graph/2` verifies it.** The module must implement
+  `ReactiveDag.Source`. A `poll` naming something that cannot poll fails at
+  assembly.
+- **`Source.poll_all/2` finds sources from the plan**, not from a list kept
   alongside it:
 
 ```elixir
@@ -616,13 +622,52 @@ plan = MyApp.Dag.plan()
 {:ok, report} = ReactiveDag.Drain.run(plan, opts)     # then drain
 ```
 
-A source feeding many leaves is polled **once**, however many leaves name it.
-One scanner failing is reported (`{:error, [{module, reason}]}`) rather than
-cancelling the others or looking like success.
+- **Everything downstream is an ordinary edge.** A node reading `over:
+  :agenda_center` is no different from one reading any other input, so the
+  cascade needs no scan-specific machinery at all.
 
 Polling still happens **outside the drain** — external I/O has no business
-inside a depth-ordered recompute. `scan` changes where the binding is
-*declared*, not when fetching happens.
+inside a depth-ordered recompute.
+
+### One crawl, several outputs
+
+A poll whose rows belong to several downstream nodes needs nothing special. The
+source holds what it found; each consumer projects its own part and **declines**
+the keys that are not its own:
+
+```elixir
+# the source: one row per discovered document, `kind` an ordinary attribute
+reactive do
+  id :agenda_center
+  leaf? true
+  poll MuniWatch.Crawler, every: "0 12 * * *"
+end
+
+# a consumer: the agendas, and only those
+reactive do
+  id :agenda_docs
+
+  reduce over: :agenda_center,
+         group_by: :key,
+         expand: fn key, rows ->
+           case Enum.filter(rows, &(&1.kind == "agenda")) do
+             [] -> [{:skip, key}]                    # not mine — see below
+             [row | _] -> [%{key: key, body: row.body}]
+           end
+         end
+end
+```
+
+`{:skip, key}` says *"this claimed key is not mine"*, which is different from
+*"this key is gone"*. Returning nothing for it would retire the row, report a
+change, and do so again on every poll forever — so a projecting node must
+decline rather than stay silent.
+
+The split is then a **declared property of the rows** (a `kind` column anyone
+can query) rather than a convention buried inside `poll/1`. That matters when
+the classification is not obvious: AgendaCenter files some minutes in the agenda
+slot, so which leaf a document belongs to is decided from the document, not from
+the URL that served it.
 
 ### A scanner is not required to be `leaf? true`…
 
@@ -634,7 +679,7 @@ scanner *and* a computation on one node:
 ```elixir
 reactive do
   id :category_totals
-  scan MyApp.Crawler                 # writes this cell's rows from outside…
+  poll MyApp.Crawler                     # writes this cell's rows from outside…
   reduce into: [sum: [amount: :total]]   # …and derives them from inputs
 end
 ```
@@ -643,14 +688,6 @@ A scanner writes this cell's rows from outside the graph; a combinator derives
 them from its inputs. Declared together, the poll and the drain overwrite each
 other — the drain reprices from inputs and discards whatever the poll wrote,
 which surfaces as data that mysteriously reverts. `graph/2` raises on it.
-
-### When not to use it
-
-`scan` is the **single-leaf** spelling. A source that feeds many leaves — one per
-discovered kind, or a generator's expanded instances — implements
-`leaf_cells/1` and is passed to `verify!/2` directly. That callback takes the
-lowered graph precisely because those leaves come from live data, which no
-declaration can name ahead of time.
 
 ## `dirties_on` vs a `Source`: which trigger?
 

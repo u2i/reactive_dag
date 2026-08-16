@@ -46,7 +46,7 @@ grammar.
 ## Seam 3: `ReactiveDag.Source` — how the world gets in
 
 Covered in depth in [Sources and scanning](sources.md): `id/0`,
-`leaf_cells/1`, `poll/1 → changed keys`, with polling deliberately outside the
+`poll/1 → changed keys`, with polling deliberately outside the
 drain. The seam exists because fetching is effectful and fallible while the
 drain must stay pure and re-runnable.
 

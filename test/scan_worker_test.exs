@@ -68,7 +68,7 @@ defmodule ReactiveDag.ScanWorkerTest do
     reactive do
       id(:docs)
       leaf?(true)
-      scan(ReactiveDag.ScanWorkerTest.Crawler, args: [recent: true], every: "0 * * * *")
+      poll(ReactiveDag.ScanWorkerTest.Crawler, args: [recent: true], every: "0 * * * *")
     end
   end
 
@@ -97,7 +97,7 @@ defmodule ReactiveDag.ScanWorkerTest do
     reactive do
       id(:notices)
       leaf?(true)
-      scan(ReactiveDag.ScanWorkerTest.Crawler)
+      poll(ReactiveDag.ScanWorkerTest.Crawler)
     end
   end
 

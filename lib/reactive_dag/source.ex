@@ -17,28 +17,38 @@ defmodule ReactiveDag.Source do
   never fails on a network outage. Effectful, non-deterministic, fallible I/O
   (that's every scanner) stays in phase 1.
 
-  The scanner↔leaf binding has ONE home, chosen by cardinality:
+  A source is a NODE. It declares `poll MyApp.Sources.FleetScan` in its
+  `reactive` block, and everything that reads it is an ordinary edge:
 
-    * **1:1 (the common case) — inline on the leaf.** `source :fleet_scan` /
-      `driver MyApp.Sources.FleetScan` in the leaf's `reactive` block co-locates
-      the leaf and its scanner in one declaration (they travel together).
-      `ReactiveDag.Source.drivers/2` reads these off the graph (each leaf cell's
-      `meta.driver`).
-    * **fan-out (rare) — on the driver.** A scanner that writes cells no single
-      leaf owns (e.g. many guarantee sub-cells) has no inline `driver` and names
-      its cells via its own `leaf_cells/1`; the host passes it as an `extra`
-      driver.
+      # the source — rows from outside the graph
+      reactive do
+        id :fleet
+        leaf? true
+        poll MyApp.Sources.FleetScan, every: "0 * * * *", args: [recent: true]
+      end
 
-  Either way `verify!/2` confirms every named leaf is a real cell in the built
-  plan (an inline driver's leaf is the node it's declared on).
+      # a consumer — an ordinary node, reading it like any other input
+      reactive do
+        id :diggers
+        reduce over: :fleet, group_by: :key, expand: &diggers_only/2
+      end
+
+  So the cells a source feeds are its children: `Source.cells_of/2` reads them
+  off the plan. There is one declaration and one place it is read.
+
+  It used to be two. A leaf declared `scan Mod`, the module declared
+  `leaf_cells/1` back, and `verify_scan!/3` raised when the copies disagreed —
+  an error class that existed only because the same fact was written twice, with
+  a message asking you to work out which side was stale. `every:` and `args:`
+  had the same problem one level up: spread across the leaves a source fed, they
+  had to be reassembled, and a source feeding two leaves could silently lose the
+  args one of them declared.
 
   ## The contract
 
   Two apps (a data pipeline and a compliance model) independently grew the same
-  three-callback shape — `id` / `leaf_cells` / `poll → changed-keys` — which is
-  why it lives here rather than in either app. A single-leaf source (the common
-  case) may export `leaf_cell/0` instead of `leaf_cells/1`; `cells_of/2`
-  resolves whichever is present.
+  shape — `id` / `poll → changed-keys` — which is why it lives here rather than
+  in either app.
 
       defmodule MyApp.Sources.FleetScan do
         @behaviour ReactiveDag.Source
@@ -47,23 +57,22 @@ defmodule ReactiveDag.Source do
         def id, do: :fleet_scan
 
         @impl true
-        def leaf_cells(_graph), do: ["machines"]
-
-        @impl true
         def poll(_opts) do
-          # fetch the fleet, write the "machines" leaf's rows, return changed keys
+          # fetch the fleet, write the source node's rows, return changed keys
           {:ok, %{changed: ["host-1", "host-7"]}}
         rescue
           e -> {:error, Exception.message(e)}
         end
       end
 
-  ## Fan-out and multi-leaf sources
+  ## Fan-out
 
-  `leaf_cells/1` takes the lowered graph and returns a **list** of cell ids, so a
-  source that feeds many leaves (e.g. one per discovered kind) computes them from
-  the graph, and a source that direct-writes several cells lists them all. A
-  single-leaf source returns `[one_id]`. This list is what `verify/2` checks.
+  One poll whose rows belong to several downstream nodes needs nothing special:
+  the source holds what it found, and each consumer projects its own part with
+  `expand:`, declining the keys that are not its own (`{:skip, key}` — see
+  `ReactiveDag.Node`). One fetch, one cadence, one set of standing args, and the
+  split is a declared property of the rows rather than a convention inside
+  `poll/1`.
   """
 
   @typedoc "The lowered graph — a `ReactiveDag.Plan` (or any map with a `:cells` map keyed by id)."
@@ -71,25 +80,6 @@ defmodule ReactiveDag.Source do
 
   @doc "Stable id of this source (matches the `source :id` binding where declared)."
   @callback id() :: atom()
-
-  @doc """
-  The authoritative set of cell ids this source feeds, given the lowered `graph` —
-  the binding `verify/2` validates. Single-leaf sources return `[leaf]`; fan-out
-  sources compute their per-instance leaves from the graph; multi-leaf sources
-  list every cell they write.
-
-  OPTIONAL: a single-leaf source may instead export `leaf_cell/0` (the common
-  case — one scanner, one leaf) and skip this; `cells_of/2` resolves whichever
-  the module exports. A module must export at least one of the two.
-  """
-  @callback leaf_cells(graph()) :: [String.t()]
-
-  @doc """
-  Single-leaf fallback for `leaf_cells/1`: the ONE cell id this source feeds.
-  For the common one-scanner-one-leaf driver, this is the whole binding — no
-  graph-dependent computation to write.
-  """
-  @callback leaf_cell() :: String.t() | atom()
 
   @doc """
   Poll the external source: fetch → write the leaf tuples → return the leaf keys
@@ -118,71 +108,52 @@ defmodule ReactiveDag.Source do
   """
   @callback origin() :: map() | nil
 
-  @optional_callbacks origin: 0, leaf_cells: 1, leaf_cell: 0
+  @optional_callbacks origin: 0
 
   @doc """
-  The cells `source` feeds in `graph` — the resolver behind `verify!/2`. Uses
-  the module's `leaf_cells/1` when exported, else the single-leaf `leaf_cell/0`
-  fallback (as `[to_string(leaf_cell())]`). Raises `ArgumentError` when the
-  module exports neither.
+  The cells a source feeds, **derived from the graph**.
+
+  A node declares `poll MyCrawler`; everything reading that node is an ordinary
+  edge, so a source's outputs are its children. One declaration, read in one
+  place, and nothing that can go stale.
+
+  It used to be the reverse: the module declared `leaf_cells/1`, each fed leaf
+  declared `scan`, and `verify_scan!/3` caught the two disagreeing. Every
+  implementation in this repo and its host apps ignored the `graph` argument and
+  returned a literal list, restating what the leaves had already said.
+
+  Returns `[]` for a source no node polls — not an error: a plan built from a
+  subset of resources legitimately excludes some.
   """
   @spec cells_of(module(), graph()) :: [String.t()]
-  def cells_of(source, graph) do
-    # ensure_loaded: function_exported?/3 is false for a merely-unloaded module.
-    cond do
-      not Code.ensure_loaded?(source) ->
-        raise ArgumentError, "reactive_dag: source #{inspect(source)} is not a loadable module"
-
-      function_exported?(source, :leaf_cells, 1) ->
-        source.leaf_cells(graph)
-
-      function_exported?(source, :leaf_cell, 0) ->
-        [to_string(source.leaf_cell())]
-
-      true ->
-        raise ArgumentError,
-              "reactive_dag: source #{inspect(source)} exports neither leaf_cells/1 nor " <>
-                "leaf_cell/0 — a source must name the cell(s) it feeds"
-    end
+  def cells_of(source, %{cells: cells}) do
+    for {id, cell} <- cells, cell.meta[:scan] == source, do: id
   end
 
   @doc """
-  Verify a `scan Mod` declaration on the leaf `cell_id`: the module must be a
-  loadable `ReactiveDag.Source`, and its own `leaf_cells/1` must claim this leaf.
+  Verify a `poll Mod` declaration on `cell_id`: the module must be a loadable
+  `ReactiveDag.Source`.
 
-  The second half matters more than it looks. A scanner already knows which
-  cells it feeds; `scan` states the same fact from the other side. Two
-  statements of one fact can disagree, so this is the check that they don't —
-  a scanner refactored to feed `"agenda_docs_v2"` while a resource still
-  declares `scan` fails at assembly rather than polling into a cell nobody
-  reads.
-
-  Called by `ReactiveDag.Node.graph/2` for every cell carrying a `scan`, so a
-  host declaring scanners in the DSL needs no `verify!/2` call of its own.
+  That is the whole check now. It used to also assert the module's own
+  `leaf_cells/1` claimed this cell — a check that existed only because the
+  pairing was written twice, and whose error message asked you to work out which
+  copy was stale. The cells a source feeds are `plan.parents[id]`, so there is
+  one declaration and nothing to disagree with.
   """
-  @spec verify_scan!(module(), String.t(), graph()) :: :ok
-  def verify_scan!(source, cell_id, graph) do
+  @spec verify_poll!(module(), String.t()) :: :ok
+  def verify_poll!(source, cell_id) do
     unless Code.ensure_loaded?(source) do
       raise ArgumentError,
-            "reactive_dag: cell #{inspect(cell_id)} declares `scan #{inspect(source)}`, " <>
+            "reactive_dag: cell #{inspect(cell_id)} declares `poll #{inspect(source)}`, " <>
               "which is not a loadable module."
     end
 
     unless function_exported?(source, :poll, 1) do
       raise ArgumentError,
-            "reactive_dag: cell #{inspect(cell_id)} declares `scan #{inspect(source)}`, " <>
-              "which does not implement `ReactiveDag.Source` (no poll/1). A scan names " <>
-              "the source that FEEDS this leaf; use `compute`/`run` for a node that " <>
-              "computes its own rows."
-    end
-
-    claimed = cells_of(source, graph)
-
-    unless cell_id in claimed do
-      raise ArgumentError,
-            "reactive_dag: cell #{inspect(cell_id)} declares `scan #{inspect(source)}`, but " <>
-              "that source feeds #{inspect(claimed)} — not this leaf. The scanner and the " <>
-              "leaf disagree about which cells it writes; fix whichever is stale."
+            "reactive_dag: cell #{inspect(cell_id)} declares `poll #{inspect(source)}`, " <>
+              "which does not implement `ReactiveDag.Source` (no poll/1). A poll names " <>
+              "the source that FETCHES this node's rows; use `compute`/`run` for a node " <>
+              "that computes its own."
     end
 
     :ok
@@ -501,7 +472,13 @@ defmodule ReactiveDag.Source do
         mod = cell.meta[:scan],
         not is_nil(mod),
         reduce: %{} do
-      acc -> Map.update(acc, mod, cell.meta[:scan_args] || [], &Keyword.merge(&1, cell.meta[:scan_args] || []))
+      acc ->
+        Map.update(
+          acc,
+          mod,
+          cell.meta[:scan_args] || [],
+          &Keyword.merge(&1, cell.meta[:scan_args] || [])
+        )
     end
   end
 
@@ -528,71 +505,5 @@ defmodule ReactiveDag.Source do
     e -> {:error, Exception.message(e)}
   catch
     kind, value -> {:error, {kind, value}}
-  end
-
-  @doc """
-  Verify every source's declared leaves resolve to real cells in `graph` — the
-  authoritative scanner↔leaf check. Each driver's leaves are resolved via
-  `cells_of/2` (`leaf_cells/1`, or the single-leaf `leaf_cell/0` fallback); this
-  confirms every one is a real cell in the built plan. Needs the lowered graph
-  (a host may expand generator leaves from live data), so it runs at
-  assembly/boot time, not compile time.
-
-  Returns `:ok`, or raises `ArgumentError` naming every `{source, dangling_leaf}`.
-  """
-  @spec verify!([module()], graph()) :: :ok
-  def verify!(sources, graph) do
-    verify_cells!(Enum.map(sources, &{&1, cells_of(&1, graph)}), graph)
-  end
-
-  @doc """
-  The same dangling-leaf check as `verify!/2`, but over already-resolved
-  `{source, [cell_id]}` pairs instead of resolving each module via `cells_of/2`.
-  Use this when a host resolves fed cells itself (its own conventions beyond
-  `leaf_cells/1` / `leaf_cell/0`).
-  Returns `:ok`, or raises `ArgumentError` naming every `{source, dangling_leaf}`.
-  """
-  @spec verify_cells!([{module(), [String.t()]}], graph()) :: :ok
-  def verify_cells!(source_cells, graph) do
-    cell_ids = graph.cells |> Map.keys() |> MapSet.new()
-
-    dangling =
-      for {mod, cells} <- source_cells,
-          leaf <- cells,
-          not MapSet.member?(cell_ids, leaf),
-          do: {mod, leaf}
-
-    case dangling do
-      [] ->
-        :ok
-
-      _ ->
-        raise ArgumentError,
-              "source(s) feed a leaf cell absent from the graph: " <>
-                Enum.map_join(dangling, ", ", fn {m, l} -> "#{inspect(m)} -> #{l}" end)
-    end
-  end
-
-  @doc """
-  The scanner drivers feeding a lowered `graph`: the inline ones declared with
-  `driver MyApp.Sources.FleetScan` on a leaf's `reactive` block (read from each
-  leaf cell's `meta.driver`), unioned with any `extra` fan-out drivers a host
-  passes (drivers that name their cells via `leaf_cells/1` because no single
-  leaf owns them). This is the full scanner set — feed it to `verify!/2`, poll
-  it in phase 1.
-  """
-  @spec drivers(graph(), [module()]) :: [module()]
-  def drivers(graph, extra \\ []) do
-    inline =
-      graph.cells
-      |> Map.values()
-      |> Enum.flat_map(fn cell ->
-        case cell.meta[:driver] do
-          nil -> []
-          driver -> [driver]
-        end
-      end)
-
-    (inline ++ extra) |> Enum.uniq()
   end
 end

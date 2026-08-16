@@ -92,8 +92,8 @@ defmodule ReactiveDag.ScanDslTest do
     reactive do
       id(:agenda_docs)
       leaf?(true)
-      # THE DECLARATION: this leaf is fed by that scanner
-      scan(ReactiveDag.ScanDslTest.Crawler)
+      # THE DECLARATION: this node's rows come from that scanner
+      poll(ReactiveDag.ScanDslTest.Crawler)
     end
   end
 
@@ -117,7 +117,7 @@ defmodule ReactiveDag.ScanDslTest do
     reactive do
       id(:flaky)
       leaf?(true)
-      scan(ReactiveDag.ScanDslTest.Exploding)
+      poll(ReactiveDag.ScanDslTest.Exploding)
     end
   end
 
@@ -133,37 +133,15 @@ defmodule ReactiveDag.ScanDslTest do
     assert Source.scanners(plan) == [Crawler]
   end
 
-  test "assembly verifies the pairing — a scanner that disowns the leaf raises" do
-    defmodule Mismatched do
-      use Ash.Resource,
-        domain: ReactiveDag.ScanDslTest.Domain,
-        data_layer: Ash.DataLayer.Ets,
-        extensions: [ReactiveDag.Node]
+  test "a source's fed cells are its children — nothing to disagree with" do
+    # This replaced a test asserting that a scanner "disowning" its leaf raises.
+    # That error was only possible because the pairing was written twice: `scan
+    # Mod` on the leaf and `leaf_cells/1` on the module. A node declares `poll
+    # Mod`, its consumers declare an ordinary edge, and the fed set is derived —
+    # so the disagreement is unrepresentable rather than caught.
+    plan = ReactiveDag.Node.graph([AgendaDocs])
 
-      ets do
-      end
-
-      attributes do
-        attribute :key, :string, primary_key?: true, allow_nil?: false, public?: true
-      end
-
-      actions do
-        defaults [:read]
-      end
-
-      reactive do
-        id(:mismatched)
-        leaf?(true)
-        scan(ReactiveDag.ScanDslTest.Disowning)
-      end
-    end
-
-    err = assert_raise ArgumentError, fn -> ReactiveDag.Node.graph([Mismatched]) end
-
-    # names both sides of the disagreement, so it's obvious which is stale
-    assert Exception.message(err) =~ "mismatched"
-    assert Exception.message(err) =~ "somewhere_else"
-    assert Exception.message(err) =~ "not this leaf"
+    assert ReactiveDag.Source.cells_of(ReactiveDag.ScanDslTest.Crawler, plan) == ["agenda_docs"]
   end
 
   test "a `scan` naming something that isn't a Source raises, with the fix" do
@@ -187,7 +165,7 @@ defmodule ReactiveDag.ScanDslTest do
       reactive do
         id(:bad_scan)
         leaf?(true)
-        scan(ReactiveDag.ScanDslTest.NotASource)
+        poll(ReactiveDag.ScanDslTest.NotASource)
       end
     end
 
@@ -313,7 +291,7 @@ defmodule ReactiveDag.ScanDslTest do
 
       reactive do
         id(:agenda_docs)
-        scan(ReactiveDag.ScanDslTest.Crawler)
+        poll(ReactiveDag.ScanDslTest.Crawler)
         recompute_by :key, to: :other, from: :cat
         reduce into: [count: :n]
       end
@@ -325,6 +303,6 @@ defmodule ReactiveDag.ScanDslTest do
     assert msg =~ "AND a computation"
     assert msg =~ ":reduce"
     # says what to do about it, not merely that it's wrong
-    assert msg =~ "Keep the scan"
+    assert msg =~ "Keep the poll"
   end
 end
