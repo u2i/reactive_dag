@@ -444,6 +444,48 @@ bespoke multi-input recompute. The op receives `(cell, dirty_keys)`, reads its
 inputs however it likes, writes its rows however it likes, and returns the
 keys that actually changed.
 
+### `slice` — the dimension a person selects by
+
+`recompute_by` says what unit a *change* invalidates. `slice` says what unit a
+*person* picks, and they are rarely the same:
+
+```elixir
+reactive do
+  recompute_by :category, to: :expenses, from: :category
+  reduce group_by: :category, into: [sum: [amount: :total]]
+
+  slice :fiscal_year, values: {MyApp.Osc, :available_years, []}
+end
+```
+
+That node recomputes per category. An operator still asks about a *year* —
+"reprocess just FY25", "the prompt changed, re-run last year's documents" — and
+nothing generic can find the year in a row: a cell key is one column or a
+`"|"`-joined identity, so `fiscal_year` on one node and `published_on` on
+another are equally invisible until the node names one.
+
+With it declared, selection is a read and reprocessing is a mark:
+
+```elixir
+keys = ReactiveDag.Node.Rows.keys_where(cell, fiscal_year: "FY25")
+ReactiveDag.Frontier.mark_dirty("budget_rollups", keys, "reprocess FY25")
+```
+
+`values:` is what makes a control a choice rather than a text box — only the host
+knows which fiscal years exist, and usually already has the function that says
+so. Omit it and a UI must take free text. `ReactiveDag.Node.Rows.slices/1`
+reports the declarations with their options resolved, which is what a dashboard
+renders from.
+
+Nothing stops a caller filtering on any column with `keys_where/2`; the
+declaration is what makes a *UI* possible, not what makes a filter legal.
+
+**Not time-shaped, deliberately.** The obvious first guess is a date range, and
+it fits almost nothing here: the dimension in practice is a `"FY22"` string, and
+a processing version is not temporal at all. Time is one instance of slicing —
+a node declaring `slice :published_on` gets a date control — rather than its
+shape.
+
 ## Input edges
 
 ```elixir

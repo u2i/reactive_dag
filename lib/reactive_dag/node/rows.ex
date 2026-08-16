@@ -190,6 +190,61 @@ defmodule ReactiveDag.Node.Rows do
   end
 
   @doc """
+  The keys whose rows match `filter` — the selection behind "reprocess just this
+  year".
+
+      Rows.keys_where(cell, fiscal_year: "FY25")
+      #=> ["FY25|gf", "FY25|water"]
+
+  The filter goes to the datastore; keys are built here, because an
+  identity-keyed node's key is a `"|"`-join no datastore knows. So this decodes
+  what matched rather than the table.
+
+  A node declares which columns are meant for this with `slice`, and
+  `slices/1` reports them — but nothing stops a caller filtering on any column
+  it knows about. The declaration is what makes a UI possible, not what makes
+  the filter legal.
+  """
+  @spec keys_where(Cell.t() | source(), keyword()) :: [String.t()]
+  def keys_where(%Cell{meta: meta}, filter), do: keys_where(meta, filter)
+
+  def keys_where(%{} = source, filter) do
+    case queryable(source) do
+      nil ->
+        []
+
+      resource ->
+        resource
+        |> Ash.Query.do_filter(filter)
+        |> Ash.read!()
+        |> Enum.map(keyer(source))
+        |> Enum.sort()
+    end
+  end
+
+  @doc """
+  The dimensions this node declared a human may select it by, with their options
+  resolved.
+
+      Rows.slices(cell)
+      #=> [%{column: :fiscal_year, label: "fiscal_year", values: ["FY24", "FY25"]}]
+
+  `values` is `nil` when the node named no options — a UI then takes free text,
+  or offers nothing.
+  """
+  @spec slices(Cell.t() | source()) :: [map()]
+  def slices(%Cell{meta: meta}), do: slices(meta)
+
+  def slices(%{} = source) do
+    for slice <- source[:slices] || [] do
+      %{slice | values: resolve_values(slice.values)}
+    end
+  end
+
+  defp resolve_values({m, f, a}), do: apply(m, f, a)
+  defp resolve_values(values), do: values
+
+  @doc """
   Reconcile a leaf's rows against the key set a scan found — the algorithm every
   leaf driver otherwise hand-rolls.
 
