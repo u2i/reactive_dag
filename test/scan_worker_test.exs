@@ -620,4 +620,138 @@ defmodule ReactiveDag.ScanWorkerTest do
       assert meta.args["run_id"] == "run-5", "still attributable to its run"
     end
   end
+
+  describe "a sweep keeps its per-source detail" do
+    # `poll_all/2` returns `%{module => result}` — each source's own `changed`,
+    # `unreachable`, and whatever else it reported. The sweep used to compute a
+    # total from it and drop the rest, so a host's activity log went from
+    # "machines polled at 14:03, wrote 4 rows, Huntress unreachable" to "a sweep
+    # ran, eight sources participated" (u2i/reactive_dag#133).
+    defp sweep(extra \\ %{}) do
+      ReactiveDag.ScanWorker.perform(%Oban.Job{
+        args:
+          Map.merge(
+            %{
+              "sweep" => true,
+              "plan_mfa" => ["ReactiveDag.ScanWorkerTest", "plan_for_worker", []]
+            },
+            extra
+          )
+      })
+    end
+
+    test "stop carries each source's own result, not just its name" do
+      test_pid = self()
+
+      :telemetry.attach(
+        "sweep-results",
+        [:reactive_dag, :scan, :stop],
+        fn _e, _m, meta, _ -> send(test_pid, {:stop, meta}) end,
+        nil
+      )
+
+      on_exit(fn -> :telemetry.detach("sweep-results") end)
+
+      Crawler.returns(%{changed: %{"docs" => ["d1"]}, unreachable: [{"archive", :timeout}]})
+
+      sweep()
+
+      assert_received {:stop, meta}
+      assert %{} = meta.results
+
+      result = meta.results[Crawler]
+      assert result.changed == %{"docs" => ["d1"]}
+      assert result.unreachable == [{"archive", :timeout}], "the outage survives the aggregate"
+    end
+
+    test "and the aggregate is still there for a host that only wants the total" do
+      test_pid = self()
+
+      :telemetry.attach(
+        "sweep-total",
+        [:reactive_dag, :scan, :stop],
+        fn _e, m, meta, _ -> send(test_pid, {:stop, m, meta}) end,
+        nil
+      )
+
+      on_exit(fn -> :telemetry.detach("sweep-total") end)
+
+      Crawler.returns(%{changed: %{"docs" => ["d1"]}})
+      sweep()
+
+      assert_received {:stop, m, meta}
+      assert m.changed == 1
+      assert Crawler in meta.sources
+    end
+  end
+
+  describe "source_stop — progress through a long sweep" do
+    test "fires once per source, as it finishes" do
+      test_pid = self()
+
+      :telemetry.attach(
+        "source-stop",
+        [:reactive_dag, :scan, :source_stop],
+        fn _e, m, meta, _ -> send(test_pid, {:src, meta.source, meta.result, m}) end,
+        nil
+      )
+
+      on_exit(fn -> :telemetry.detach("source-stop") end)
+
+      Crawler.returns(%{changed: %{"docs" => ["d1"]}})
+
+      ReactiveDag.ScanWorker.perform(%Oban.Job{
+        args: %{
+          "sweep" => true,
+          "plan_mfa" => ["ReactiveDag.ScanWorkerTest", "plan_for_worker", []]
+        }
+      })
+
+      assert_received {:src, Crawler, {:ok, result}, m}
+      assert result.changed == %{"docs" => ["d1"]}
+      assert is_integer(m.duration_us), "how long THIS source took, not the sweep"
+    end
+
+    test "a FAILING source still reports — that is the thing worth recording" do
+      test_pid = self()
+
+      :telemetry.attach(
+        "source-stop-fail",
+        [:reactive_dag, :scan, :source_stop],
+        fn _e, _m, meta, _ -> send(test_pid, {:src, meta.source, meta.result}) end,
+        nil
+      )
+
+      on_exit(fn -> :telemetry.detach("source-stop-fail") end)
+
+      Crawler.raises()
+
+      ReactiveDag.ScanWorker.perform(%Oban.Job{
+        args: %{
+          "sweep" => true,
+          "plan_mfa" => ["ReactiveDag.ScanWorkerTest", "plan_for_worker", []]
+        }
+      })
+
+      assert_received {:src, Crawler, {:error, reason}}
+      assert reason =~ "upstream is down"
+    end
+
+    test "it comes from poll_all/2, so a direct caller sees it too" do
+      test_pid = self()
+
+      :telemetry.attach(
+        "source-stop-direct",
+        [:reactive_dag, :scan, :source_stop],
+        fn _e, _m, meta, _ -> send(test_pid, {:src, meta.source}) end,
+        nil
+      )
+
+      on_exit(fn -> :telemetry.detach("source-stop-direct") end)
+
+      Source.poll_all(plan())
+
+      assert_received {:src, Crawler}
+    end
+  end
 end
