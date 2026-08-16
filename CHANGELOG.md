@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.17.0-rc.21](https://github.com/u2i/reactive_dag/compare/v0.17.0-rc.20...v0.17.0-rc.21) (2026-08-16)
+
+
+### ⚠ BREAKING CHANGES
+
+* a source is a node — `poll` replaces `scan`, and the pairing is an edge
+
+### Features
+
+* a node can decline a claimed key, distinct from retiring it ([17bd42c](https://github.com/u2i/reactive_dag/commit/17bd42cba8ffda0b9bb351851f524c47303d9f7b))
+* a node can decline a claimed key, distinct from retiring it ([226e9a7](https://github.com/u2i/reactive_dag/commit/226e9a7773906e6a18c6c68edcf457863457e4f4))
+* a source is a node — `poll` replaces `scan`, and the pairing is an edge ([caeed28](https://github.com/u2i/reactive_dag/commit/caeed2879685c5ffced720c773282810ec0c4d3f))
+
 ## [0.17.0-rc.20](https://github.com/u2i/reactive_dag/compare/v0.17.0-rc.19...v0.17.0-rc.20) (2026-08-16)
 
 
