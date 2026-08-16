@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.17.0-rc.11](https://github.com/u2i/reactive_dag/compare/v0.17.0-rc.10...v0.17.0-rc.11) (2026-08-16)
+
+
+### ⚠ BREAKING CHANGES
+
+* `Rows.reconcile/3` returns `{:ok, changed, detail}` rather than `{:ok, changed}`, and `Payload.upsert/6`/`upsert_identity/5` may return `:created`. A caller matching `{:ok, changed}` adds `_`; one matching `== :changed` on an upsert wants `!= :unchanged`.
+
+### Features
+
+* reconcile/3 returns what it already knew — created/updated/revived/retired ([7ad6cb5](https://github.com/u2i/reactive_dag/commit/7ad6cb51a91c3f99fb28b0a5c16efcba1510bfd5))
+
 ## [0.17.0-rc.10](https://github.com/u2i/reactive_dag/compare/v0.17.0-rc.9...v0.17.0-rc.10) (2026-08-15)
 
 
