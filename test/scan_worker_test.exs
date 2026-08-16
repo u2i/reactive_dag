@@ -41,6 +41,9 @@ defmodule ReactiveDag.ScanWorkerTest do
 
       case Agent.get(__MODULE__, & &1.result) do
         :raise -> raise "upstream is down"
+        # a scanner reporting it CANNOT scan, rather than a poll that found
+        # nothing — the distinction #122 is about
+        {:error, _} = error -> error
         result -> {:ok, result || %{changed: []}}
       end
     end
@@ -321,9 +324,11 @@ defmodule ReactiveDag.ScanWorkerTest do
       assert opts[:recent] == false
     end
 
-    test "a cell with no scanner does not fail the job" do
-      # nothing to retry: it will have no scanner next attempt either
-      assert :ok =
+    test "a cell with no scanner is CANCELLED, not failed and not silently ok" do
+      # nothing to retry — it will have no scanner next attempt either — but
+      # `:ok` claimed a scan happened. `{:cancel, _}` is Oban's word for
+      # "complete, and do not try again", which is exactly this.
+      assert {:cancel, :no_scanner} =
                perform_job(%{
                  "cell" => "totals",
                  "plan_mfa" => ["ReactiveDag.ScanWorkerTest", "plan_for_worker", []]
@@ -548,6 +553,71 @@ defmodule ReactiveDag.ScanWorkerTest do
       assert start_meta.cell == :sweep
       assert start_meta.args["run_id"] == "run-3"
       assert is_list(stop_meta.sources)
+    end
+  end
+
+  describe "not scannable — the third outcome" do
+    # A scan can succeed, fail in a way retrying might fix, or be structurally
+    # unscannable: no credential configured, an integration not enabled for this
+    # tenant. Retrying cannot conjure a missing credential, and burning every
+    # attempt to land in `discarded` reads as "something is broken" when the
+    # honest answer is "this was never going to work" (u2i/reactive_dag#122).
+    test "a scanner saying so is cancelled, not retried" do
+      Crawler.returns({:error, :not_scannable})
+
+      assert {:cancel, :not_scannable} =
+               perform_job(%{
+                 "cell" => "docs",
+                 "plan_mfa" => ["ReactiveDag.ScanWorkerTest", "plan_for_worker", []]
+               })
+    end
+
+    test "and it can say WHY" do
+      Crawler.returns({:error, {:not_scannable, :no_credential}})
+
+      assert {:cancel, {:not_scannable, :no_credential}} =
+               perform_job(%{
+                 "cell" => "docs",
+                 "plan_mfa" => ["ReactiveDag.ScanWorkerTest", "plan_for_worker", []]
+               })
+    end
+
+    test "an ORDINARY error still retries — the distinction is the point" do
+      Crawler.returns({:error, :timeout})
+
+      assert {:error, :timeout} =
+               perform_job(%{
+                 "cell" => "docs",
+                 "plan_mfa" => ["ReactiveDag.ScanWorkerTest", "plan_for_worker", []]
+               })
+    end
+
+    test "stop still fires: an unscannable source is a COMPLETED scan" do
+      # a host recording scan results wants the row — "we looked, and there was
+      # nothing to look with" is an outcome, not an absence
+      test_pid = self()
+
+      :telemetry.attach(
+        "unscannable-stop",
+        [:reactive_dag, :scan, :stop],
+        fn _e, m, meta, _ -> send(test_pid, {:stop, m, meta}) end,
+        nil
+      )
+
+      on_exit(fn -> :telemetry.detach("unscannable-stop") end)
+
+      Crawler.returns({:error, {:not_scannable, :no_credential}})
+
+      perform_job(%{
+        "cell" => "docs",
+        "run_id" => "run-5",
+        "plan_mfa" => ["ReactiveDag.ScanWorkerTest", "plan_for_worker", []]
+      })
+
+      assert_received {:stop, m, meta}
+      assert m.changed == 0
+      assert meta.not_scannable == {:not_scannable, :no_credential}
+      assert meta.args["run_id"] == "run-5", "still attributable to its run"
     end
   end
 end
