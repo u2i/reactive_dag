@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.17.0-rc.12](https://github.com/u2i/reactive_dag/compare/v0.17.0-rc.11...v0.17.0-rc.12) (2026-08-16)
+
+
+### Features
+
+* slice — declare the dimension a person selects a node by ([00272a1](https://github.com/u2i/reactive_dag/commit/00272a10819fcb26cde5aa8b04c9ebecfb012190))
+* slice — declare the dimension a person selects a node by ([d72bc17](https://github.com/u2i/reactive_dag/commit/d72bc1727ba5f3bcd778d53ca6e3a870741bb35c))
+
 ## [0.17.0-rc.11](https://github.com/u2i/reactive_dag/compare/v0.17.0-rc.10...v0.17.0-rc.11) (2026-08-16)
 
 
