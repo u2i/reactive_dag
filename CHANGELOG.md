@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.17.0-rc.18](https://github.com/u2i/reactive_dag/compare/v0.17.0-rc.17...v0.17.0-rc.18) (2026-08-16)
+
+
+### Features
+
+* a drain step carries op and depth ([f575712](https://github.com/u2i/reactive_dag/commit/f575712abeb725399a60af6242f2e1d83eecb719))
+* a drain step carries op and depth ([#114](https://github.com/u2i/reactive_dag/issues/114)) ([dbc326e](https://github.com/u2i/reactive_dag/commit/dbc326e5ef97cfc1b731a413a9a5aba5df04b912))
+
 ## [0.17.0-rc.17](https://github.com/u2i/reactive_dag/compare/v0.17.0-rc.16...v0.17.0-rc.17) (2026-08-16)
 
 
