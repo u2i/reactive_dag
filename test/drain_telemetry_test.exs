@@ -318,4 +318,39 @@ defmodule ReactiveDag.DrainTelemetryTest do
       0 -> Enum.reverse(acc)
     end
   end
+  describe "a step is a durable record, not just a live signal" do
+    # A host writing a processing log reads these rows back long after the plan
+    # that produced them has moved on — so anything needing a plan lookup to
+    # recover is effectively unrecoverable (u2i/reactive_dag#114).
+    test "carries the cell's op and depth, which a step cannot otherwise recover" do
+      Frontier.mark_dirty("expenses", ["e1"], "test")
+
+      {:ok, report} = drain()
+
+      rollup = Enum.find(report.steps, &(&1.cell == "category_totals"))
+
+      assert rollup.depth == 1, "one hop from the leaf"
+      assert Map.has_key?(rollup, :op)
+    end
+
+    test "the telemetry step carries them too, so a live consumer sees the same shape" do
+      test_pid = self()
+
+      :telemetry.attach(
+        "step-shape",
+        [:reactive_dag, :drain, :step],
+        fn _e, _m, meta, _ -> send(test_pid, {:step, meta.cell, meta.step}) end,
+        nil
+      )
+
+      on_exit(fn -> :telemetry.detach("step-shape") end)
+
+      Frontier.mark_dirty("expenses", ["e1"], "test")
+      {:ok, _} = drain()
+
+      assert_received {:step, "category_totals", step}
+      assert step.depth == 1
+    end
+  end
+
 end
