@@ -47,6 +47,7 @@ defmodule ReactiveDag.Insights do
           op: atom() | nil,
           statuses: %{(String.t() | nil) => non_neg_integer()},
           key_count: non_neg_integer(),
+          rows: :stored | :elsewhere | :unreadable,
           failing_sample: [String.t()]
         }
 
@@ -102,7 +103,21 @@ defmodule ReactiveDag.Insights do
   end
 
   defp build_status(cell, depth) do
-    statuses = safe(fn -> Rows.status_histogram(cell) end, %{})
+    {statuses, rows} =
+      case rows_kind(cell) do
+        # No table by DESIGN — a write-elsewhere or escape-hatch node
+        # (`Ash.DataLayer.Simple`, no attributes). Reading it is not a failure,
+        # and an empty histogram here means "nothing lives here", which is a
+        # different sentence from "I could not look".
+        :elsewhere ->
+          {%{}, :elsewhere}
+
+        :stored ->
+          case safe(fn -> Rows.status_histogram(cell) end) do
+            {:ok, statuses} -> {statuses, :stored}
+            :error -> {%{}, :unreadable}
+          end
+      end
 
     %{
       id: cell.id,
@@ -116,8 +131,23 @@ defmodule ReactiveDag.Insights do
       # summed from the histogram rather than counted again: the histogram is
       # already one COUNT per status, so the total is free.
       key_count: statuses |> Map.values() |> Enum.sum(),
+      # WHY the count is what it is. A zero from a real table, a node that keeps
+      # its rows elsewhere, and a read that failed are three different states,
+      # and a consumer collapsing them shows an alarm for two non-problems.
+      rows: rows,
       failing_sample: failing_sample(cell, statuses)
     }
+  end
+
+  # A node with no attributes has no table to read — that is the declared
+  # write-elsewhere / escape-hatch shape, not a fault. Mirrors the guard
+  # `Rows.queryable/1` uses.
+  defp rows_kind(cell) do
+    resource = cell.meta[:resource]
+
+    if is_nil(resource) or Ash.Resource.Info.attributes(resource) == [],
+      do: :elsewhere,
+      else: :stored
   end
 
   # only pay for the sample when something is actually failing. A nil status is
@@ -263,11 +293,19 @@ defmodule ReactiveDag.Insights do
   # a node's resource may be unreadable in the context this is called from (a
   # policy, an unmigrated table, a data layer that isn't up) — a dashboard
   # should degrade to "structure only" rather than crash the page.
-  defp safe(fun, default) do
-    fun.()
+  defp safe(fun) do
+    {:ok, fun.()}
   rescue
-    _ -> default
+    _ -> :error
   catch
-    _, _ -> default
+    _, _ -> :error
+  end
+
+  # the degrade-to-a-default form, for reads whose failure needs no distinction
+  defp safe(fun, default) do
+    case safe(fun) do
+      {:ok, value} -> value
+      :error -> default
+    end
   end
 end
