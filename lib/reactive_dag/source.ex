@@ -83,7 +83,17 @@ defmodule ReactiveDag.Source do
 
   @doc """
   Poll the external source: fetch → write the leaf tuples → return the leaf keys
-  that changed. `{:error, reason}` when it couldn't run at all (no credential,
+  that changed.
+
+  Three shapes, in ascending order of how much they say:
+
+      {:ok, ["k1", "k2"]}                     the changed keys, bare
+      {:ok, %{changed: ["k1"]}}               ...plus `unreachable` / `detail`
+      {:ok, %{changed: %{leaf => keys}}}      one poll, several cells
+
+  The bare list is the common case and belongs to the cell being polled. The
+  map form is what a scanner reaching several cells, or reporting an outage,
+  needs. `{:error, reason}` when it couldn't run at all (no credential,
   API down) — contained, not raised, so one bad source doesn't abort a refresh.
   `arg` is source-specific (a since-timestamp, a manifest path, opts).
 
@@ -94,11 +104,13 @@ defmodule ReactiveDag.Source do
   nothing you couldn't see, and surface the outage for the host to display.
   """
   @callback poll(arg :: term()) ::
-              {:ok,
-               %{
-                 :changed => [String.t()],
-                 optional(:unreachable) => [{String.t(), term()}]
-               }}
+              {:ok, [String.t()]}
+              | {:ok,
+                 %{
+                   :changed => [String.t()] | %{optional(String.t()) => [String.t()]},
+                   optional(:unreachable) => [{String.t(), term()}],
+                   optional(:detail) => map()
+                 }}
               | {:error, term()}
 
   @doc """
@@ -320,7 +332,12 @@ defmodule ReactiveDag.Source do
     poll_opts = Keyword.delete(poll_opts, :key_rule)
 
     case poll_cell(graph, cell_id, poll_opts) do
-      {:ok, result} ->
+      {:ok, raw} ->
+        # ONE normalisation, at the boundary. A bare list is a documented shape
+        # and three separate `Map.get(result, …)` calls downstream each raised
+        # on it — the reported crash was only the first of them, so fixing that
+        # site alone would have moved the failure rather than removed it.
+        result = normalise(raw)
         marked = mark(graph, cell_id, result, reason, key_rule)
 
         {:ok,
@@ -340,13 +357,44 @@ defmodule ReactiveDag.Source do
     end
   end
 
+  # Three shapes a poll can report its changed keys in, and the flat ones matter:
+  #
+  #   {:ok, ["k1"]}                      — the keys, bare
+  #   {:ok, %{changed: ["k1"]}}          — the keys, plus `unreachable`/`detail`
+  #   {:ok, %{changed: %{leaf => keys}}} — one poll, several leaves
+  #
+  # The bare list was documented and unreachable: the old code did
+  # `Map.get(result, :changed, [])` FIRST, which raises `BadMapError` on a list
+  # before the `is_list` clause it was guarding could match. Every scan of such
+  # a source died on attempt 1, and through `ScanWorker` that reads as a button
+  # that does nothing (u2i/reactive_dag#138).
+  #
+  # Worth supporting rather than rejecting: `refresh_source/3` already takes the
+  # bare list, so refusing it here would have the two entry points disagree
+  # about the same scanner.
+  defp by_leaf(%{changed: keys}, cell_id) when is_list(keys), do: %{cell_id => keys}
+
+  defp by_leaf(%{changed: %{} = by_leaf}, _cell_id),
+    do: Map.new(by_leaf, fn {leaf, keys} -> {to_string(leaf), keys} end)
+
+  defp by_leaf(%{}, _cell_id), do: %{}
+
+  # A bare list IS the changed keys; anything else is a scanner returning a
+  # shape the contract does not name, and saying which three are accepted beats
+  # a `BadMapError` from three frames down.
+  defp normalise(keys) when is_list(keys), do: %{changed: keys}
+  defp normalise(%{} = result), do: result
+
+  defp normalise(other) do
+    raise ArgumentError,
+          "reactive_dag: a scanner reported #{inspect(other)}. Return the changed keys as " <>
+            "a list, `%{changed: keys}`, or `%{changed: %{leaf_id => keys}}` when one poll " <>
+            "feeds several cells."
+  end
+
   # A flat list belongs to the cell that was polled; a map names its own leaves.
   defp mark(graph, cell_id, result, reason, key_rule) do
-    by_leaf =
-      case Map.get(result, :changed, []) do
-        keys when is_list(keys) -> %{cell_id => keys}
-        %{} = by_leaf -> Map.new(by_leaf, fn {leaf, keys} -> {to_string(leaf), keys} end)
-      end
+    by_leaf = by_leaf(result, cell_id)
 
     for {leaf, keys} <- by_leaf, keys != [], into: %{} do
       ReactiveDag.Frontier.mark_dirty(leaf, keys, reason)
