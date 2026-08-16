@@ -239,6 +239,7 @@ defmodule ReactiveDag.ScanDslTest do
       assert {:ok, %{}} = Source.poll_all(plan)
     end
   end
+
   test "a scanner AND a computation on one node is a contradiction, and fails" do
     # a scanner writes tuples from outside; a combinator derives them from
     # inputs. Together the poll and the drain overwrite each other.
@@ -292,8 +293,8 @@ defmodule ReactiveDag.ScanDslTest do
       reactive do
         id(:agenda_docs)
         poll(ReactiveDag.ScanDslTest.Crawler)
-        recompute_by :key, to: :other, from: :cat
-        reduce into: [count: :n]
+        recompute_by(:key, to: :other, from: :cat)
+        reduce(into: [count: :n])
       end
     end
 
@@ -304,5 +305,80 @@ defmodule ReactiveDag.ScanDslTest do
     assert msg =~ ":reduce"
     # says what to do about it, not merely that it's wrong
     assert msg =~ "Keep the poll"
+  end
+
+  describe "one node per source" do
+    # Before rc.21 the same scanner on several leaves was the FAN-OUT shape: the
+    # module declared `leaf_cells/1` and wrote them all. Now everything reading
+    # a source is an ordinary edge, so two nodes naming one module means the
+    # upstream is polled twice — `crontab/2` emits an entry each, and nothing
+    # downstream can notice.
+    test "two nodes declaring the same scanner raises, with the fix" do
+      err =
+        assert_raise ArgumentError, fn ->
+          defmodule TwiceA do
+            use Ash.Resource,
+              domain: ReactiveDag.ScanDslTest.Domain,
+              data_layer: Ash.DataLayer.Ets,
+              extensions: [ReactiveDag.Node]
+
+            ets do
+            end
+
+            attributes do
+              attribute(:key, :string, primary_key?: true, allow_nil?: false, public?: true)
+            end
+
+            actions do
+              defaults([:read, :destroy])
+              create(:upsert, upsert?: true, accept: [:key])
+            end
+
+            reactive do
+              id(:twice_a)
+              leaf?(true)
+              poll(ReactiveDag.ScanDslTest.Crawler)
+            end
+          end
+
+          defmodule TwiceB do
+            use Ash.Resource,
+              domain: ReactiveDag.ScanDslTest.Domain,
+              data_layer: Ash.DataLayer.Ets,
+              extensions: [ReactiveDag.Node]
+
+            ets do
+            end
+
+            attributes do
+              attribute(:key, :string, primary_key?: true, allow_nil?: false, public?: true)
+            end
+
+            actions do
+              defaults([:read, :destroy])
+              create(:upsert, upsert?: true, accept: [:key])
+            end
+
+            reactive do
+              id(:twice_b)
+              leaf?(true)
+              poll(ReactiveDag.ScanDslTest.Crawler)
+            end
+          end
+
+          ReactiveDag.Node.graph([TwiceA, TwiceB])
+        end
+
+      msg = Exception.message(err)
+
+      assert msg =~ "twice_a, twice_b"
+      assert msg =~ "polled 2 times"
+      assert msg =~ "reduce over:", "the message shows the shape that replaces it"
+    end
+
+    test "one node per scanner is fine, however many read it" do
+      # `agenda_docs` polls; anything consuming it is an ordinary edge
+      assert %ReactiveDag.Plan{} = ReactiveDag.Node.graph([AgendaDocs])
+    end
   end
 end
