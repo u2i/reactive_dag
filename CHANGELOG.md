@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.17.0-rc.22](https://github.com/u2i/reactive_dag/compare/v0.17.0-rc.21...v0.17.0-rc.22) (2026-08-16)
+
+
+### Features
+
+* a sweep is the default crontab — one job, all sources, graph order ([c440c2a](https://github.com/u2i/reactive_dag/commit/c440c2a0171c2b6c18d19e06d6d174a4c7dbb3bc))
+* crontab/3 takes `order:`, and drops a dedup source-as-node made vestigial ([4b53f20](https://github.com/u2i/reactive_dag/commit/4b53f2027d18c33e0e441733fcce33e3e1fcfbfb))
+* crontab/3 takes order:, and drops a dedup source-as-node made vestigial ([472e6ab](https://github.com/u2i/reactive_dag/commit/472e6ab4c80b17acf8ccc6d1bacf10341dea00a4))
+* make the sweep safe under duplicate enqueues and a multi-node cluster ([c1fce64](https://github.com/u2i/reactive_dag/commit/c1fce641cf3a28cc87d59cd330187664d9586f5b))
+* order the SWEEP, not just the crontab list ([5c5fdca](https://github.com/u2i/reactive_dag/commit/5c5fdca5809478c93cd0f862aa7d2ebb1f785091))
+
 ## [0.17.0-rc.21](https://github.com/u2i/reactive_dag/compare/v0.17.0-rc.20...v0.17.0-rc.21) (2026-08-16)
 
 
