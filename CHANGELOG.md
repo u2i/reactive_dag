@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.17.0-rc.23](https://github.com/u2i/reactive_dag/compare/v0.17.0-rc.22...v0.17.0-rc.23) (2026-08-16)
+
+
+### Features
+
+* a scan can be cancelled, not just succeed or fail ([76b59b3](https://github.com/u2i/reactive_dag/commit/76b59b323e19cd185d0c4fe7034abf9f49b183bd))
+* a scan can be cancelled, not just succeed or fail ([#122](https://github.com/u2i/reactive_dag/issues/122)) ([8fefe40](https://github.com/u2i/reactive_dag/commit/8fefe4047e59111a261780f9065e60e818fd3a99))
+
 ## [0.17.0-rc.22](https://github.com/u2i/reactive_dag/compare/v0.17.0-rc.21...v0.17.0-rc.22) (2026-08-16)
 
 
