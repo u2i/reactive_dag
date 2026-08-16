@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.17.0-rc.25](https://github.com/u2i/reactive_dag/compare/v0.17.0-rc.24...v0.17.0-rc.25) (2026-08-16)
+
+
+### Features
+
+* reject two nodes declaring one scanner; say why a tableless slice fails ([6c4ad6b](https://github.com/u2i/reactive_dag/commit/6c4ad6b70aaa7f4dafc669a6d1edf0b6a1075ee0))
+* reject two nodes declaring one scanner; say why a tableless slice fails ([b1cf079](https://github.com/u2i/reactive_dag/commit/b1cf0791caf42f21623b0a98877820f20b345af2))
+
+
+### Bug Fixes
+
+* a bare-list poll result no longer crashes the scan ([980b434](https://github.com/u2i/reactive_dag/commit/980b4343c20d05b3f3a907b721d9cf0338672ad1))
+* a bare-list poll result no longer crashes the scan ([#138](https://github.com/u2i/reactive_dag/issues/138)) ([669a21f](https://github.com/u2i/reactive_dag/commit/669a21f471873564a7ce34ef48494b12e6209389))
+
 ## [0.17.0-rc.24](https://github.com/u2i/reactive_dag/compare/v0.17.0-rc.23...v0.17.0-rc.24) (2026-08-16)
 
 
