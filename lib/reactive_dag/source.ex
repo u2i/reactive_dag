@@ -431,7 +431,24 @@ defmodule ReactiveDag.Source do
       Source.crontab(plan, MyApp.ScanWorker, args: %{"queue" => "crawls"})
 
   merged UNDER the `"cell"` this computes, so a typo cannot silently retarget
-  the job at a different leaf. A host that wants per-firing values wraps the
+  the job at a different leaf.
+
+  ## Ordering
+
+  Entries are alphabetical by cell — deterministic, so the list does not shift
+  with map ordering, but arbitrary. A host whose scan order carries meaning says
+  so:
+
+      Source.crontab(plan, MyWorker, order: [:observations, :verdicts])
+
+  Anything unlisted keeps the alphabetical tail. `order:` also takes a
+  `(entry -> term)` function, for a rule rather than a list.
+
+  This orders which entries are EMITTED. It is not a happens-before: crontab
+  entries are independent jobs, and a host that needs one leg to finish before
+  the next begins needs a queue with that property. The graph's edges do encode
+  "a source before its consumers", but a cadence is not a dependency and reading
+  one as the other would promise something this cannot keep. A host that wants per-firing values wraps the
   worker rather than the crontab: mint the id in `perform/1`, then call
   `refresh/3` with `reason: "scan:\#{run_id}"` — `:reason` is a free string and
   rides through to the frontier rows, so the trace says which run dirtied a cell.
@@ -443,16 +460,35 @@ defmodule ReactiveDag.Source do
     graph
     |> scan_jobs()
     |> Enum.reject(&is_nil(&1.every))
-    # one poll per scanner per cadence: the same source on two leaves is one
-    # crawl, and scheduling it twice is duplicated I/O whose second run marks
-    # rows the first already handled
-    |> Enum.group_by(&{&1.source, &1.every})
-    |> Enum.map(fn {{_source, every}, jobs} ->
-      cell = jobs |> Enum.map(& &1.cell) |> Enum.min()
-      {every, worker, args: Map.merge(extra, %{"cell" => cell})}
-    end)
-    |> Enum.sort_by(fn {every, _w, args: %{"cell" => c}} -> {c, every} end)
+    |> Enum.map(fn job -> {job.every, worker, args: Map.merge(extra, %{"cell" => job.cell})} end)
+    |> order(graph, Keyword.get(opts, :order))
   end
+
+  # DETERMINISTIC by default, and the default is alphabetical — which is stable
+  # but arbitrary. A host whose scan order carries meaning (observers before the
+  # nodes that read them; a sweep whose later legs need the earlier ones' rows)
+  # says so with `order:`, and anything unlisted keeps the alphabetical tail.
+  #
+  # Not derived from the graph, though the edges do encode "source before its
+  # consumers": crontab entries are independent jobs, and a host that needs one
+  # to finish before the next starts needs a queue with that property, not a
+  # list in a nicer sequence. The order here is which entries are EMITTED, and
+  # saying more than that would be a promise this cannot keep.
+  defp order(entries, _graph, nil), do: Enum.sort_by(entries, &sort_key/1)
+
+  defp order(entries, _graph, declared) when is_list(declared) do
+    declared = Enum.map(declared, &to_string/1)
+    rank = declared |> Enum.with_index() |> Map.new()
+    tail = length(declared)
+
+    Enum.sort_by(entries, fn {_every, _w, args: a} = entry ->
+      {Map.get(rank, a["cell"], tail), sort_key(entry)}
+    end)
+  end
+
+  defp order(entries, _graph, fun) when is_function(fun, 1), do: Enum.sort_by(entries, fun)
+
+  defp sort_key({every, _w, args: a}), do: {a["cell"], every}
 
   @doc """
   The standing `args:` each scanner's leaf declared, as `%{module => keyword}`.

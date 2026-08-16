@@ -60,8 +60,8 @@ defmodule ReactiveDag.ScanScheduleTest do
     end
   end
 
-  # the SECOND leaf of the same crawler — one crawl of one site whose rows land
-  # in two cells. cascade's agenda_center is exactly this.
+  # a CONSUMER of the crawl — the shape that replaced "a second leaf of the same
+  # crawler". cascade's agenda_center feeds two of these.
   defmodule Minutes do
     use Ash.Resource,
       domain: Domain,
@@ -82,14 +82,24 @@ defmodule ReactiveDag.ScanScheduleTest do
 
     reactive do
       id(:minutes)
-      leaf?(true)
-      poll(ReactiveDag.ScanScheduleTest.Crawler, every: "0 * * * *")
+
+      # a consumer of the crawl, not a second poller of it. One source is one
+      # node now, so "two leaves on one scanner" is not a shape that exists.
+      reduce(over: :agendas, group_by: :key, expand: fn key, _rows -> [%{key: key}] end)
     end
   end
 
-  # the same scanner on a DIFFERENT cadence — a deliberate second pass, which
-  # must survive deduplication
-  defmodule MinutesNightly do
+  defmodule ZuluScan do
+    @behaviour Source
+    @impl true
+    def id, do: :zulu_scan
+    @impl true
+    def poll(_opts), do: {:ok, %{changed: []}}
+  end
+
+  # sorts LAST alphabetically, so a declared order that puts it first is
+  # distinguishable from the default
+  defmodule Zulu do
     use Ash.Resource,
       domain: Domain,
       data_layer: Ash.DataLayer.Ets,
@@ -108,9 +118,9 @@ defmodule ReactiveDag.ScanScheduleTest do
     end
 
     reactive do
-      id(:minutes)
+      id(:zulu)
       leaf?(true)
-      poll(ReactiveDag.ScanScheduleTest.Crawler, every: "0 3 * * *")
+      poll(ReactiveDag.ScanScheduleTest.ZuluScan, every: "0 2 * * *")
     end
   end
 
@@ -194,6 +204,8 @@ defmodule ReactiveDag.ScanScheduleTest do
     start_supervised!(%{id: Listing, start: {Listing, :start_link, []}})
     :ok
   end
+
+  defp cells(entries), do: Enum.map(entries, fn {_e, _w, args: a} -> a["cell"] end)
 
   defp plan, do: ReactiveDag.Node.graph([Agendas, Minutes, Transcripts])
 
@@ -350,13 +362,13 @@ defmodule ReactiveDag.ScanScheduleTest do
     test "one entry per scanned cell, cadence or not" do
       jobs = Source.scan_jobs(plan())
 
-      # per CELL — a control panel gives a human a button per leaf, and each
-      # leaf declares its own bound. Only the scheduler dedupes.
-      assert Enum.map(jobs, & &1.cell) == ["agendas", "minutes", "transcripts"]
+      # one entry per SOURCE node. `minutes` consumes the crawl rather than
+      # polling it, so it is not a unit of scannable work.
+      assert Enum.map(jobs, & &1.cell) == ["agendas", "transcripts"]
     end
 
     test "each carries what its leaf declared" do
-      [agendas, _minutes, transcripts] = Source.scan_jobs(plan())
+      [agendas, transcripts] = Source.scan_jobs(plan())
 
       assert agendas.source == Crawler
       assert agendas.args == [recent: true]
@@ -374,25 +386,49 @@ defmodule ReactiveDag.ScanScheduleTest do
       # would mark rows the first already handled.
       with_cadence = Source.scan_jobs(plan()) |> Enum.filter(& &1.every) |> Enum.map(& &1.cell)
 
-      assert with_cadence == ["agendas", "minutes"], "both leaves declare a cadence"
+      assert with_cadence == ["agendas"], "one source, one poll"
 
       assert Enum.map(Source.crontab(plan(), MyWorker), fn {_c, _w, [args: a]} -> a["cell"] end) ==
                ["agendas"]
     end
 
-    test "two leaves on one scanner produce ONE scheduled crawl" do
+    test "entries are alphabetical by default — stable, if arbitrary" do
+      p = ReactiveDag.Node.graph([Agendas, Minutes, Transcripts, Zulu])
+
+      assert cells(Source.crontab(p, MyWorker)) == ["agendas", "zulu"]
+    end
+
+    test "`order:` puts a declared sequence first" do
+      # for a host whose scan order carries meaning — observers before the nodes
+      # that read them — alphabetical is just as arbitrary as map order, only
+      # stably so (u2i/reactive_dag#123)
+      p = ReactiveDag.Node.graph([Agendas, Minutes, Transcripts, Zulu])
+
+      assert cells(Source.crontab(p, MyWorker, order: [:zulu, :agendas])) == ["zulu", "agendas"]
+    end
+
+    test "anything unlisted keeps the alphabetical tail" do
+      p = ReactiveDag.Node.graph([Agendas, Minutes, Transcripts, Zulu])
+
+      assert cells(Source.crontab(p, MyWorker, order: [:zulu])) == ["zulu", "agendas"]
+    end
+
+    test "`order:` also takes a comparator, for a rule rather than a list" do
+      p = ReactiveDag.Node.graph([Agendas, Minutes, Transcripts, Zulu])
+
+      by_length = fn {_every, _w, args: a} -> String.length(a["cell"]) end
+
+      assert cells(Source.crontab(p, MyWorker, order: by_length)) == ["zulu", "agendas"]
+    end
+
+    test "one source is one entry, however many nodes consume it" do
+      # `minutes` reads `agendas`, so the crawl feeds two cells and is scheduled
+      # once. This used to need deduplication by {scanner, cadence}; a source is
+      # a node now, so there is nothing to deduplicate.
       entries = Source.crontab(plan(), MyWorker)
 
       assert length(entries) == 1
       assert [{"0 * * * *", MyWorker, [args: %{"cell" => "agendas"}]}] = entries
-    end
-
-    test "but two DIFFERENT cadences are two entries, because someone meant that" do
-      # declaring an hourly and a nightly pass of the same source is a choice;
-      # silently collapsing it would be the library overruling the author
-      p = ReactiveDag.Node.graph([Agendas, MinutesNightly, Transcripts])
-
-      assert length(Source.crontab(p, MyWorker)) == 2
     end
 
     test "a derived cell is not a unit of scannable work" do
