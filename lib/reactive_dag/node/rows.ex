@@ -325,9 +325,14 @@ defmodule ReactiveDag.Node.Rows do
       `fingerprint` (or every attribute, if it declares none). Return `nil` for
       a key you could not observe: nothing is written and the key is not
       reported, which is how a partial outage stays honest.
-    * `(key -> boolean)` — full control. Write the row yourself and say whether
-      it moved. Use this when the write is not an upsert into the node's own
-      resource.
+    * `(key -> boolean | :created | :changed | :unchanged)` — full control.
+      Write the row yourself and say what happened. Use this when the write is
+      not an upsert into the node's own resource.
+
+      `true`/`false` mean `:changed`/`:unchanged`. Prefer the atoms when you
+      know which: **only you can tell an insert from an update**, since the
+      library never saw the row, and `true` reports a brand-new key as
+      `updated` — which it cannot be, having had no prior row.
     * `:observed` — was this scan COMPLETE? `:all` (the default) means absence
       from `want_keys` is evidence a key is gone, so the vanish diff runs.
       `:partial` means the scan looked at only part of the upstream — a scoped
@@ -401,7 +406,14 @@ defmodule ReactiveDag.Node.Rows do
   > partial observation writes what it saw — it just must not conclude anything
   > from what it did not.
   """
-  @spec reconcile(Cell.t(), [String.t()] | MapSet.t(), keyword()) :: {:ok, [String.t()]}
+  @spec reconcile(Cell.t(), [String.t()] | MapSet.t(), keyword()) ::
+          {:ok, [String.t()],
+           %{
+             created: [String.t()],
+             updated: [String.t()],
+             revived: [String.t()],
+             retired: [String.t()]
+           }}
   def reconcile(%Cell{meta: meta} = cell, want_keys, opts) do
     upsert = Keyword.fetch!(opts, :upsert)
     want_set = MapSet.new(want_keys)
@@ -412,6 +424,7 @@ defmodule ReactiveDag.Node.Rows do
     # only a LIBRARY verdict comes from a fingerprint comparison, which is the
     # one that cannot see a row coming back.
     observed = Enum.map(want, fn key -> {key, observe(key, upsert, meta)} end)
+
     case Keyword.get(opts, :observed, :all) do
       :partial ->
         # A PARTIAL observation cannot say anything vanished — absence from
@@ -501,9 +514,36 @@ defmodule ReactiveDag.Node.Rows do
   # us what it observed and let the library decide.
   defp observe(key, upsert, meta) do
     case upsert.(key) do
-      changed? when is_boolean(changed?) -> {if(changed?, do: :changed, else: :unchanged), :host}
-      nil -> {:unchanged, :host}
-      row when is_map(row) -> {write(key, row, meta), :library}
+      changed? when is_boolean(changed?) ->
+        {if(changed?, do: :changed, else: :unchanged), :host}
+
+      # A host that wrote the row itself is the only thing that knows whether it
+      # INSERTED. `true` cannot say so, and every new key was landing in
+      # `updated` — a key with no prior row cannot have been updated
+      # (u2i/reactive_dag#107).
+      verdict when verdict in [:created, :changed, :unchanged] ->
+        {verdict, :host}
+
+      nil ->
+        {:unchanged, :host}
+
+      row when is_map(row) ->
+        {write(key, row, meta), :library}
+
+      other ->
+        raise ArgumentError, """
+        reactive_dag: the `:upsert` function returned #{inspect(other)} for key \
+        #{inspect(key)}.
+
+        Return one of:
+
+            row (a map)   the library writes it and decides `changed?` for you
+            nil           you could not observe this key; nothing is written
+            true | false  you wrote it yourself; did it move?
+            :created | :changed | :unchanged
+                          you wrote it yourself, and know which — `:created`
+                          is the one `true` cannot express
+        """
     end
   end
 

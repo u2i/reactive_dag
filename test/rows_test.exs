@@ -24,18 +24,21 @@ defmodule ReactiveDag.RowsTest do
 
   # single-column key, with a status
   defmodule Health do
-    use Ash.Resource, domain: Domain, data_layer: Ash.DataLayer.Ets, extensions: [ReactiveDag.Node]
+    use Ash.Resource,
+      domain: Domain,
+      data_layer: Ash.DataLayer.Ets,
+      extensions: [ReactiveDag.Node]
 
     ets do
     end
 
     attributes do
-      attribute :key, :string, primary_key?: true, allow_nil?: false, public?: true
-      attribute :status, :string, public?: true
+      attribute(:key, :string, primary_key?: true, allow_nil?: false, public?: true)
+      attribute(:status, :string, public?: true)
     end
 
     actions do
-      defaults [:read, :destroy]
+      defaults([:read, :destroy])
 
       create :upsert do
         upsert?(true)
@@ -51,19 +54,22 @@ defmodule ReactiveDag.RowsTest do
 
   # composite PK → identity-keyed, and NO status column (a rollup, not a verdict)
   defmodule Rollup do
-    use Ash.Resource, domain: Domain, data_layer: Ash.DataLayer.Ets, extensions: [ReactiveDag.Node]
+    use Ash.Resource,
+      domain: Domain,
+      data_layer: Ash.DataLayer.Ets,
+      extensions: [ReactiveDag.Node]
 
     ets do
     end
 
     attributes do
-      attribute :fund, :string, primary_key?: true, allow_nil?: false, public?: true
-      attribute :fy, :string, primary_key?: true, allow_nil?: false, public?: true
-      attribute :total, :float, public?: true
+      attribute(:fund, :string, primary_key?: true, allow_nil?: false, public?: true)
+      attribute(:fy, :string, primary_key?: true, allow_nil?: false, public?: true)
+      attribute(:total, :float, public?: true)
     end
 
     actions do
-      defaults [:read, :destroy]
+      defaults([:read, :destroy])
 
       create :upsert do
         upsert?(true)
@@ -297,6 +303,75 @@ defmodule ReactiveDag.RowsTest do
       assert changed == ["travel"]
       assert detail.updated == ["travel"]
       assert detail.retired == [], "nothing can vanish from a partial observation"
+    end
+
+    test "a host that wrote the row can say it CREATED" do
+      # `true` cannot express an insert, so every brand-new key landed in
+      # `updated` — which a key with no prior row cannot be
+      # (u2i/reactive_dag#107). Only the host knows: the library never saw it.
+      {:ok, changed, detail} =
+        Rows.reconcile(cell(Health), ["travel", "never-seen"],
+          observed: :partial,
+          upsert: fn
+            "travel" -> :changed
+            "never-seen" -> :created
+          end
+        )
+
+      assert detail.created == ["never-seen"]
+      assert detail.updated == ["travel"]
+      assert Enum.sort(changed) == ["never-seen", "travel"]
+    end
+
+    test ":unchanged is the atom spelling of false" do
+      {:ok, changed, detail} =
+        Rows.reconcile(cell(Health), ["travel"],
+          observed: :partial,
+          upsert: fn _key -> :unchanged end
+        )
+
+      assert changed == []
+      assert detail.created == []
+      assert detail.updated == []
+    end
+
+    test "the issue's own case: 'a' updated, 'c' new, 'b' gone" do
+      # verbatim from u2i/reactive_dag#107, which reported
+      #   %{created: [], updated: ["a", "c"], ...}
+      # for exactly this shape
+      {:ok, _changed, before} =
+        Rows.reconcile(cell(Health), ["a", "b"],
+          upsert: fn key -> %{key: key, status: "present"} end
+        )
+
+      assert Enum.sort(before.created) == ["a", "b"]
+
+      {:ok, _changed, detail} =
+        Rows.reconcile(cell(Health), ["a", "c"],
+          upsert: fn
+            "a" -> :changed
+            "c" -> :created
+          end
+        )
+
+      assert detail.created == ["c"]
+      assert detail.updated == ["a"]
+      assert detail.retired == ["b"]
+    end
+
+    test "an unrecognised return names the four forms rather than crashing later" do
+      err =
+        assert_raise ArgumentError, fn ->
+          Rows.reconcile(cell(Health), ["travel"],
+            observed: :partial,
+            upsert: fn _key -> :nope end
+          )
+        end
+
+      msg = Exception.message(err)
+      assert msg =~ ":nope"
+      assert msg =~ ":created"
+      assert msg =~ "travel", "says WHICH key, or you are hunting it in a crawl"
     end
 
     test "the boolean :upsert form still classifies as updated" do
