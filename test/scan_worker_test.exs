@@ -29,6 +29,7 @@ defmodule ReactiveDag.ScanWorkerTest do
     def start_link, do: Agent.start_link(fn -> %{polls: [], result: nil} end, name: __MODULE__)
     def polls, do: Agent.get(__MODULE__, & &1.polls) |> Enum.reverse()
     def returns(result), do: Agent.update(__MODULE__, &%{&1 | result: result})
+    def raises, do: Agent.update(__MODULE__, &%{&1 | result: :raise})
 
     @impl true
     def id, do: :crawler
@@ -37,7 +38,11 @@ defmodule ReactiveDag.ScanWorkerTest do
     @impl true
     def poll(opts) do
       Agent.update(__MODULE__, &%{&1 | polls: [opts | &1.polls]})
-      {:ok, Agent.get(__MODULE__, & &1.result) || %{changed: []}}
+
+      case Agent.get(__MODULE__, & &1.result) do
+        :raise -> raise "upstream is down"
+        result -> {:ok, result || %{changed: []}}
+      end
     end
   end
 
@@ -362,5 +367,90 @@ defmodule ReactiveDag.ScanWorkerTest do
 
   defp perform_job(args) do
     ReactiveDag.ScanWorker.perform(%Oban.Job{args: args})
+  end
+
+  describe "telemetry a host can actually attach to" do
+    # The moduledoc offers handlers as the alternative to forking this worker.
+    # That offer only holds if a handler can tell WHICH RUN a scan belonged to:
+    # a scan is usually one leg of a run whose id the enqueuer chose, and only
+    # the job carries it (u2i/reactive_dag#118).
+    setup do
+      test_pid = self()
+
+      :telemetry.attach_many(
+        "scan-span",
+        [
+          [:reactive_dag, :scan, :start],
+          [:reactive_dag, :scan, :stop],
+          [:reactive_dag, :scan, :exception]
+        ],
+        fn event, m, meta, _ -> send(test_pid, {:tel, List.last(event), m, meta}) end,
+        nil
+      )
+
+      on_exit(fn -> :telemetry.detach("scan-span") end)
+      :ok
+    end
+
+    defp run(extra \\ %{}) do
+      ReactiveDag.ScanWorker.perform(%Oban.Job{
+        args:
+          Map.merge(
+            %{
+              "cell" => "docs",
+              "plan_mfa" => ["ReactiveDag.ScanWorkerTest", "plan_for_worker", []]
+            },
+            extra
+          )
+      })
+    end
+
+    test "stop carries the job's args, so a run id survives the loop" do
+      run(%{"run_id" => "run-42"})
+
+      assert_received {:tel, :stop, _m, meta}
+      assert meta.args["run_id"] == "run-42"
+      assert meta.cell == "docs"
+    end
+
+    test "a scan announces that it STARTED, not only that it finished" do
+      # a full crawl takes minutes; without this the only observable moment is
+      # the end, and a page watching it looks idle while the machine is busy
+      run(%{"run_id" => "run-42"})
+
+      assert_received {:tel, :start, m, meta}
+      assert meta.args["run_id"] == "run-42"
+      assert meta.cell == "docs"
+      assert m.system_time
+    end
+
+    test "start arrives BEFORE stop" do
+      run()
+
+      assert_received {:tel, :start, _, _}
+      assert_received {:tel, :stop, _, _}
+    end
+
+    test "a scanner that raises is an ERROR return, not a telemetry exception" do
+      # worth pinning, because it is the opposite of what the event name
+      # suggests: `Source.safe_poll/2` rescues, so a crawler blowing up becomes
+      # `{:error, reason}` — an Oban retry — and never reaches the worker's own
+      # rescue. `:exception` fires only for failures OUTSIDE the poll.
+      #
+      # So a host tracking a failed leg needs the return value as well as the
+      # telemetry; `:stop` does not fire here either.
+      Crawler.raises()
+
+      assert {:error, reason} = run(%{"run_id" => "run-42"})
+      assert reason =~ "upstream is down"
+
+      refute_received {:tel, :stop, _, _}
+      refute_received {:tel, :exception, _, _}
+
+      # ...but the start DID fire, so a page showing the leg in-flight has
+      # something to clear
+      assert_received {:tel, :start, _m, meta}
+      assert meta.args["run_id"] == "run-42"
+    end
   end
 end

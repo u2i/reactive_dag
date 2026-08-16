@@ -26,20 +26,23 @@ defmodule ReactiveDag.ReprocessWorkerTest do
   end
 
   defmodule Lines do
-    use Ash.Resource, domain: Domain, data_layer: Ash.DataLayer.Ets, extensions: [ReactiveDag.Node]
+    use Ash.Resource,
+      domain: Domain,
+      data_layer: Ash.DataLayer.Ets,
+      extensions: [ReactiveDag.Node]
 
     ets do
     end
 
     attributes do
-      attribute :key, :string, primary_key?: true, allow_nil?: false, public?: true
-      attribute :fiscal_year, :string, public?: true
-      attribute :amount, :float, public?: true
+      attribute(:key, :string, primary_key?: true, allow_nil?: false, public?: true)
+      attribute(:fiscal_year, :string, public?: true)
+      attribute(:amount, :float, public?: true)
     end
 
     actions do
-      defaults [:read, :destroy]
-      create :upsert, upsert?: true, accept: [:key, :fiscal_year, :amount]
+      defaults([:read, :destroy])
+      create(:upsert, upsert?: true, accept: [:key, :fiscal_year, :amount])
     end
 
     reactive do
@@ -50,19 +53,22 @@ defmodule ReactiveDag.ReprocessWorkerTest do
   end
 
   defmodule Totals do
-    use Ash.Resource, domain: Domain, data_layer: Ash.DataLayer.Ets, extensions: [ReactiveDag.Node]
+    use Ash.Resource,
+      domain: Domain,
+      data_layer: Ash.DataLayer.Ets,
+      extensions: [ReactiveDag.Node]
 
     ets do
     end
 
     attributes do
-      attribute :key, :string, primary_key?: true, allow_nil?: false, public?: true
-      attribute :total, :float, public?: true
+      attribute(:key, :string, primary_key?: true, allow_nil?: false, public?: true)
+      attribute(:total, :float, public?: true)
     end
 
     actions do
-      defaults [:read, :destroy]
-      create :upsert, upsert?: true, accept: [:key, :total]
+      defaults([:read, :destroy])
+      create(:upsert, upsert?: true, accept: [:key, :total])
     end
 
     reactive do
@@ -170,7 +176,11 @@ defmodule ReactiveDag.ReprocessWorkerTest do
 
         def query!("INSERT INTO " <> _, p) do
           pid = Agent.get(__MODULE__, & &1)
-          p |> Enum.chunk_every(5) |> Enum.each(fn [c, k, r, _, _] -> send(pid, {:mark, c, k, r}) end)
+
+          p
+          |> Enum.chunk_every(5)
+          |> Enum.each(fn [c, k, r, _, _] -> send(pid, {:mark, c, k, r}) end)
+
           %{rows: []}
         end
 
@@ -266,6 +276,29 @@ defmodule ReactiveDag.ReprocessWorkerTest do
 
       assert_received {:stop, m}
       refute m.claimed, "`*` is not a number of keys"
+    end
+  end
+
+  describe "the same span shape as a scan" do
+    test "start and stop both carry the job's args" do
+      test_pid = self()
+
+      :telemetry.attach_many(
+        "reprocess-span",
+        [[:reactive_dag, :reprocess, :start], [:reactive_dag, :reprocess, :stop]],
+        fn e, _m, meta, _ -> send(test_pid, {:tel, List.last(e), meta}) end,
+        nil
+      )
+
+      on_exit(fn -> :telemetry.detach("reprocess-span") end)
+
+      run(%{"cell" => "lines", "keys" => ["a"], "run_id" => "run-7"})
+
+      assert_received {:tel, :start, start_meta}
+      assert_received {:tel, :stop, stop_meta}
+
+      assert start_meta.args["run_id"] == "run-7"
+      assert stop_meta.args["run_id"] == "run-7"
     end
   end
 end

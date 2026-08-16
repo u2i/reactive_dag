@@ -49,8 +49,12 @@ if Code.ensure_loaded?(Oban.Worker) do
 
     ## Telemetry
 
-    `[:reactive_dag, :reprocess, :stop]` with `claimed` and `changed`, so a
-    dashboard can say *"queued 412, 88 actually moved"*.
+    `[:reactive_dag, :reprocess, :start]` with `system_time`, and
+    `[:reactive_dag, :reprocess, :stop]` with `claimed`, `invalidated` and
+    `changed`, so a dashboard can say *"queued 412, 88 actually moved"*.
+
+    Both carry `cell`, `reason` and the job's own `args` — a reprocess is
+    usually one leg of something a host named, and only the job knows what.
     """
     use Oban.Worker, queue: :scans, max_attempts: 1
 
@@ -84,6 +88,13 @@ if Code.ensure_loaded?(Oban.Worker) do
           mark(plan, cell_id, keys, reason)
 
           t0 = System.monotonic_time(:microsecond)
+
+          :telemetry.execute(
+            [:reactive_dag, :reprocess, :start],
+            %{system_time: System.system_time()},
+            %{cell: cell_id, args: args, reason: reason}
+          )
+
           {:ok, report} = Drain.run(plan, Job.drain_opts(args))
 
           :telemetry.execute(
@@ -95,7 +106,7 @@ if Code.ensure_loaded?(Oban.Worker) do
               changed: ReactiveDag.Drain.Report.changed_total(report),
               passes: report.passes
             },
-            %{cell: cell_id, reason: reason, report: report}
+            %{cell: cell_id, args: args, reason: reason, report: report}
           )
 
           :ok

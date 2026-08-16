@@ -44,10 +44,11 @@ if Code.ensure_loaded?(Oban.Worker) do
     module is a convenience over two public calls and has no opinion about them.
 
     Most of that needs one thing: *the loop finished, here is what happened*.
-    `[:reactive_dag, :scan, :stop]` carries the cell, the changed count, the
-    unreachable list and the whole `%Report{}`, so a broadcast, a durable scan
-    record, or a follow-up enqueue is a telemetry handler rather than a fork of
-    this worker. Anything inside the poll itself — wrapping each HTTP request,
+    `[:reactive_dag, :scan, :stop]` carries the cell, the job's own `args`, the
+    changed count, the unreachable list and the whole `%Report{}`, so a
+    broadcast, a durable scan record, or a follow-up enqueue is a telemetry
+    handler rather than a fork of this worker. `:start` covers the same work at
+    the other end, for anything a person watches while the poll runs. Anything inside the poll itself — wrapping each HTTP request,
     mirroring listing pages — belongs in your `poll/1`, which the library never
     looks inside.
 
@@ -57,10 +58,25 @@ if Code.ensure_loaded?(Oban.Worker) do
 
     ## Telemetry
 
-    Emits `[:reactive_dag, :scan, :stop]` with `changed` and `passes`, and
-    `[:reactive_dag, :scan, :exception]` on failure. The drain inside emits its
-    own events, so a host attaching to `[:reactive_dag, :drain, :stop]` sees the
-    recompute trace without attaching here at all.
+    | event | measurements | metadata |
+    |---|---|---|
+    | `[:reactive_dag, :scan, :start]` | `system_time` | `cell`, `args` |
+    | `[:reactive_dag, :scan, :stop]` | `duration_us`, `changed`, `passes` | `cell`, `args`, `unreachable`, `report` |
+    | `[:reactive_dag, :scan, :exception]` | `duration_us` | `cell`, `args`, `reason` |
+
+    A poll can run for minutes, so `:start` is what lets a page show a crawl as
+    in-flight rather than appearing only once it is over.
+
+    **`args` is the job's own arguments, verbatim.** A scan is often one leg of a
+    RUN whose id the enqueuer chose — `crontab/3` takes `args:` for exactly this
+    — and only the job carries it. A handler that sees `cell` alone knows which
+    cell finished and not which run it belonged to, so it cannot write the row,
+    address the broadcast or group the trace, and the work has to fork this
+    worker instead of attaching to it.
+
+    The drain inside emits its own events, so a host attaching to
+    `[:reactive_dag, :drain, :stop]` sees the recompute trace without attaching
+    here at all.
     """
     use Oban.Worker, queue: :scans, max_attempts: 1
 
@@ -75,6 +91,15 @@ if Code.ensure_loaded?(Oban.Worker) do
       opts = poll_opts(args)
 
       t0 = System.monotonic_time(:microsecond)
+
+      # A poll can run for minutes, so "it started" is a thing a person watches
+      # for. Without this the only observable moment is the end, and a page
+      # showing a crawl looks idle while the machine is busy.
+      :telemetry.execute(
+        [:reactive_dag, :scan, :start],
+        %{system_time: System.system_time()},
+        %{cell: cell_id, args: args}
+      )
 
       try do
         case Source.refresh(plan, cell_id, opts) do
@@ -91,7 +116,12 @@ if Code.ensure_loaded?(Oban.Worker) do
                 changed: length(result.changed),
                 passes: report.passes
               },
-              %{cell: cell_id, unreachable: result.unreachable, report: report}
+              # `args` verbatim: a scan is often one leg of a RUN whose id the
+              # enqueuer chose, and only the job carries it. Without this a
+              # handler knows which cell finished and not which run it belonged
+              # to, so it cannot write the row, address the broadcast, or group
+              # the trace — and the work has to fork the worker instead.
+              %{cell: cell_id, args: args, unreachable: result.unreachable, report: report}
             )
 
             warn_unreachable(cell_id, result)
@@ -111,7 +141,7 @@ if Code.ensure_loaded?(Oban.Worker) do
           :telemetry.execute(
             [:reactive_dag, :scan, :exception],
             %{duration_us: System.monotonic_time(:microsecond) - t0},
-            %{cell: cell_id, reason: e}
+            %{cell: cell_id, args: args, reason: e}
           )
 
           reraise e, __STACKTRACE__
@@ -139,6 +169,5 @@ if Code.ensure_loaded?(Oban.Worker) do
     end
 
     defp poll_opts(_args), do: []
-
   end
 end
