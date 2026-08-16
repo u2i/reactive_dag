@@ -722,6 +722,65 @@ defmodule ReactiveDag.Node do
     schema: [module: [type: :atom, required: true, doc: "a module implementing ReactiveDag.Op"]]
   }
 
+  defmodule Slice do
+    @moduledoc """
+    A dimension a human may select this node by: `slice :fiscal_year`.
+
+    `recompute_by` declares the unit a CHANGE invalidates. This declares the unit
+    a PERSON picks — "reprocess just FY25", "re-run last year's documents" — and
+    they are rarely the same. A node recomputing per `:category` is still sliced
+    by `:fiscal_year`, because that is the question an operator asks.
+
+    Without it the library can offer no such control. A cell key is one column or
+    a `"|"`-joined identity, so nothing generic can find the year in a row —
+    `fiscal_year` on one node and `published_on` on another are equally invisible
+    until the node says which it is.
+
+    `values:` makes the control renderable rather than a text box. Only the host
+    knows which fiscal years exist, and it usually already has the function:
+
+        slice :fiscal_year, values: {MyApp.Osc, :available_years, []}
+
+    Deliberately NOT time-specific. The obvious first guess is a date range, and
+    it fits almost nothing: the real dimension here is a `"FY22"` string, and a
+    version is not temporal at all. Time is one instance of slicing, not its
+    shape.
+    """
+    defstruct [:column, :values, :label, :__identifier__, :__spark_metadata__]
+  end
+
+  @slice %Spark.Dsl.Entity{
+    name: :slice,
+    target: Slice,
+    args: [:column],
+    describe:
+      "A dimension a human may select this node by — `slice :fiscal_year` — so a UI can " <>
+        "offer 'reprocess just this year'. Distinct from `recompute_by`, which is the unit " <>
+        "a CHANGE invalidates; this is the unit a PERSON picks, and they are rarely the " <>
+        "same. `values:` enumerates the options so the control is a choice rather than a " <>
+        "text box.",
+    schema: [
+      column: [
+        type: :atom,
+        required: true,
+        doc: "an attribute on THIS node's resource, filtered with `==` to select rows."
+      ],
+      values: [
+        type: {:or, [{:list, :any}, {:tuple, [:atom, :atom, {:list, :any}]}]},
+        required: false,
+        doc:
+          "the selectable options: a literal list, or an `{module, function, args}` " <>
+            "returning one. Only the host knows which values exist — omit it and a UI " <>
+            "must take free text."
+      ],
+      label: [
+        type: :string,
+        required: false,
+        doc: "what to call this dimension in a UI (default: the column name)."
+      ]
+    ]
+  }
+
   defmodule Scan do
     @moduledoc """
     The SCANNER that feeds this leaf: `scan MuniWatch.Crawler`.
@@ -914,7 +973,8 @@ defmodule ReactiveDag.Node do
       @aggregate,
       @compute,
       @run,
-      @scan
+      @scan,
+      @slice
     ],
     schema: [
       id: [
@@ -1586,6 +1646,22 @@ defmodule ReactiveDag.Node do
     end
   end
 
+  # The dimensions a human may select this node by, validated at assembly: a
+  # slice naming a column the resource lacks would render a control that filters
+  # on nothing and silently selects every row.
+  defp slices(resource) do
+    for %Slice{} = sl <- Ext.get_entities(resource, [:reactive]) do
+      if is_nil(Ash.Resource.Info.attribute(resource, sl.column)) do
+        raise ArgumentError,
+              "reactive_dag: `slice #{inspect(sl.column)}` on #{inspect(resource)}, which " <>
+                "has no such attribute. A slice filters this node's own rows by that " <>
+                "column, so it must be one of them."
+      end
+
+      %{column: sl.column, values: sl.values, label: sl.label || to_string(sl.column)}
+    end
+  end
+
   defp identity_fields(resource) do
     case Ash.Resource.Info.primary_key(resource) do
       pk when is_list(pk) and length(pk) > 1 -> pk
@@ -1648,6 +1724,7 @@ defmodule ReactiveDag.Node do
         fingerprint: Ext.get_opt(resource, [:reactive], :fingerprint, nil),
         fingerprint_attribute: Ext.get_opt(resource, [:reactive], :fingerprint_attribute, nil),
         retain_if_vanished: retain_policy(resource),
+        slices: slices(resource),
         identity_fields: identity_fields(resource),
         context_inputs: context_inputs(resource)
       }
