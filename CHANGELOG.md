@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.17.0-rc.17](https://github.com/u2i/reactive_dag/compare/v0.17.0-rc.16...v0.17.0-rc.17) (2026-08-16)
+
+
+### Bug Fixes
+
+* one scheduled crawl per scanner, and don't lose a shared scanner's args ([0b299ed](https://github.com/u2i/reactive_dag/commit/0b299ed273cc1e9978fb66af7cfdaa6c276bbc2f))
+* one scheduled crawl per scanner, and don't lose a shared scanner's args ([237cf8d](https://github.com/u2i/reactive_dag/commit/237cf8d97a274e8ecb96a5b8283c0d90c22e5d7a))
+
 ## [0.17.0-rc.16](https://github.com/u2i/reactive_dag/compare/v0.17.0-rc.15...v0.17.0-rc.16) (2026-08-16)
 
 
