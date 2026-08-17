@@ -33,6 +33,7 @@ defmodule ReactiveDag.Node.Changes.MarkDirty do
   def change(changeset, opts, _context) do
     Ash.Changeset.after_action(changeset, fn cs, result ->
       mark(result, prior_of(cs, result), opts)
+      maybe_schedule_drain(opts)
       {:ok, result}
     end)
   end
@@ -56,6 +57,49 @@ defmodule ReactiveDag.Node.Changes.MarkDirty do
   defp prior_of(%Ash.Changeset{action_type: :create}, result), do: result
   defp prior_of(%Ash.Changeset{data: %{__struct__: _} = data}, _result), do: data
   defp prior_of(_changeset, result), do: result
+
+  # `schedule_drain: true` — enqueue the drain HERE, inside the same transaction
+  # as the mark. Both commit or neither does: a rolled-back write leaves no dirty
+  # key AND no job to consume one.
+  #
+  # The insert is cheap; the DRAIN is not, and it runs later out of the request.
+  # Oban's uniqueness turns a burst of writes into one pending job, so a bulk
+  # import does not enqueue thousands.
+  #
+  # Deliberately not raising on failure: the mark is already written and durable,
+  # so the worst case is the staleness this option removes rather than a lost
+  # write. A host whose Oban is down should not have its writes fail.
+  defp maybe_schedule_drain(opts) do
+    if Keyword.get(opts, :schedule_drain, false) do
+      case enqueuer().() do
+        {:ok, _job} ->
+          :ok
+
+        {:error, reason} ->
+          require Logger
+
+          Logger.warning(
+            "reactive_dag: marked dirty but could not enqueue a drain — " <>
+              "#{inspect(reason)}. The mark is durable; whatever drains next will " <>
+              "pick it up."
+          )
+
+          :ok
+      end
+    end
+  end
+
+  # Overridable so a host can queue the drain its own way — a different queue, a
+  # debounce, its own worker wrapping `Drain.run/2` for run-id bookkeeping — and
+  # so a test can observe the enqueue without standing up Oban and Postgres.
+  #
+  #     config :reactive_dag, drain_enqueuer: fn -> MyApp.DrainJob.enqueue() end
+  #
+  # Must return `{:ok, term}` or `{:error, term}`.
+  defp enqueuer do
+    Application.get_env(:reactive_dag, :drain_enqueuer) ||
+      fn -> ReactiveDag.DrainWorker.enqueue() end
+  end
 
   defp mark(record, prior, opts) do
     cell = Keyword.fetch!(opts, :cell)

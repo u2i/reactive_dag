@@ -24,6 +24,39 @@ defmodule ReactiveDag.DirtiesOnTest do
     end
   end
 
+  # Marks AND schedules. Separate from `Expenses` so the default (mark only)
+  # stays under test — an existing host must not start enqueueing.
+  defmodule Attestations do
+    use Ash.Resource,
+      domain: Domain,
+      data_layer: Ash.DataLayer.Ets,
+      extensions: [ReactiveDag.Node]
+
+    ets do
+    end
+
+    attributes do
+      attribute :key, :string, primary_key?: true, allow_nil?: false, public?: true
+      attribute :verdict, :string, public?: true
+    end
+
+    actions do
+      defaults [:read, :destroy]
+
+      create :create do
+        accept([:key, :verdict])
+      end
+    end
+
+    reactive do
+      id :attestations
+      leaf? true
+      dirties_on [:create, :destroy]
+      schedule_drain true
+      payload_key :key
+    end
+  end
+
   defmodule Expenses do
     use Ash.Resource,
       domain: Domain,
@@ -197,6 +230,12 @@ defmodule ReactiveDag.DirtiesOnTest do
     end
 
     def query!("SELECT COUNT" <> _, _params), do: %{rows: [[Agent.get(__MODULE__, &map_size/1)]]}
+
+    # `DrainWorker` takes `Frontier.with_lock/2` — the same cluster-wide advisory
+    # lock the sweep uses, so two nodes never drain at once. Always granted here:
+    # there is one node in a test.
+    def query!("SELECT pg_try_advisory_lock" <> _, _params), do: %{rows: [[true]]}
+    def query!("SELECT pg_advisory_unlock" <> _, _params), do: %{rows: [[true]]}
 
     # what the frontier currently holds, for assertions
     def dirty, do: Agent.get(__MODULE__, &Map.keys/1) |> Enum.sort()
@@ -389,4 +428,90 @@ defmodule ReactiveDag.DirtiesOnTest do
       assert "lodging" in claimed
     end
   end
+
+  describe "schedule_drain — marking is not enough (#142)" do
+    setup do
+      {:ok, agent} = Agent.start_link(fn -> 0 end)
+      prev = Application.get_env(:reactive_dag, :drain_enqueuer)
+
+      Application.put_env(:reactive_dag, :drain_enqueuer, fn ->
+        Agent.update(agent, &(&1 + 1))
+        {:ok, :enqueued}
+      end)
+
+      on_exit(fn -> Application.put_env(:reactive_dag, :drain_enqueuer, prev) end)
+      %{enqueues: fn -> Agent.get(agent, & &1) end}
+    end
+
+    test "a write schedules a drain, so the mark is consumed promptly", ctx do
+      # `dirties_on` alone marked and stopped: the mark waited for whatever
+      # drained next, in practice the hourly sweep. For a write-fed leaf with no
+      # polling source there may be no next drain at all.
+      Attestations
+      |> Ash.Changeset.for_create(:create, %{key: "a1", verdict: "signed"})
+      |> Ash.create!()
+
+      assert ctx.enqueues.() == 1
+      assert {"attestations", "a1"} in FakeRepo.dirty(), "and it still marked"
+    end
+
+    test "a destroy schedules too — a removal is a change downstream", ctx do
+      rec =
+        Attestations
+        |> Ash.Changeset.for_create(:create, %{key: "a2", verdict: "signed"})
+        |> Ash.create!()
+
+      Ash.destroy!(rec)
+
+      assert ctx.enqueues.() == 2
+    end
+
+    test "the default is unchanged — marking without scheduling", ctx do
+      # `Expenses` does not opt in. An existing host must not start enqueueing
+      # jobs because the library grew the option.
+      Expenses
+      |> Ash.Changeset.for_create(:create, %{key: "e9", category: "meals", amount: 1.0})
+      |> Ash.create!()
+
+      assert ctx.enqueues.() == 0
+      assert {"expenses", "e9"} in FakeRepo.dirty(), "but it still MARKED"
+    end
+
+    test "an enqueue failure does not fail the write", ctx do
+      # The mark is already durable, so the worst case is the staleness this
+      # option removes — not a lost write. A host whose Oban is down should not
+      # start rejecting user actions.
+      Application.put_env(:reactive_dag, :drain_enqueuer, fn -> {:error, :oban_down} end)
+
+      assert %{key: "a3"} =
+               Attestations
+               |> Ash.Changeset.for_create(:create, %{key: "a3", verdict: "signed"})
+               |> Ash.create!()
+
+      assert {"attestations", "a3"} in FakeRepo.dirty()
+      assert ctx.enqueues.() == 0
+    end
+
+    test "the worker drains the frontier it was enqueued for" do
+      plan = ReactiveDag.Node.graph([Attestations])
+
+      Attestations
+      |> Ash.Changeset.for_create(:create, %{key: "c1", verdict: "signed"})
+      |> Ash.create!()
+
+      assert FakeRepo.dirty() != []
+
+      # Through `perform/1` with a hand-built job, like the other worker tests:
+      # what is under test is the drain, not Oban's dispatch.
+      assert :ok =
+               ReactiveDag.DrainWorker.perform(%Oban.Job{
+                 args: %{"plan_mfa" => ["Elixir.ReactiveDag.DirtiesOnTest", "schedule_plan", []]}
+               })
+
+      assert FakeRepo.dirty() == [], "the drain consumed the mark"
+    end
+  end
+
+  @doc false
+  def schedule_plan, do: ReactiveDag.Node.graph([Attestations])
 end

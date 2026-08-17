@@ -29,10 +29,37 @@ defmodule ReactiveDag.Node.Transformers.AddMarkDirty do
   def after?(_), do: true
 
   defp add_change(dsl, on) do
+    schedule? = Transformer.get_option(dsl, [:reactive], :schedule_drain) || false
+
+    # Raise at COMPILE time rather than at the first write. `schedule_drain: true`
+    # without Oban would mark and never drain — the exact silent staleness the
+    # option exists to remove, and worse for being asked for explicitly.
+    if schedule? and not Code.ensure_loaded?(Oban) do
+      raise Spark.Error.DslError,
+        module: Transformer.get_persisted(dsl, :module),
+        path: [:reactive, :schedule_drain],
+        message: """
+        `schedule_drain: true` needs Oban, which is an optional dependency of
+        reactive_dag and is not loaded.
+
+        Add it:
+
+            {:oban, "~> 2.17"}
+
+        and give it the queue the worker runs on:
+
+            config :my_app, Oban, queues: [drain: 1]
+
+        Or drop the option — `dirties_on` still marks correctly, and whatever
+        drains next (a ScanWorker sweep) will pick the mark up.
+        """
+    end
+
     opts = [
       cell: dsl |> cell_id() |> to_string(),
       payload_key: payload_key(dsl),
-      identity_fields: identity_fields(dsl)
+      identity_fields: identity_fields(dsl),
+      schedule_drain: schedule?
     ]
 
     change =
