@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.17.0-rc.34](https://github.com/u2i/reactive_dag/compare/v0.17.0-rc.33...v0.17.0-rc.34) (2026-08-17)
+
+
+### Bug Fixes
+
+* claim, recompute and propagate in one transaction ([#162](https://github.com/u2i/reactive_dag/issues/162)) ([9121f69](https://github.com/u2i/reactive_dag/commit/9121f695cdf5b535a08dc2d8cfb606aeb524a023))
+
 ## [0.17.0-rc.33](https://github.com/u2i/reactive_dag/compare/v0.17.0-rc.32...v0.17.0-rc.33) (2026-08-17)
 
 
