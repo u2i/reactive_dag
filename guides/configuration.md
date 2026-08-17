@@ -21,6 +21,7 @@ config :reactive_dag, repo: MyApp.Repo
 | [`:set_op_templates`](#set_op_templates) | `%{}` | only with `SetOp` | `SetOp` |
 | [`:insights_keep`](#insights_keep) | `20` | no | `Insights` |
 | [`:drain_enqueuer`](#drain_enqueuer) | `DrainWorker.enqueue/0` | no | `dirties_on schedule_drain:` |
+| [`:around_poll`](#around_poll) | — | no | `ScanWorker` |
 
 ---
 
@@ -165,3 +166,41 @@ queried would make booting depend on the database being reachable.
 - **Per-node behaviour** — `payload_key`, `payload_action`, `key_rule`,
   `recompute_by` and the rest are declared in a resource's `reactive` block, not
   in application config. See [Authoring nodes](authoring-nodes.html).
+
+### `:around_poll`
+
+A wrapper `ScanWorker` runs the POLL inside, for the one thing a telemetry
+handler cannot do: be present while the fetch happens.
+
+```elixir
+config :reactive_dag, around_poll: {MyApp.Audit, :around, []}
+```
+
+The function takes the job's `args` and a one-arity function, and returns
+whatever that function returns. Its argument is a keyword list merged into the
+poll's options — which is the point: a wrapper that starts a collector hands
+the scanner a way to reach it.
+
+```elixir
+def around(_args, run) do
+  {:ok, pid} = Agent.start_link(fn -> [] end)
+
+  try do
+    run.(collector: pid)
+  after
+    persist(Agent.get(pid, & &1))
+    Agent.stop(pid)
+  end
+end
+```
+
+**Reach for a telemetry handler first.** Broadcasts, durable scan rows,
+follow-up enqueues — everything that only needs the RESULT — belongs on
+`[:reactive_dag, :scan, :stop]`, which carries a `ReactiveDag.ScanRun` with
+both phases. A wrapper puts work inside the job's failure boundary, so use it
+only when the work must happen DURING the poll.
+
+The case it exists for: a host that records every HTTP request its crawler
+makes needs something live for the duration, and a process cannot ride in an
+Oban argument. Without this, that host forks the worker — and then owns the
+poll/mark/drain loop forever to keep one wrapper.
