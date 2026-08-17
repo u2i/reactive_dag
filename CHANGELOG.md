@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.17.0-rc.30](https://github.com/u2i/reactive_dag/compare/v0.17.0-rc.29...v0.17.0-rc.30) (2026-08-17)
+
+
+### Features
+
+* name what a recompute must return, and reject what it must not ([#151](https://github.com/u2i/reactive_dag/issues/151)) ([2a5990d](https://github.com/u2i/reactive_dag/commit/2a5990dc55842476ff000dd01da1bd599fc55bb3))
+* roll up what a POLL cost — `detail_total/2` and `detail_by/2` ([#153](https://github.com/u2i/reactive_dag/issues/153)) ([e12268b](https://github.com/u2i/reactive_dag/commit/e12268bd6cb592d66b167a572c5406727fd53729))
+
 ## [0.17.0-rc.29](https://github.com/u2i/reactive_dag/compare/v0.17.0-rc.28...v0.17.0-rc.29) (2026-08-17)
 
 
