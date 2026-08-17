@@ -15,6 +15,12 @@ defmodule ReactiveDag.Drain do
        host's `KeyRule` (`Graph.dirty_parents`).
     5. Repeat until empty.
 
+  Steps 2–4 run in ONE transaction, so a recompute that raises leaves the
+  frontier exactly as it found it. A claim is a delete: without that, a
+  transient failure — a deadlock, a timeout, an upstream 503 — consumes the
+  work item and those keys go silently stale. The drain still fails loudly;
+  the next one retries rather than never knowing.
+
   A leaf carries no recompute — a source writes its tuples and marks parents
   dirty directly, so a leaf shouldn't appear in the frontier; if one does, its
   claimed keys are treated as changed and just propagated.
@@ -185,88 +191,105 @@ defmodule ReactiveDag.Drain do
          }}
 
       cell_id ->
-        # A whole-cell claim ("*") SUBSUMES any co-claimed specific keys: if "*"
-        # is present, the claim is normalized to exactly ["*"]. Recompute strategies
-        # test `keys == ["*"]` to mean "recompute the whole cell", so a stray "*"
-        # riding alongside real keys must collapse — otherwise the whole-cell branch
-        # is missed and the specific keys are processed as if "*" were a real key.
-        entries = Frontier.claim_with_priors(cell_id)
-        claimed = Enum.map(entries, &elem(&1, 0))
-        keys = if "*" in claimed, do: ["*"], else: claimed
+        # ONE TRANSACTION over claim → recompute → propagate.
+        #
+        # A claim is a DELETE, so it consumes the work item BEFORE the work
+        # happens. Without this a recompute that raises — a deadlock, a timeout,
+        # an upstream 503 — leaves those keys gone from the frontier and
+        # silently stale, and a failure between the recompute and its
+        # propagation loses the parents' marks too. Rolling back does not put
+        # them back; it means they were never taken.
+        #
+        # The connection is held for the length of the recompute, which is
+        # affordable only because drains are SERIALIZED (`with_lock/2`) — one
+        # connection, not one per concurrent drain. Readers are unaffected:
+        # Postgres readers never block on the row locks a DELETE takes.
+        {next_cause, next_steps} =
+          Frontier.transaction(fn -> drain_cell(plan, opts, passes, cause, steps, cell_id) end)
 
-        # the snapshot each claimed key was marked with, so this cell's parents
-        # can derive their claims from a row that may no longer exist
-        priors = for {k, p} <- entries, not is_nil(p), into: %{}, do: {k, p}
+        do_run(plan, opts, passes + 1, next_cause, next_steps, t0)
+    end
+  end
 
-        {cause, steps} =
-          cond do
-            keys == [] ->
-              {cause, steps}
+  defp drain_cell(plan, opts, passes, cause, steps, cell_id) do
+    # A whole-cell claim ("*") SUBSUMES any co-claimed specific keys: if "*"
+    # is present, the claim is normalized to exactly ["*"]. Recompute strategies
+    # test `keys == ["*"]` to mean "recompute the whole cell", so a stray "*"
+    # riding alongside real keys must collapse — otherwise the whole-cell branch
+    # is missed and the specific keys are processed as if "*" were a real key.
+    entries = Frontier.claim_with_priors(cell_id)
+    claimed = Enum.map(entries, &elem(&1, 0))
+    keys = if "*" in claimed, do: ["*"], else: claimed
 
-            not Map.has_key?(plan.cells, cell_id) ->
-              # A STALE frontier row — the dirty table outlives any one plan, so
-              # a renamed/removed cell, a drain over a subgraph plan, or a source
-              # writing to an old leaf id can leave ids this plan doesn't know.
-              # The claim above already consumed the rows; log what was dropped
-              # and keep draining rather than crashing after destroying the work
-              # item (and claiming, not skipping, is what prevents the same row
-              # from being re-selected forever).
-              Logger.warning(
-                "reactive_dag: frontier holds cell #{inspect(cell_id)} absent from this plan; " <>
-                  "dropping its claimed dirty keys #{inspect(keys)}"
-              )
+    # the snapshot each claimed key was marked with, so this cell's parents
+    # can derive their claims from a row that may no longer exist
+    priors = for {k, p} <- entries, not is_nil(p), into: %{}, do: {k, p}
 
-              {cause, steps}
+    cond do
+      keys == [] ->
+        {cause, steps}
 
-            true ->
-              cell = Map.fetch!(plan.cells, cell_id)
-              {{changed, meta}, us} = timed(fn -> recompute(cell, keys, opts) end)
-              # A WHOLE-CELL claim ("*") propagates :all: a whole recompute can DELETE
-              # keys, and per-key propagation only carries survivors — it would strand
-              # a vanished key in the parent. So escalate downstream when the claim was
-              # whole, regardless of the per-parent key_rule.
-              prop = if "*" in keys, do: :all, else: changed
-              parents = propagate(plan, cell_id, prop, opts, priors)
+      not Map.has_key?(plan.cells, cell_id) ->
+        # A STALE frontier row — the dirty table outlives any one plan, so
+        # a renamed/removed cell, a drain over a subgraph plan, or a source
+        # writing to an old leaf id can leave ids this plan doesn't know.
+        # The claim above already consumed the rows; log what was dropped
+        # and keep draining rather than crashing after destroying the work
+        # item (and claiming, not skipping, is what prevents the same row
+        # from being re-selected forever).
+        Logger.warning(
+          "reactive_dag: frontier holds cell #{inspect(cell_id)} absent from this plan; " <>
+            "dropping its claimed dirty keys #{inspect(keys)}"
+        )
 
-              step = %{
-                claimed: keys,
-                changed: changed,
-                triggered_by: Map.get(cause, cell_id),
-                duration_us: us,
-                # `op` and `depth` are both in hand here and neither is
-                # recoverable from a step alone — a consumer would need the plan
-                # to look them up, and a durable processing log is usually read
-                # long after the plan that produced it has moved on
-                # (u2i/reactive_dag#114).
-                op: cell.op,
-                depth: Map.get(plan.depths, cell_id),
-                meta: meta
-              }
+        {cause, steps}
 
-              :telemetry.execute(
-                [:reactive_dag, :drain, :step],
-                %{duration_us: us, claimed: length(keys), changed: length(changed)},
-                %{
-                  cell: cell_id,
-                  pass: passes,
-                  # the KEYS, not just the count: a consumer that knows which
-                  # keys moved can read only those, which is the whole point
-                  changed_keys: changed,
-                  triggered_by: Map.get(cause, cell_id),
-                  step: step
-                }
-              )
+      true ->
+        cell = Map.fetch!(plan.cells, cell_id)
+        {{changed, meta}, us} = timed(fn -> recompute(cell, keys, opts) end)
+        # A WHOLE-CELL claim ("*") propagates :all: a whole recompute can DELETE
+        # keys, and per-key propagation only carries survivors — it would strand
+        # a vanished key in the parent. So escalate downstream when the claim was
+        # whole, regardless of the per-parent key_rule.
+        prop = if "*" in keys, do: :all, else: changed
+        parents = propagate(plan, cell_id, prop, opts, priors)
 
-              # Every parent we just dirtied was triggered by this cell.
-              cause =
-                Enum.reduce(parents, cause, fn parent_id, acc ->
-                  Map.put(acc, parent_id, cell_id)
-                end)
+        step = %{
+          claimed: keys,
+          changed: changed,
+          triggered_by: Map.get(cause, cell_id),
+          duration_us: us,
+          # `op` and `depth` are both in hand here and neither is
+          # recoverable from a step alone — a consumer would need the plan
+          # to look them up, and a durable processing log is usually read
+          # long after the plan that produced it has moved on
+          # (u2i/reactive_dag#114).
+          op: cell.op,
+          depth: Map.get(plan.depths, cell_id),
+          meta: meta
+        }
 
-              {cause, [Map.merge(step, %{cell: cell_id, pass: passes}) | steps]}
-          end
+        :telemetry.execute(
+          [:reactive_dag, :drain, :step],
+          %{duration_us: us, claimed: length(keys), changed: length(changed)},
+          %{
+            cell: cell_id,
+            pass: passes,
+            # the KEYS, not just the count: a consumer that knows which
+            # keys moved can read only those, which is the whole point
+            changed_keys: changed,
+            triggered_by: Map.get(cause, cell_id),
+            step: step
+          }
+        )
 
-        do_run(plan, opts, passes + 1, cause, steps, t0)
+        # Every parent we just dirtied was triggered by this cell.
+        cause =
+          Enum.reduce(parents, cause, fn parent_id, acc ->
+            Map.put(acc, parent_id, cell_id)
+          end)
+
+        {cause, [Map.merge(step, %{cell: cell_id, pass: passes}) | steps]}
     end
   end
 

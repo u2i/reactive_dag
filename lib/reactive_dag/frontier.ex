@@ -160,6 +160,47 @@ defmodule ReactiveDag.Frontier do
     end
   end
 
+  @doc """
+  Run `fun` in a transaction, so a claim it makes is undone if it raises.
+
+  This is what makes a claim survive a failed recompute. `claim/1` is a
+  `DELETE … RETURNING`: the keys are consumed before the work happens, so
+  without this a recompute that raises — a deadlock, a timeout, an upstream 503
+  — leaves those keys gone from the frontier and silently stale. Rolling back
+  puts nothing back; it means they were never taken.
+
+  `timeout: :infinity`, because the work inside is a recompute and a recompute
+  is the host's: an op that reads a PDF with a model legitimately runs for
+  minutes, and Ecto's 15s default would abort it. The connection is held for
+  the duration, which is affordable only because drains are SERIALIZED — one
+  at a time per graph (`with_lock/2`) — so this is one connection, not one per
+  concurrent drain.
+
+  Readers are unaffected: the `DELETE` takes row locks on one cell's keys, and
+  Postgres readers never block on row locks. A `mark_dirty` on a DIFFERENT cell
+  proceeds; only marking the same key of the same cell waits for the commit.
+
+  ## A repo without `transaction/2`
+
+  Runs `fun` directly. A host may configure a minimal repo — the library only
+  ever needed `query!/2` — and requiring a new capability would break it on
+  upgrade for a guarantee it may not want. Such a host keeps the old behaviour:
+  a failed recompute loses its claim.
+  """
+  @spec transaction((-> result)) :: result when result: term()
+  def transaction(fun) when is_function(fun, 0) do
+    repo = repo()
+
+    if function_exported?(repo, :transaction, 2) do
+      case repo.transaction(fun, timeout: :infinity) do
+        {:ok, result} -> result
+        {:error, reason} -> raise "reactive_dag: transaction rolled back: #{inspect(reason)}"
+      end
+    else
+      fun.()
+    end
+  end
+
   defp query!(sql, params), do: repo().query!(sql, params)
 
   defp repo do
