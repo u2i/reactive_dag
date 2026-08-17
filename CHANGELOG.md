@@ -1,5 +1,15 @@
 # Changelog
 
+## [0.17.0-rc.27](https://github.com/u2i/reactive_dag/compare/v0.17.0-rc.26...v0.17.0-rc.27) (2026-08-17)
+
+
+### Features
+
+* schedule_drain — dirties_on marks AND consumes the mark ([b85d319](https://github.com/u2i/reactive_dag/commit/b85d3198e52534cfba37acd2f5c858b59a2a8e08))
+* schedule_drain — dirties_on marks AND consumes the mark ([#142](https://github.com/u2i/reactive_dag/issues/142)) ([c514b17](https://github.com/u2i/reactive_dag/commit/c514b1720162d2e8ea6c2caae74d7d9683444279))
+* Source.progress/3 — the only signal from inside one poll ([efeac0e](https://github.com/u2i/reactive_dag/commit/efeac0e169ee4df4197bc889899a5ff62bb6d87e))
+* Source.progress/3 — the only signal from inside one poll ([5394276](https://github.com/u2i/reactive_dag/commit/53942760cee7fde0b566a2c70c876e11077f4e86))
+
 ## [0.17.0-rc.26](https://github.com/u2i/reactive_dag/compare/v0.17.0-rc.25...v0.17.0-rc.26) (2026-08-17)
 
 
