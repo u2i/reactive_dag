@@ -368,6 +368,61 @@ defmodule ReactiveDag.ScanWorkerTest do
       assert meta.cell == "docs"
     end
 
+    test "what the poll reported under `detail:` reaches the handler" do
+      # The only route a scan's OWN cost has to a live consumer: `report`
+      # covers the drain, and a poll produces no step. Without this a host can
+      # roll spend up after a sweep (`Source.detail_total/2`) but cannot show it
+      # as the scan finishes.
+      test_pid = self()
+
+      :telemetry.attach(
+        "scan-detail-test",
+        [:reactive_dag, :scan, :stop],
+        fn _e, _m, meta, _ -> send(test_pid, {:scan_stop, meta}) end,
+        nil
+      )
+
+      on_exit(fn -> :telemetry.detach("scan-detail-test") end)
+
+      Crawler.returns(%{
+        changed: ["a"],
+        detail: %{tokens_in: %{"claude-haiku-4-5" => 900}, llm_calls: 3}
+      })
+
+      perform_job(%{
+        "cell" => "docs",
+        "plan_mfa" => ["ReactiveDag.ScanWorkerTest", "plan_for_worker", []]
+      })
+
+      assert_received {:scan_stop, meta}
+      assert meta.detail == %{tokens_in: %{"claude-haiku-4-5" => 900}, llm_calls: 3}
+    end
+
+    test "a poll reporting no detail sends an empty map, not nil" do
+      # A handler should not have to guard: `%{}` and "this poll spends nothing"
+      # are the same statement, and nil would make every consumer write a clause.
+      test_pid = self()
+
+      :telemetry.attach(
+        "scan-nodetail-test",
+        [:reactive_dag, :scan, :stop],
+        fn _e, _m, meta, _ -> send(test_pid, {:scan_stop, meta}) end,
+        nil
+      )
+
+      on_exit(fn -> :telemetry.detach("scan-nodetail-test") end)
+
+      Crawler.returns(%{changed: ["a"]})
+
+      perform_job(%{
+        "cell" => "docs",
+        "plan_mfa" => ["ReactiveDag.ScanWorkerTest", "plan_for_worker", []]
+      })
+
+      assert_received {:scan_stop, meta}
+      assert meta.detail == %{}
+    end
+
     test "a missing plan raises with the fix, rather than a match error" do
       prev = Application.get_env(:reactive_dag, :plan_mfa)
       Application.delete_env(:reactive_dag, :plan_mfa)

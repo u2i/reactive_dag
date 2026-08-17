@@ -45,7 +45,8 @@ if Code.ensure_loaded?(Oban.Worker) do
 
     Most of that needs one thing: *the loop finished, here is what happened*.
     `[:reactive_dag, :scan, :stop]` carries the cell, the job's own `args`, the
-    changed count, the unreachable list and the whole `%Report{}`, so a
+    changed count, the unreachable list, whatever the poll reported under
+    `detail:` (its own token spend, say) and the whole `%Report{}`, so a
     broadcast, a durable scan record, or a follow-up enqueue is a telemetry
     handler rather than a fork of this worker. `:start` covers the same work at
     the other end, for anything a person watches while the poll runs. Anything inside the poll itself — wrapping each HTTP request,
@@ -94,7 +95,7 @@ if Code.ensure_loaded?(Oban.Worker) do
     | event | measurements | metadata |
     |---|---|---|
     | `[:reactive_dag, :scan, :start]` | `system_time` | `cell`, `args` |
-    | `[:reactive_dag, :scan, :stop]` | `duration_us`, `changed`, `passes` | `cell`, `args`, `unreachable`, `report` |
+    | `[:reactive_dag, :scan, :stop]` | `duration_us`, `changed`, `passes` | `cell`, `args`, `unreachable`, `detail`, `report` |
     | `[:reactive_dag, :scan, :exception]` | `duration_us` | `cell`, `args`, `reason` |
     | `[:reactive_dag, :scan, :source_stop]` | `duration_us` | `source`, `result` |
     | `[:reactive_dag, :scan, :progress]` | `done`, `total` | `cell`, `label`, `source` |
@@ -217,7 +218,21 @@ if Code.ensure_loaded?(Oban.Worker) do
               # handler knows which cell finished and not which run it belonged
               # to, so it cannot write the row, address the broadcast, or group
               # the trace — and the work has to fork the worker instead.
-              %{cell: cell_id, args: args, unreachable: result.unreachable, report: report}
+              #
+              # `detail` is what the POLL reported about its own work — token
+              # spend for a crawler that classifies with a model, rows scanned,
+              # anything. Forwarded because this event is the only place it can
+              # reach a live consumer: `report` covers the DRAIN, and a scan's
+              # own cost appears in no step. Without it a host could roll spend
+              # up after a sweep (`Source.detail_total/2`) but never show it as
+              # the scan finished.
+              %{
+                cell: cell_id,
+                args: args,
+                unreachable: result.unreachable,
+                detail: result[:detail] || %{},
+                report: report
+              }
             )
 
             warn_unreachable(cell_id, result)
