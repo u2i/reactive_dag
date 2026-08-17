@@ -423,6 +423,49 @@ defmodule ReactiveDag.ScanWorkerTest do
       assert meta.detail == %{}
     end
 
+    test "a configured wrapper is present DURING the poll, and can add opts" do
+      # The one thing a telemetry handler cannot do. A host recording every
+      # HTTP request its crawler makes needs something live for the duration,
+      # and a process cannot ride in an Oban argument.
+      test_pid = self()
+
+      defmodule Wrapper do
+        def around(args, run, test_pid) do
+          send(test_pid, {:wrapped, args["cell"]})
+          # The opts it adds reach the scanner — that is the point of it.
+          run.(collector: test_pid)
+        end
+      end
+
+      Application.put_env(:reactive_dag, :around_poll, {Wrapper, :around, [test_pid]})
+      on_exit(fn -> Application.delete_env(:reactive_dag, :around_poll) end)
+
+      Crawler.returns(%{changed: ["a"]})
+
+      perform_job(%{
+        "cell" => "docs",
+        "plan_mfa" => ["ReactiveDag.ScanWorkerTest", "plan_for_worker", []]
+      })
+
+      assert_received {:wrapped, "docs"}
+      assert [opts] = Crawler.polls()
+      assert opts[:collector] == test_pid
+    end
+
+    test "with no wrapper configured the poll runs with exactly its own opts" do
+      Crawler.returns(%{changed: ["a"]})
+
+      perform_job(%{
+        "cell" => "docs",
+        "opts" => %{"recent" => true},
+        "plan_mfa" => ["ReactiveDag.ScanWorkerTest", "plan_for_worker", []]
+      })
+
+      assert [opts] = Crawler.polls()
+      assert opts[:recent] == true
+      refute Keyword.has_key?(opts, :collector)
+    end
+
     test "the poll and its drain arrive as one `%ScanRun{}`" do
       test_pid = self()
 

@@ -55,6 +55,58 @@ defmodule ReactiveDag.Job do
     ]
   end
 
+  @doc """
+  Run `fun` inside the host's configured wrapper, if it has one.
+
+      config :reactive_dag, around_poll: {MyApp.Audit, :around, []}
+
+  The named function is called with the job's `args` and a one-arity function,
+  and must return whatever that function returns. The argument it passes is a
+  keyword list ADDED to the poll's options — which is the point of it: a
+  wrapper that starts a collector hands the scanner a way to reach it.
+
+      def around(_args, run) do
+        {:ok, pid} = Agent.start_link(fn -> [] end)
+
+        try do
+          run.(collector: pid)
+        after
+          persist(Agent.get(pid, & &1))
+          Agent.stop(pid)
+        end
+      end
+
+  ## Why this exists rather than a telemetry handler
+
+  Almost everything a host wants around a scan is better as a handler on
+  `[:reactive_dag, :scan, :stop]`: broadcasts, durable rows, follow-up
+  enqueues. Those all happen when the scan is over, and the event carries
+  everything they need.
+
+  What a handler cannot do is be present WHILE the poll runs. A host that
+  records every HTTP request its crawler makes — an observation log, a
+  per-request mirror — needs something live for the duration and needs to hand
+  the scanner a way to reach it. That is a process, and a process cannot ride
+  in an Oban argument, so it has to be started inside the job.
+
+  Without this, a host with that requirement forks the worker, and then owns
+  the poll/mark/drain loop forever to keep one wrapper.
+
+  ## What it must not be used for
+
+  Anything that only needs the RESULT. If the work can read
+  `[:reactive_dag, :scan, :stop]` and be done, it belongs there — a wrapper
+  makes it run inside the job's failure boundary for no reason.
+  """
+  @spec around_poll(map(), (keyword() -> result)) :: result when result: term()
+  def around_poll(args, fun) do
+    case Application.get_env(:reactive_dag, :around_poll) do
+      {m, f, a} -> apply(m, f, [args, fun | a])
+      # No wrapper: the poll runs with exactly the options it was given.
+      nil -> fun.([])
+    end
+  end
+
   @doc "A module name from a job argument, with or without the `Elixir.` prefix."
   @spec module(String.t()) :: module()
   def module("Elixir." <> _ = m), do: String.to_existing_atom(m)

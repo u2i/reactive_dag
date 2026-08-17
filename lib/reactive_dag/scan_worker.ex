@@ -204,7 +204,17 @@ if Code.ensure_loaded?(Oban.Worker) do
       )
 
       try do
-        case Source.refresh(plan, cell_id, opts) do
+        # The host's wrapper, if it configured one, is present for the POLL
+        # only — the part a telemetry handler cannot be inside. It may add
+        # options (a collector's pid, say), which is the reason it takes the
+        # poll rather than the whole job: nothing a wrapper starts should
+        # outlive the fetch it was started for. See `ReactiveDag.Job.around_poll/2`.
+        polled =
+          ReactiveDag.Job.around_poll(args, fn extra ->
+            Source.refresh(plan, cell_id, Keyword.merge(opts, extra))
+          end)
+
+        case polled do
           {:ok, result} ->
             # Drain even when nothing changed: another source may have marked
             # cells this job is now the first to reach, and an empty frontier is
@@ -342,7 +352,14 @@ if Code.ensure_loaded?(Oban.Worker) do
     defp sweep(plan, opts, args) do
       t0 = System.monotonic_time(:microsecond)
 
-      case Source.poll_all(plan, opts) do
+      # A sweep polls too, so the host's wrapper belongs here on the same terms
+      # — one wrapper for the whole sweep, since that is what the job is.
+      polled =
+        ReactiveDag.Job.around_poll(args, fn extra ->
+          Source.poll_all(plan, Keyword.merge(opts, extra))
+        end)
+
+      case polled do
         {:ok, results} ->
           {:ok, report} = Drain.run(plan, ReactiveDag.Job.drain_opts(args))
 
