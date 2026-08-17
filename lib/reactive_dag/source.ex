@@ -825,18 +825,13 @@ defmodule ReactiveDag.Source do
 
   Accepts what `poll_all/2` returns (`%{module => result}`), a list of results,
   or a single result, so a host can total one `poll_cell/3` the same way.
+
+  The arithmetic is `ReactiveDag.Rollup`, shared with
+  `ReactiveDag.Drain.Report.total/2` — the containers differ because the phases
+  do, but "what did this cost" is one fold, not two that must agree.
   """
   @spec detail_total(map() | [map()] | term(), atom()) :: number()
-  def detail_total(results, key) do
-    results
-    |> detail_values(key)
-    |> Enum.map(fn
-      n when is_number(n) -> n
-      m when is_map(m) -> m |> Map.values() |> Enum.filter(&is_number/1) |> Enum.sum()
-      _ -> 0
-    end)
-    |> Enum.sum()
-  end
+  def detail_total(results, key), do: results |> details() |> ReactiveDag.Rollup.total(key)
 
   @doc """
   One `detail:` key across a sweep, summed **per bucket** — the breakdown behind
@@ -851,28 +846,17 @@ defmodule ReactiveDag.Source do
   own total is not.
   """
   @spec detail_by(map() | [map()] | term(), atom()) :: %{optional(String.t() | atom()) => number()}
-  def detail_by(results, key) do
-    results
-    |> detail_values(key)
-    |> Enum.reduce(%{}, fn
-      n, acc when is_number(n) ->
-        Map.update(acc, :unattributed, n, &(&1 + n))
+  def detail_by(results, key), do: results |> details() |> ReactiveDag.Rollup.by(key)
 
-      m, acc when is_map(m) ->
-        for {bucket, n} <- m, is_number(n), reduce: acc do
-          inner -> Map.update(inner, bucket, n, &(&1 + n))
-        end
-
-      _, acc ->
-        acc
-    end)
-  end
-
-  # The three shapes a host can hand these, flattened to "the values of `key`
-  # in every result's detail". `poll_all/2` returns a map keyed by module; a
-  # caller totalling one `poll_cell/3` has a bare result; a caller that already
-  # collected some has a list.
-  defp detail_values(results, key) do
+  # The three shapes a host can hand these, flattened to "every result's detail
+  # map". `poll_all/2` returns a map keyed by module; a caller totalling one
+  # `poll_cell/3` has a bare result; a caller that already collected some has a
+  # list.
+  #
+  # `ReactiveDag.Rollup` takes it from here — the same fold the drain's report
+  # uses, so a scan and a drain answer "what did this cost" identically rather
+  # than through two implementations that have to agree.
+  defp details(results) do
     results
     |> case do
       %{} = map -> if scan_result?(map), do: [map], else: Map.values(map)
@@ -884,7 +868,7 @@ defmodule ReactiveDag.Source do
       result -> result
     end)
     |> Enum.map(fn
-      %{} = result -> result |> Map.get(:detail) |> then(&if(is_map(&1), do: Map.get(&1, key)))
+      %{} = result -> Map.get(result, :detail)
       _ -> nil
     end)
   end
