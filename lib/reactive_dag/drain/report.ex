@@ -21,7 +21,9 @@ defmodule ReactiveDag.Drain.Report do
           (`%{}` when it reported nothing). The library never interprets it:
           token/cost counts for an LLM node, cache hits, retries and rows
           scanned are all just keys. A strategy opts in by returning
-          `{:ok, changed, meta}`.
+          `{:ok, changed, meta}`. A count may be reported flat
+          (`tokens_in: 1600`) or broken down (`tokens_in: %{"model-a" => 1200,
+          "model-b" => 400}`) — see `total/2` and `by/2`.
     * `passes` — drain-loop iterations (≥ `length(steps)`; a pass with an
       empty claim recomputes nothing)
     * `duration_us` — wall time of the whole drain
@@ -59,13 +61,70 @@ defmodule ReactiveDag.Drain.Report do
   Merge one key out of every step's `meta`, summing numeric values — the
   roll-up a cost line wants (`total(report, :tokens_in)`). Steps whose meta
   lacks the key contribute nothing.
+
+  A step may report the key **broken down** instead of flat, as a map of
+  `%{bucket => number}`:
+
+      %{tokens_in: %{"claude-haiku-4-5" => 1200, "claude-sonnet-4-6" => 400}}
+
+  Those still total to a single number here, so a cost line does not have to
+  know which shape a node reports. `by/2` returns the breakdown instead.
+
+  The library does not interpret the buckets — a bucket is a model name only
+  because a host chose to key by one. Mixing shapes across steps is fine: a
+  graph where one node reports per-model tokens and another reports a bare
+  count totals correctly rather than refusing to show a number.
   """
   @spec total(t(), atom()) :: number()
   def total(%__MODULE__{steps: steps}, key) do
     steps
     |> Enum.map(&get_in(&1, [:meta, key]))
-    |> Enum.filter(&is_number/1)
+    |> Enum.map(fn
+      n when is_number(n) -> n
+      m when is_map(m) -> m |> Map.values() |> Enum.filter(&is_number/1) |> Enum.sum()
+      _ -> 0
+    end)
     |> Enum.sum()
+  end
+
+  @doc """
+  One key out of every step's `meta`, summed **per bucket** — the breakdown
+  behind `total/2`.
+
+      Report.by(report, :tokens_in)
+      #=> %{"claude-haiku-4-5" => 1200, "claude-sonnet-4-6" => 400}
+
+  This is what a cost line needs that a single number cannot give: models
+  differ in price by an order of magnitude, so one summed token count cannot be
+  turned into a cost, nor say which model is driving spend.
+
+  Steps reporting the key as a bare number are collected under `:unattributed`
+  rather than dropped — a node that reports tokens without saying which model
+  produced them is a gap worth SEEING, and silently omitting it would make the
+  breakdown disagree with `total/2` for no visible reason.
+
+      Report.by(report, :tokens_in)
+      #=> %{"claude-haiku-4-5" => 1200, unattributed: 90}
+
+  Sums of the returned values always equal `total/2` for the same key. Returns
+  `%{}` when no step reported the key at all.
+  """
+  @spec by(t(), atom()) :: %{optional(String.t() | atom()) => number()}
+  def by(%__MODULE__{steps: steps}, key) do
+    steps
+    |> Enum.map(&get_in(&1, [:meta, key]))
+    |> Enum.reduce(%{}, fn
+      n, acc when is_number(n) ->
+        Map.update(acc, :unattributed, n, &(&1 + n))
+
+      m, acc when is_map(m) ->
+        for {bucket, n} <- m, is_number(n), reduce: acc do
+          inner -> Map.update(inner, bucket, n, &(&1 + n))
+        end
+
+      _, acc ->
+        acc
+    end)
   end
 
   @doc "Total keys reported changed across every step."
