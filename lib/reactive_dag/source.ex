@@ -102,6 +102,20 @@ defmodule ReactiveDag.Source do
   pairs) — the honest-gap discipline: a scan that couldn't look must never
   render as a scan that found nothing, so write what you observed, retire
   nothing you couldn't see, and surface the outage for the host to display.
+
+  ## What the poll COST
+
+  `detail:` is the scan-side counterpart to a drain step's meta: anything the
+  scanner wants to report about the work, which the library carries without
+  interpreting.
+
+      {:ok, %{changed: keys, detail: %{tokens_in: 900, llm_calls: 12}}}
+
+  This matters for a crawler that calls a model — classifying each new document,
+  say. That spend never appears in a drain log, and not for want of recording:
+  scans and drains are separate phases, so a poll has no drain step to attach
+  to. `detail_total/2` and `detail_by/2` roll these up across a sweep, and a
+  count may be flat or broken down per model exactly as on a step.
   """
   @callback poll(arg :: term()) ::
               {:ok, [String.t()]}
@@ -759,8 +773,114 @@ defmodule ReactiveDag.Source do
   answer to "what did this leaf declare".
 
   So a host rendering an arg value should expect a function and show the fact,
-  not the result. `poll_all/2` and `scan/3` resolve; nothing else does.
+  not the result. `poll_all/2` and `poll_cell/3` resolve; nothing else does.
   """
+  @doc """
+  Sum one `detail:` key across a sweep's results — the scan-side counterpart to
+  `ReactiveDag.Drain.Report.total/2`.
+
+      {:ok, results} = Source.poll_all(plan)
+      Source.detail_total(results, :tokens_in)
+      #=> 41_200
+
+  ## Why a scan needs its own roll-up
+
+  A drain returns a `%Report{}` and the library totals across its steps. A poll
+  returns one result per source and there is no report, because a scan is not a
+  cascade — sources are independent and there is no propagation to trace.
+
+  That left a real gap. A crawler that classifies each new document with a model
+  spends on every poll, and NONE of it reached the drain log: scans and drains
+  are separate phases by design, so a scan's spend has no step to attach to. It
+  was invisible not because nobody recorded it but because nothing aggregated
+  it.
+
+  ## What a scanner reports
+
+  Whatever it likes, under `detail:` — the same "the library never interprets
+  it" rule the drain's step meta follows:
+
+      {:ok, %{changed: keys, detail: %{tokens_in: 900, llm_calls: 12}}}
+
+  A count may be flat or broken down per bucket, exactly as on a drain step:
+
+      detail: %{tokens_in: %{"claude-haiku-4-5" => 900}}
+
+  Both total here; `detail_by/2` returns the breakdown. A source reporting no
+  `detail:`, or one lacking the key, contributes nothing rather than raising —
+  a sweep mixing LLM and plain crawlers still totals.
+
+  Accepts what `poll_all/2` returns (`%{module => result}`), a list of results,
+  or a single result, so a host can total one `poll_cell/3` the same way.
+  """
+  @spec detail_total(map() | [map()] | term(), atom()) :: number()
+  def detail_total(results, key) do
+    results
+    |> detail_values(key)
+    |> Enum.map(fn
+      n when is_number(n) -> n
+      m when is_map(m) -> m |> Map.values() |> Enum.filter(&is_number/1) |> Enum.sum()
+      _ -> 0
+    end)
+    |> Enum.sum()
+  end
+
+  @doc """
+  One `detail:` key across a sweep, summed **per bucket** — the breakdown behind
+  `detail_total/2`, mirroring `ReactiveDag.Drain.Report.by/2`.
+
+      Source.detail_by(results, :tokens_in)
+      #=> %{"claude-haiku-4-5" => 900, "openai/gpt-5.6-luna" => 300}
+
+  A source reporting the key as a bare number lands under `:unattributed`
+  rather than being dropped, so the parts always sum to `detail_total/2`. A gap
+  in attribution is worth seeing; a breakdown that silently disagrees with its
+  own total is not.
+  """
+  @spec detail_by(map() | [map()] | term(), atom()) :: %{optional(String.t() | atom()) => number()}
+  def detail_by(results, key) do
+    results
+    |> detail_values(key)
+    |> Enum.reduce(%{}, fn
+      n, acc when is_number(n) ->
+        Map.update(acc, :unattributed, n, &(&1 + n))
+
+      m, acc when is_map(m) ->
+        for {bucket, n} <- m, is_number(n), reduce: acc do
+          inner -> Map.update(inner, bucket, n, &(&1 + n))
+        end
+
+      _, acc ->
+        acc
+    end)
+  end
+
+  # The three shapes a host can hand these, flattened to "the values of `key`
+  # in every result's detail". `poll_all/2` returns a map keyed by module; a
+  # caller totalling one `poll_cell/3` has a bare result; a caller that already
+  # collected some has a list.
+  defp detail_values(results, key) do
+    results
+    |> case do
+      %{} = map -> if scan_result?(map), do: [map], else: Map.values(map)
+      list when is_list(list) -> list
+      other -> [other]
+    end
+    |> Enum.map(fn
+      {:ok, result} -> result
+      result -> result
+    end)
+    |> Enum.map(fn
+      %{} = result -> result |> Map.get(:detail) |> then(&if(is_map(&1), do: Map.get(&1, key)))
+      _ -> nil
+    end)
+  end
+
+  # A single poll result vs a `%{module => result}` map. `:changed` is the one
+  # key every result shape carries — `poll_all/2`'s map is keyed by MODULE, and
+  # a module is never `:changed`.
+  defp scan_result?(map), do: Map.has_key?(map, :changed) or Map.has_key?(map, :detail)
+
   @spec resolve_args(keyword()) :: keyword()
   def resolve_args(args) when is_list(args) do
     # `is_function(v, 0)` and not `is_function(v)`: a 1-arity value is not a

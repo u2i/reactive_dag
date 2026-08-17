@@ -502,6 +502,35 @@ the function itself, uncalled. Render the fact rather than the result — this i
 a description of the graph, and resolving it here would run your code on every
 page render.
 
+### What a scan COST
+
+A crawler that calls a model — classifying each new document, say — spends on
+every poll, and none of it reaches the drain log. Not for want of recording:
+scans and drains are separate phases, so a poll has no drain step to attach to.
+
+Report it under `detail:`, the scan-side counterpart to a drain step's meta:
+
+```elixir
+{:ok, %{changed: keys, detail: %{tokens_in: 900, llm_calls: 12}}}
+```
+
+Then roll it up across a sweep:
+
+```elixir
+{:ok, results} = Source.poll_all(plan)
+
+Source.detail_total(results, :tokens_in)   #=> 41_200
+Source.detail_by(results, :tokens_in)      #=> %{"claude-haiku-4-5" => 41_200}
+```
+
+A count may be flat or broken down per model, exactly as on a drain step —
+`detail_total/2` sums either. A source reporting no `detail:`, or one lacking
+the key, contributes nothing rather than raising, so adding one LLM crawler to
+a sweep of plain ones does not break the total.
+
+Both accept what `poll_all/2` returns, a list, or a single `poll_cell/3`
+result, so a sweep and a one-cell refresh total the same way.
+
 ### What a scan did
 
 `reconcile/3` returns `{:ok, changed, detail}`. `changed` is the flat list that
