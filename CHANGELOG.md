@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.17.0-rc.33](https://github.com/u2i/reactive_dag/compare/v0.17.0-rc.32...v0.17.0-rc.33) (2026-08-17)
+
+
+### Features
+
+* `:around_poll` — the one seam a telemetry handler cannot fill ([#160](https://github.com/u2i/reactive_dag/issues/160)) ([c878a62](https://github.com/u2i/reactive_dag/commit/c878a62a9200c325146d71637cddbc62bf331535))
+
 ## [0.17.0-rc.32](https://github.com/u2i/reactive_dag/compare/v0.17.0-rc.31...v0.17.0-rc.32) (2026-08-17)
 
 
