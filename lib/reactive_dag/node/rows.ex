@@ -227,10 +227,14 @@ defmodule ReactiveDag.Node.Rows do
   resolved.
 
       Rows.slices(cell)
-      #=> [%{column: :fiscal_year, label: "fiscal_year", values: ["FY24", "FY25"]}]
+      #=> [%{column: :fiscal_year, label: "fiscal_year",
+      #      values: ["FY24", "FY25"], poll_as: :fiscal}]
 
   `values` is `nil` when the node named no options — a UI then takes free text,
   or offers nothing.
+
+  `poll_as` is what to call this dimension when asking the SCANNER for it, which
+  defaults to the column. See `poll_opts/2`.
   """
   @spec slices(Cell.t() | source()) :: [map()]
   def slices(%Cell{meta: meta}), do: slices(meta)
@@ -243,6 +247,47 @@ defmodule ReactiveDag.Node.Rows do
 
   defp resolve_values({m, f, a}), do: apply(m, f, a)
   defp resolve_values(values), do: values
+
+  @doc """
+  Turn a selected slice into the options a POLL is asked with.
+
+      Rows.poll_opts(cell, %{"fiscal_year" => "FY25/26"})
+      #=> [fiscal: "FY25/26"]
+
+  A slice narrows two different things. `keys_where/2` filters rows this node
+  already HOLDS — "re-derive FY25 from documents I have". This narrows the
+  FETCH: a source whose upstream is addressable by the same dimension can be
+  asked for just that part, and a crawler that takes `fiscal:` walks twelve
+  months instead of the whole corpus.
+
+  The selection is keyed by COLUMN, because that is what a UI has — it rendered
+  a button per value under the slice's own name. The result is keyed by
+  `poll_as`, because that is the scanner's vocabulary. Translating here is the
+  point: neither side has to learn the other's spelling.
+
+  Accepts string or atom column names, since a selection usually arrives from a
+  form or a job argument. A column this node never declared as a slice is
+  IGNORED rather than passed through — an unrecognised option would otherwise
+  reach `poll/1` as if the node had offered it, and a scanner that pattern
+  matches its arguments would crash on a typo the DSL could not vouch for.
+  """
+  @spec poll_opts(Cell.t() | source(), map() | keyword()) :: keyword()
+  def poll_opts(cell_or_source, selection) do
+    declared = slices(cell_or_source)
+
+    for {key, value} <- selection,
+        slice = find_slice(declared, key),
+        not is_nil(slice),
+        do: {slice.poll_as || slice.column, value}
+  end
+
+  defp find_slice(declared, key) when is_atom(key),
+    do: Enum.find(declared, &(&1.column == key))
+
+  defp find_slice(declared, key) when is_binary(key),
+    do: Enum.find(declared, &(to_string(&1.column) == key))
+
+  defp find_slice(_declared, _key), do: nil
 
   @doc """
   Clear the stored fingerprint on `keys`, so the next recompute treats those rows

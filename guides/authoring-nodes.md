@@ -514,6 +514,57 @@ reprocess is a one-shot, not a mode. The telemetry's `invalidated` says how many
 rows that touched, and is 0 on a node with no fingerprint column, which recomputes
 regardless.
 
+#### Polling a slice — `poll_as:`
+
+A slice narrows two different things, and reprocessing is only one of them.
+`keys_where/2` filters rows a node already **holds** — *"re-derive FY25 from the
+documents I have"*. But a source whose upstream is addressable by the same
+dimension can be asked to fetch just that part: a crawler that takes
+`fiscal: "FY25/26"` walks twelve months instead of the whole corpus.
+
+`poll_as:` names the dimension as the **scanner** spells it:
+
+```elixir
+reactive do
+  id :agenda_center
+  poll MuniWatch.Sources.AgendaCenter, every: "0 12 * * *"
+
+  slice :fiscal_year, values: {MuniWatch.Fiscal, :years, []}, poll_as: :fiscal
+end
+```
+
+```elixir
+ReactiveDag.Source.refresh(plan, "agenda_center", fiscal: "FY25/26")
+```
+
+`Rows.poll_opts/2` does the translation, taking the selection a UI has (keyed by
+**column**, since that is what it rendered buttons under) and returning what the
+scanner wants:
+
+```elixir
+Rows.poll_opts(cell, %{"fiscal_year" => "FY25/26"})
+#=> [fiscal: "FY25/26"]
+```
+
+Caller opts override the declared `args:`, so this composes with a standing
+`args: [recent: true]` rather than replacing it.
+
+**Two names because they are two names.** A scanner's option belongs to whatever
+it wraps — an API query parameter, a CLI flag — and the column belongs to this
+node's schema. Requiring them to match would make every scanner rename its
+arguments after a storage decision. It defaults to the column, so the second name
+is written only when it differs.
+
+A column the node never declared as a slice is **ignored** rather than passed
+through: an unrecognised option would otherwise reach `poll/1` as if the node had
+offered it, and a scanner that pattern matches its arguments would crash on a typo
+the DSL could not vouch for.
+
+`poll_as:` on a node that declares no `poll` raises at assembly — it names the
+option a poll is asked with, and a node nothing polls will never be asked. That
+usually means the slice landed on the derived node instead of the source feeding
+it.
+
 ## Input edges
 
 ```elixir
