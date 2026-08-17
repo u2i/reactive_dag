@@ -775,6 +775,19 @@ defmodule ReactiveDag.Source do
   So a host rendering an arg value should expect a function and show the fact,
   not the result. `poll_all/2` and `poll_cell/3` resolve; nothing else does.
   """
+  @spec resolve_args(keyword()) :: keyword()
+  def resolve_args(args) when is_list(args) do
+    # `is_function(v, 0)` and not `is_function(v)`: a 1-arity value is not a
+    # deferred value with a missing argument, it is a value this does not know
+    # how to resolve, and calling it would raise BadArity from inside a poll.
+    # Passing it through means the scanner receives what the leaf declared and
+    # can say so itself.
+    Enum.map(args, fn
+      {k, v} when is_function(v, 0) -> {k, v.()}
+      pair -> pair
+    end)
+  end
+
   @doc """
   Sum one `detail:` key across a sweep's results — the scan-side counterpart to
   `ReactiveDag.Drain.Report.total/2`.
@@ -880,19 +893,6 @@ defmodule ReactiveDag.Source do
   # key every result shape carries — `poll_all/2`'s map is keyed by MODULE, and
   # a module is never `:changed`.
   defp scan_result?(map), do: Map.has_key?(map, :changed) or Map.has_key?(map, :detail)
-
-  @spec resolve_args(keyword()) :: keyword()
-  def resolve_args(args) when is_list(args) do
-    # `is_function(v, 0)` and not `is_function(v)`: a 1-arity value is not a
-    # deferred value with a missing argument, it is a value this does not know
-    # how to resolve, and calling it would raise BadArity from inside a poll.
-    # Passing it through means the scanner receives what the leaf declared and
-    # can say so itself.
-    Enum.map(args, fn
-      {k, v} when is_function(v, 0) -> {k, v.()}
-      pair -> pair
-    end)
-  end
 
   # NB the rescue must not re-wrap: `{:error, reason}` from a well-behaved poll
   # and a raised exception both have to arrive as ONE `{:error, reason}`, or the
