@@ -97,6 +97,12 @@ if Code.ensure_loaded?(Oban.Worker) do
     | `[:reactive_dag, :scan, :stop]` | `duration_us`, `changed`, `passes` | `cell`, `args`, `unreachable`, `report` |
     | `[:reactive_dag, :scan, :exception]` | `duration_us` | `cell`, `args`, `reason` |
     | `[:reactive_dag, :scan, :source_stop]` | `duration_us` | `source`, `result` |
+    | `[:reactive_dag, :scan, :progress]` | `done`, `total` | `cell`, `label`, `source` |
+
+    `:progress` comes from a SCANNER, via `ReactiveDag.Source.progress/3`, and is
+    the only signal from inside one poll: a crawl of 700 documents is otherwise a
+    single `:source_stop` that fires once it is already over. Nothing emits it
+    unless a scanner chooses to.
 
     `:source_stop` fires once per source inside a sweep, as it finishes. It comes
     from `Source.poll_all/2` rather than this worker, so a host calling that
