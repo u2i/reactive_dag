@@ -44,11 +44,16 @@ if Code.ensure_loaded?(Oban.Worker) do
     module is a convenience over two public calls and has no opinion about them.
 
     Most of that needs one thing: *the loop finished, here is what happened*.
-    `[:reactive_dag, :scan, :stop]` carries the cell, the job's own `args`, the
-    changed count, the unreachable list, whatever the poll reported under
-    `detail:` (its own token spend, say) and the whole `%Report{}`, so a
-    broadcast, a durable scan record, or a follow-up enqueue is a telemetry
-    handler rather than a fork of this worker. `:start` covers the same work at
+    `[:reactive_dag, :scan, :stop]` carries a `ReactiveDag.ScanRun` under `run`
+    — the poll and the drain it triggered as ONE value, which is what a
+    broadcast, a durable scan record or a follow-up enqueue actually wants. The
+    same facts are also present as flat keys (`cell`, `args`, `unreachable`,
+    `detail`, `report`) for handlers written before the struct existed.
+
+    `ScanRun.total/2` is the one that needed a value rather than a payload: a
+    run's cost lives in BOTH phases — the crawl's own spend in `detail`, its
+    downstream recomputes' in the report's steps — and adding them was left to
+    every caller. `:start` covers the same work at
     the other end, for anything a person watches while the poll runs. Anything inside the poll itself — wrapping each HTTP request,
     mirroring listing pages — belongs in your `poll/1`, which the library never
     looks inside.
@@ -95,7 +100,7 @@ if Code.ensure_loaded?(Oban.Worker) do
     | event | measurements | metadata |
     |---|---|---|
     | `[:reactive_dag, :scan, :start]` | `system_time` | `cell`, `args` |
-    | `[:reactive_dag, :scan, :stop]` | `duration_us`, `changed`, `passes` | `cell`, `args`, `unreachable`, `detail`, `report` |
+    | `[:reactive_dag, :scan, :stop]` | `duration_us`, `changed`, `passes` | `cell`, `args`, `unreachable`, `detail`, `report`, `run` |
     | `[:reactive_dag, :scan, :exception]` | `duration_us` | `cell`, `args`, `reason` |
     | `[:reactive_dag, :scan, :source_stop]` | `duration_us` | `source`, `result` |
     | `[:reactive_dag, :scan, :progress]` | `done`, `total` | `cell`, `label`, `source` |
@@ -231,7 +236,20 @@ if Code.ensure_loaded?(Oban.Worker) do
                 args: args,
                 unreachable: result.unreachable,
                 detail: result[:detail] || %{},
-                report: report
+                report: report,
+                # The poll and the drain as ONE value — see `ReactiveDag.ScanRun`.
+                # The flat keys above stay for handlers written before it; this
+                # is what a new one should read, and it is the only thing that
+                # can answer "what did this RUN cost" without the caller adding
+                # the two phases together itself.
+                run: %ReactiveDag.ScanRun{
+                  cell: cell_id,
+                  changed: result.changed,
+                  unreachable: result.unreachable,
+                  detail: result[:detail] || %{},
+                  report: report,
+                  duration_us: System.monotonic_time(:microsecond) - t0
+                }
               }
             )
 
@@ -289,10 +307,32 @@ if Code.ensure_loaded?(Oban.Worker) do
     defp unscannable(reason, _cell_id, _args, _t0), do: {:error, reason}
 
     defp emit_stop(cell_id, args, t0, reason) do
+      duration_us = System.monotonic_time(:microsecond) - t0
+
       :telemetry.execute(
         [:reactive_dag, :scan, :stop],
-        %{duration_us: System.monotonic_time(:microsecond) - t0, changed: 0, passes: 0},
-        %{cell: cell_id, args: args, unreachable: [], report: nil, not_scannable: reason}
+        %{duration_us: duration_us, changed: 0, passes: 0},
+        # `detail: %{}` here too, which this used to omit — a handler reading it
+        # got `nil` from an unscannable source and a map from every other, for
+        # no reason a caller could infer. Building the payload from a
+        # `%ScanRun{}` makes that kind of drift a compile-time concern rather
+        # than a matter of keeping two literals in step.
+        %{
+          cell: cell_id,
+          args: args,
+          unreachable: [],
+          detail: %{},
+          report: nil,
+          not_scannable: reason,
+          # `report: nil` — an unscannable source completes WITHOUT draining, so
+          # `ScanRun.drained?/1` says false rather than a host inferring it from
+          # a zero pass count that means something else.
+          run: %ReactiveDag.ScanRun{
+            cell: cell_id,
+            not_scannable: reason,
+            duration_us: duration_us
+          }
+        }
       )
     end
 
