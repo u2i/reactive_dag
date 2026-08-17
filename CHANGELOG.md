@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.17.0-rc.31](https://github.com/u2i/reactive_dag/compare/v0.17.0-rc.30...v0.17.0-rc.31) (2026-08-17)
+
+
+### Features
+
+* forward a poll's `detail:` on `[:reactive_dag, :scan, :stop]` ([#156](https://github.com/u2i/reactive_dag/issues/156)) ([d638cc5](https://github.com/u2i/reactive_dag/commit/d638cc58e472a31977427f865a86e0a3f2a7501b))
+
+
+### Bug Fixes
+
+* restore resolve_args/1's docs, orphaned by the scan roll-up ([#154](https://github.com/u2i/reactive_dag/issues/154)) ([7a0afaf](https://github.com/u2i/reactive_dag/commit/7a0afafb9feb68783f7ac581a0b8ded9c4308b4b))
+
 ## [0.17.0-rc.30](https://github.com/u2i/reactive_dag/compare/v0.17.0-rc.29...v0.17.0-rc.30) (2026-08-17)
 
 
