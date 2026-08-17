@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.17.0-rc.32](https://github.com/u2i/reactive_dag/compare/v0.17.0-rc.31...v0.17.0-rc.32) (2026-08-17)
+
+
+### Features
+
+* `ReactiveDag.ScanRun` — the poll and its drain as one value ([#158](https://github.com/u2i/reactive_dag/issues/158)) ([f25e5ea](https://github.com/u2i/reactive_dag/commit/f25e5ea655730bd6dd3389926a1169b4323e2279))
+
 ## [0.17.0-rc.31](https://github.com/u2i/reactive_dag/compare/v0.17.0-rc.30...v0.17.0-rc.31) (2026-08-17)
 
 
