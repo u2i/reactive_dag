@@ -889,7 +889,13 @@ defmodule ReactiveDag.Node do
           "the STANDING options for a routine poll, merged into `Source.poll_all/2`'s opts " <>
             "with the caller's winning. This is where a cheap default lives: a crawler whose " <>
             "full pass costs a request per board per year declares `args: [recent: true]`, so " <>
-            "the routine call stays `poll_all(plan)` and no call site can forget the bound."
+            "the routine call stays `poll_all(plan)` and no call site can forget the bound.\n\n" <>
+            "A VALUE may be a zero-arity function, which `poll_all/2` and `Source.scan/3` " <>
+            "call at poll time: `args: [recent: true, year: &MyApp.Clock.year/0]`. This list " <>
+            "is DSL data frozen at compile time, so a bound that depends on the clock has to " <>
+            "be deferred or it is correct on the day of the build and quietly wrong after. " <>
+            "`Source.controls/1` and `Source.scan_jobs/1` report the function itself — " <>
+            "describing a graph does not run the host's code."
       ],
       every: [
         type: :string,

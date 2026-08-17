@@ -263,8 +263,14 @@ defmodule ReactiveDag.Source do
         # what keeps a routine `poll_all(plan)` cheap without any call site
         # remembering the bound, while still letting a deliberate deep pass say
         # so — `poll_all(plan, recent: false)`.
+        #
+        # `resolve_args/1` runs AFTER the merge, so a caller passing a deferred
+        # value gets the same treatment as a declared one. Merge order already
+        # decides precedence — the caller's `year: 2019` beats a standing
+        # `year: &Clock.year/0` because `Keyword.merge` replaced the pair, not
+        # because of when resolution happens.
         t0 = System.monotonic_time(:microsecond)
-        result = safe_poll(mod, Keyword.merge(Map.get(standing, mod, []), opts))
+        result = safe_poll(mod, resolve_args(Keyword.merge(Map.get(standing, mod, []), opts)))
 
         # PER SOURCE, as it happens. A sweep is one job that can run for
         # minutes, so `:start` and `:stop` on the whole run are the only two
@@ -333,7 +339,7 @@ defmodule ReactiveDag.Source do
       cell ->
         case cell.meta[:scan] do
           nil -> {:error, :no_scanner}
-          mod -> safe_poll(mod, Keyword.merge(cell.meta[:scan_args] || [], opts))
+          mod -> safe_poll(mod, resolve_args(Keyword.merge(cell.meta[:scan_args] || [], opts)))
         end
     end
   end
@@ -719,6 +725,53 @@ defmodule ReactiveDag.Source do
       |> Enum.reject(&is_nil/1)
 
     Enum.uniq(ranked ++ scanners)
+  end
+
+  @doc """
+  Resolve deferred values in a standing `args:` list by calling them.
+
+  A zero-arity function as an arg VALUE is evaluated at poll time rather than
+  read as data:
+
+      poll MyApp.Crawler, args: [recent: true, year: &MyApp.Clock.year/0]
+
+  This exists because `args:` is DSL data, frozen when the module compiles. A
+  bound that depends on the clock — "the current year and the one before it" —
+  cannot be written as a literal there: it would be correct on the day of the
+  build and progressively wrong after, silently, until the next deploy.
+
+  Only VALUES are resolved, and only when they are functions of arity 0. A list
+  with no functions in it comes back unchanged, so this is free for the ordinary
+  case, and a keyword list remains a keyword list — the type every call site and
+  both introspection paths already expect.
+
+  Applied to the MERGED opts, so a caller passing `year: &other_clock/0` is
+  resolved exactly like a declared default. Precedence is `Keyword.merge`'s
+  alone: an explicit `poll_all(plan, year: 2019)` replaced the standing pair
+  before this ran, so there is no deferred value left to overwrite it.
+
+  ## Where this does NOT happen
+
+  `controls/1` and `scan_jobs/1` report `args:` verbatim, deferred values and
+  all. Describing the graph must not run the host's code: a dashboard rendering
+  a scan control would be calling a clock (or worse, whatever else a host
+  deferred) on every page render, and a function value there is a truthful
+  answer to "what did this leaf declare".
+
+  So a host rendering an arg value should expect a function and show the fact,
+  not the result. `poll_all/2` and `scan/3` resolve; nothing else does.
+  """
+  @spec resolve_args(keyword()) :: keyword()
+  def resolve_args(args) when is_list(args) do
+    # `is_function(v, 0)` and not `is_function(v)`: a 1-arity value is not a
+    # deferred value with a missing argument, it is a value this does not know
+    # how to resolve, and calling it would raise BadArity from inside a poll.
+    # Passing it through means the scanner receives what the leaf declared and
+    # can say so itself.
+    Enum.map(args, fn
+      {k, v} when is_function(v, 0) -> {k, v.()}
+      pair -> pair
+    end)
   end
 
   # NB the rescue must not re-wrap: `{:error, reason}` from a well-behaved poll
