@@ -291,10 +291,37 @@ defmodule ReactiveDag.Drain do
 
       strategy ->
         case strategy.recompute(cell, keys) do
-          {:ok, changed} -> {changed, %{}}
+          {:ok, changed} when is_list(changed) ->
+            {changed, %{}}
+
           # a strategy may report what the work cost (tokens, retries, cache
           # hits); the library carries the map without interpreting it
-          {:ok, changed, meta} when is_map(meta) -> {changed, meta}
+          {:ok, changed, meta} when is_list(changed) and is_map(meta) ->
+            {changed, meta}
+
+          other ->
+            # NAMED, rather than a CaseClauseError from inside the drain. The
+            # two accepted shapes differ only in arity, so the mistake this
+            # catches is nearly always a strategy that started reporting meta
+            # (or stopped) while something else still returns the other shape —
+            # and a bare CaseClauseError says which VALUE was unmatched without
+            # saying which cell produced it. In a drain over a dozen cells that
+            # is the whole question.
+            raise ArgumentError, """
+            reactive_dag: the :recompute strategy returned a value #{inspect(cell.id)} cannot use.
+
+                got:      #{inspect(other, limit: 5)}
+                expected: {:ok, changed_keys}  |  {:ok, changed_keys, meta_map}
+
+            `changed_keys` is a list of the keys whose output actually changed
+            (returning every claimed key is always correct, just less efficient).
+            `meta_map` is anything the strategy wants to report about the work —
+            the library carries it onto the step without interpreting it.
+
+            A recompute that FAILED should raise rather than return an error
+            tuple: the drain has already claimed these keys, so a swallowed
+            failure marks them clean over work that did not happen.
+            """
         end
     end
   end

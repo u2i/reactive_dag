@@ -182,4 +182,67 @@ defmodule ReactiveDag.DrainTest do
     # a key no step reported sums to zero rather than raising
     assert ReactiveDag.Drain.Report.total(report, :cost_usd) == 0
   end
+
+  # A strategy returning something the drain cannot use is a host bug, and the
+  # message has to make it findable. A bare CaseClauseError says which VALUE was
+  # unmatched but not which CELL produced it — and in a drain over a dozen cells
+  # that is the whole question.
+  describe "a strategy that returns an unusable shape" do
+    defmodule BareListStrategy do
+      @behaviour ReactiveDag.RecomputeStrategy
+      @impl true
+      def recompute(%ReactiveDag.Cell{leaf?: true}, keys), do: {:ok, keys}
+      def recompute(_cell, keys), do: keys
+    end
+
+    defmodule ErrorTupleStrategy do
+      @behaviour ReactiveDag.RecomputeStrategy
+      @impl true
+      def recompute(%ReactiveDag.Cell{leaf?: true}, keys), do: {:ok, keys}
+      def recompute(_cell, _keys), do: {:error, :upstream_down}
+    end
+
+    defmodule BadMetaStrategy do
+      @behaviour ReactiveDag.RecomputeStrategy
+      @impl true
+      def recompute(%ReactiveDag.Cell{leaf?: true}, keys), do: {:ok, keys}
+      def recompute(_cell, keys), do: {:ok, keys, "tokens: lots"}
+    end
+
+    test "names the cell and both accepted shapes" do
+      Frontier.mark_dirty("a", ["k1"], "seed")
+
+      err =
+        assert_raise ArgumentError, fn ->
+          Drain.run(plan(), recompute: BareListStrategy, key_rule: ReactiveDag.Node.KeyRule)
+        end
+
+      assert err.message =~ ~s("b"), "must name the cell that produced it"
+      assert err.message =~ "{:ok, changed_keys}"
+      assert err.message =~ "{:ok, changed_keys, meta_map}"
+    end
+
+    test "an error tuple is rejected, with the reason it must raise instead" do
+      # The drain has already CLAIMED these keys. Accepting `{:error, _}` as a
+      # quiet no-op would mark them clean over work that did not happen, which
+      # is the one failure this substrate must never produce.
+      Frontier.mark_dirty("a", ["k1"], "seed")
+
+      err =
+        assert_raise ArgumentError, fn ->
+          Drain.run(plan(), recompute: ErrorTupleStrategy, key_rule: ReactiveDag.Node.KeyRule)
+        end
+
+      assert err.message =~ "upstream_down", "shows what it actually got"
+      assert err.message =~ "should raise"
+    end
+
+    test "a 3-tuple whose meta is not a map is rejected" do
+      Frontier.mark_dirty("a", ["k1"], "seed")
+
+      assert_raise ArgumentError, ~r/meta_map/, fn ->
+        Drain.run(plan(), recompute: BadMetaStrategy, key_rule: ReactiveDag.Node.KeyRule)
+      end
+    end
+  end
 end
