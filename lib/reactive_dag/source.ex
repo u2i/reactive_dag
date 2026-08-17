@@ -172,6 +172,48 @@ defmodule ReactiveDag.Source do
   end
 
   @doc """
+  Report progress from inside a `poll/1` — `[:reactive_dag, :scan, :progress]`.
+
+      Source.progress(fetched, total, cell: "meeting_docs")
+
+  A scanner is opaque to the library: it is handed options and returns a result,
+  and everything between is the host's. So a crawl of 700 documents emits ONE
+  `:source_stop`, and it fires when the crawl is already over. For anything a
+  person is waiting on, that is the wrong end.
+
+  Call this as each unit of work completes — per document fetched, per page
+  walked. `done` and `total` are whatever the scanner counts; `total` may be nil
+  when it is not yet known (a crawl still discovering pages), and a consumer
+  then has a count without a denominator, which is still better than silence.
+
+  ## Emit per unit, not per batch
+
+  One event per document, not per twenty-five. Batching pushes an arbitrary N
+  into every scanner, each host picks a different one, and a crawl smaller than N
+  reports nothing at all. Coalescing is the CONSUMER's job and it is the one that
+  can do it properly — `ReactiveDagDashboard` already flushes drain steps on a
+  150ms timer, so 700 events become a handful of renders.
+
+  The cost of an unhandled `:telemetry.execute/3` is a lookup on an ETS table; a
+  host with no handler attached pays approximately nothing.
+
+  ## Options
+
+    * `:cell` — which cell is being polled. A sweep polls several sources, so a
+      consumer showing per-row progress needs to know whose progress this is.
+    * `:label` — what the number counts, for a UI that says "34/721 documents"
+      rather than "34/721".
+  """
+  @spec progress(non_neg_integer(), non_neg_integer() | nil, keyword()) :: :ok
+  def progress(done, total \\ nil, opts \\ []) do
+    :telemetry.execute(
+      [:reactive_dag, :scan, :progress],
+      %{done: done, total: total},
+      %{cell: opts[:cell], label: opts[:label], source: opts[:source]}
+    )
+  end
+
+  @doc """
   Poll every scanner the PLAN declares (via `scan Mod` on its leaves), in the
   poll phase before a drain.
 
@@ -200,10 +242,14 @@ defmodule ReactiveDag.Source do
   `%{source: module, result: result}` — including the failures, since a source
   that could not run is a thing a host wants recorded.
 
-  Sources are polled one at a time, so this doubles as PROGRESS: a sweep over
-  eight sources can run for minutes, and without it the only observable moments
-  are the beginning and the end of the whole run.
+  Sources are polled one at a time, so this doubles as PROGRESS ACROSS a sweep: a
+  sweep over eight sources can run for minutes, and without it the only
+  observable moments are the beginning and the end of the whole run.
+
+  Progress WITHIN one source is `progress/3` — a crawl of 700 documents is a
+  single `:source_stop`, and `:source_stop` fires when it is already over.
   """
+
   @spec poll_all(graph(), keyword()) :: {:ok, map()} | {:error, [{module(), term()}]}
   def poll_all(graph, opts \\ []) do
     standing = standing_args(graph)
