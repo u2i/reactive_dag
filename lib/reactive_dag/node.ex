@@ -746,8 +746,46 @@ defmodule ReactiveDag.Node do
     it fits almost nothing: the real dimension here is a `"FY22"` string, and a
     version is not temporal at all. Time is one instance of slicing, not its
     shape.
+
+    ## Selecting a slice from the SOURCE, not just from stored rows
+
+    A slice narrows two different things, and only one of them was reachable.
+    `column` filters rows this node already HOLDS — the reprocess case, "re-derive
+    FY25 from documents I have". But a source whose upstream is addressable by
+    the same dimension can be asked to fetch only that part: a crawler that takes
+    `fiscal: "FY25/26"` walks twelve months instead of the whole corpus.
+
+    `poll_as:` is what the dimension is called when asking the SCANNER for it:
+
+        poll MuniWatch.Sources.AgendaCenter, every: "0 12 * * *"
+        slice :fiscal_year, values: {MuniWatch.Fiscal, :years, []}, poll_as: :fiscal
+
+    Then `Source.refresh(plan, "agenda_center", fiscal: "FY25/26")` reaches
+    `poll/1` with the scanner's own vocabulary, while the same slice still
+    filters `fiscal_year` for a reprocess.
+
+    Two names because they are genuinely two names. A scanner's option belongs to
+    whatever it wraps — an API query parameter, a CLI flag — and the column
+    belongs to this node's schema; requiring them to match would make every
+    scanner rename its arguments after a storage decision. Defaults to `column`,
+    which is the common case, so the second name is written only when it differs.
+
+    Declared here rather than mapped in a host because a translation table off to
+    one side drifts from the DSL that needs it, and because the source has to
+    reach `poll/1` and the crontab sweep identically — both read this entity.
     """
-    defstruct [:column, :values, :label, :__identifier__, :__spark_metadata__]
+    defstruct [:column, :values, :label, :poll_as, :__identifier__, :__spark_metadata__]
+
+    @doc """
+    What to call this dimension when asking the SCANNER for it — `poll_as` when
+    given, the column otherwise.
+
+    One place decides, because a default spelled at each call site is a default
+    that disagrees with itself eventually.
+    """
+    @spec poll_key(%__MODULE__{}) :: atom()
+    def poll_key(%__MODULE__{poll_as: nil, column: column}), do: column
+    def poll_key(%__MODULE__{poll_as: poll_as}), do: poll_as
   end
 
   @slice %Spark.Dsl.Entity{
@@ -778,6 +816,15 @@ defmodule ReactiveDag.Node do
         type: :string,
         required: false,
         doc: "what to call this dimension in a UI (default: the column name)."
+      ],
+      poll_as: [
+        type: :atom,
+        required: false,
+        doc:
+          "what to call this dimension when asking the SCANNER for it (default: the " <>
+            "column name). A scanner's option is its own vocabulary — a crawler taking " <>
+            "`fiscal:` over a `:fiscal_year` column — so a source can be asked for one " <>
+            "slice without renaming its arguments after a storage decision."
       ]
     ]
   }
@@ -851,38 +898,6 @@ defmodule ReactiveDag.Node do
           "how often a routine poll SHOULD run, as a cron expression. The library never " <>
             "schedules anything: `Source.crontab/2` collects these into data the host hands " <>
             "to its own scheduler. One poll, one cadence."
-      ]
-    ]
-  }
-
-  @slice %Spark.Dsl.Entity{
-    name: :slice,
-    target: Slice,
-    args: [:column],
-    describe:
-      "A dimension a human may select this node by — `slice :fiscal_year` — so a UI can " <>
-        "offer 'reprocess just this year'. Distinct from `recompute_by`, which is the unit " <>
-        "a CHANGE invalidates; this is the unit a PERSON picks, and they are rarely the " <>
-        "same. `values:` enumerates the options so the control is a choice rather than a " <>
-        "text box.",
-    schema: [
-      column: [
-        type: :atom,
-        required: true,
-        doc: "an attribute on THIS node's resource, filtered with `==` to select rows."
-      ],
-      values: [
-        type: {:or, [{:list, :any}, {:tuple, [:atom, :atom, {:list, :any}]}]},
-        required: false,
-        doc:
-          "the selectable options: a literal list, or an `{module, function, args}` " <>
-            "returning one. Only the host knows which values exist — omit it and a UI " <>
-            "must take free text."
-      ],
-      label: [
-        type: :string,
-        required: false,
-        doc: "what to call this dimension in a UI (default: the column name)."
       ]
     ]
   }
@@ -1753,7 +1768,33 @@ defmodule ReactiveDag.Node do
           :ok
       end
 
-      %{column: sl.column, values: sl.values, label: sl.label || to_string(sl.column)}
+      # `poll_as` is only meaningful on a node that HAS a scanner: it names the
+      # option a poll is asked with, and a node nothing polls will never be
+      # asked. Declaring it there is a statement about a source that isn't
+      # there — most often the slice landed on the derived node instead of the
+      # source feeding it, which is exactly the mistake worth catching at
+      # assembly rather than at 3am when the button does nothing.
+      #
+      # NOT validated against the resource's attributes: it deliberately names
+      # the SCANNER's vocabulary, so it usually is not a column here at all.
+      polls? = Ext.get_entities(resource, [:reactive]) |> Enum.any?(&match?(%Poll{}, &1))
+
+      if sl.poll_as && not polls? do
+        raise ArgumentError,
+              "reactive_dag: `slice #{inspect(sl.column)}, poll_as: #{inspect(sl.poll_as)}` on " <>
+                "#{inspect(resource)}, which declares no `poll`. `poll_as:` names the option " <>
+                "a SCANNER is asked with, so it only means something on a source. Declare it " <>
+                "on the polling node, or drop `poll_as:` and keep the slice for reprocess."
+      end
+
+      %{
+        column: sl.column,
+        values: sl.values,
+        label: sl.label || to_string(sl.column),
+        # what a POLL is asked with, resolved once here rather than at each
+        # call site, so the default cannot disagree with itself
+        poll_as: Slice.poll_key(sl)
+      }
     end
   end
 
