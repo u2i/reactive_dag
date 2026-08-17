@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.17.0-rc.29](https://github.com/u2i/reactive_dag/compare/v0.17.0-rc.28...v0.17.0-rc.29) (2026-08-17)
+
+
+### Features
+
+* `Report.by/2` — a meta count broken down per bucket ([#149](https://github.com/u2i/reactive_dag/issues/149)) ([1aa802c](https://github.com/u2i/reactive_dag/commit/1aa802c4cca8c199e48325025b660bacf0b2f57d))
+
 ## [0.17.0-rc.28](https://github.com/u2i/reactive_dag/compare/v0.17.0-rc.27...v0.17.0-rc.28) (2026-08-17)
 
 
