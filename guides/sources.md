@@ -429,6 +429,42 @@ quietly issue every request the cheap path exists to avoid.
 whatever the caller passes. No ceremony — and no misleading range control on
 something that has no range.
 
+#### A bound that depends on the clock
+
+`args:` is DSL data, evaluated when the module compiles. A bound like "the
+current year and the one before it" written as a literal there is right on the
+day of the build and quietly wrong every day after, until something redeploys.
+
+Defer the **value** instead — a zero-arity function, called at poll time:
+
+```elixir
+poll MyApp.DocCrawler,
+  args: [recent: true, year: &MyApp.Clock.year/0],
+  every: "0 12 * * *"
+```
+
+`poll_all/2` and `poll_cell/3` resolve it; `recent: true` stays literal data.
+A caller may defer too (`poll_all(plan, year: fn -> 2019 end)`) and is resolved
+the same way, so a scanner never receives a function it has to handle itself.
+
+> #### Why this exists {: .warning}
+>
+> A crawler read `recent: true` as "current and previous year", but derived
+> "current" from a `year:` the caller had to supply — falling back to *every
+> year* when it was absent. The leaf declared `args: [recent: true]` and nothing
+> supplied the anchor, so the standing bound never once applied and every
+> routine poll crawled the full corpus. It was found by noticing a scan counter
+> reach four figures for what should have been a two-year slice.
+>
+> If a scanner's bound needs a value the DSL cannot know, take the deferred
+> value or **raise** when it is missing. Falling back to the unbounded pass
+> turns a forgotten argument into the expensive crawl the bound exists to avoid.
+
+Only values are resolved, and only at arity 0 — a function of any other arity
+reaches the scanner as declared. `controls/1` and `scan_jobs/1` report the
+function **verbatim**: describing a graph must not run your code, since a
+dashboard calls them on every render.
+
 ### Running one scanner on demand
 
 `poll_all/2` is the routine sweep. `poll_cell/3` is the "refresh this" button: a
@@ -460,6 +496,11 @@ Source.controls(plan)
 A cell with no scanner is absent. A scanner with no `args:`/`every:` reports
 them empty — so a cheap leaf gets a plain *refresh* and an expensive one can be
 offered its deep pass, without the UI knowing which scanners are costly.
+
+An arg whose value was [deferred](#a-bound-that-depends-on-the-clock) reports as
+the function itself, uncalled. Render the fact rather than the result — this is
+a description of the graph, and resolving it here would run your code on every
+page render.
 
 ### What a scan did
 
