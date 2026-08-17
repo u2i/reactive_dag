@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.17.0-rc.28](https://github.com/u2i/reactive_dag/compare/v0.17.0-rc.27...v0.17.0-rc.28) (2026-08-17)
+
+
+### Features
+
+* zero-arity functions as deferred `poll … args:` values ([#147](https://github.com/u2i/reactive_dag/issues/147)) ([9d8c01b](https://github.com/u2i/reactive_dag/commit/9d8c01b93ecc59548672c9e6f982738365081a51))
+
 ## [0.17.0-rc.27](https://github.com/u2i/reactive_dag/compare/v0.17.0-rc.26...v0.17.0-rc.27) (2026-08-17)
 
 
