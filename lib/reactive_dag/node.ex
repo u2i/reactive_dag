@@ -1079,7 +1079,26 @@ defmodule ReactiveDag.Node do
             "INSIDE the write's transaction — a rolled-back write leaves no dirty key, " <>
             "and a committed one always leaves one. (A NOTIFIER cannot promise that: " <>
             "Ash dispatches notifications after commit.) Opt-in, and not implied by " <>
-            "`leaf?` — a leaf fed by a `ReactiveDag.Source` poll would double-trigger."
+            "`leaf?` — a leaf fed by a `ReactiveDag.Source` poll would double-trigger. " <>
+            "Marks but does not SCHEDULE: pair with `schedule_drain: true` unless " <>
+            "something else already drains on a cadence you are happy to wait for."
+      ],
+      schedule_drain: [
+        type: :boolean,
+        required: false,
+        default: false,
+        doc:
+          "with `dirties_on`, enqueue a `ReactiveDag.DrainWorker` job in the SAME " <>
+            "transaction as the mark — so a write is promptly reflected rather than " <>
+            "merely durable. Without it the mark waits for whatever drains next (in " <>
+            "practice the hourly sweep), which for a write-fed leaf with no polling " <>
+            "source on that cadence may be no drain at all (u2i/reactive_dag#142). " <>
+            "The enqueue is one INSERT and joins the write's transaction, so a " <>
+            "rolled-back write schedules nothing; the DRAIN itself runs later, out " <>
+            "of the request. A burst of N writes coalesces to one pending job. " <>
+            "Requires Oban (an optional dependency) — without it the option raises " <>
+            "at compile time rather than silently marking and never draining. " <>
+            "Default false: existing hosts keep today's behaviour."
       ],
       fingerprint: [
         type: {:or, [{:fun, 1}, {:list, :atom}]},

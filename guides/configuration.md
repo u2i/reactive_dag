@@ -20,6 +20,7 @@ config :reactive_dag, repo: MyApp.Repo
 | [`:plan_mfa`](#plan_mfa) | — | only with `ScanWorker` | `ScanWorker` |
 | [`:set_op_templates`](#set_op_templates) | `%{}` | only with `SetOp` | `SetOp` |
 | [`:insights_keep`](#insights_keep) | `20` | no | `Insights` |
+| [`:drain_enqueuer`](#drain_enqueuer) | `DrainWorker.enqueue/0` | no | `dirties_on schedule_drain:` |
 
 ---
 
@@ -71,6 +72,26 @@ override it (`%{"plan_mfa" => ["MyApp.Dag", "plan", []]}`), which is what lets
 one app schedule scans over more than one graph.
 
 Only read by `ScanWorker`. A host scheduling its own polls never needs it.
+
+### `:drain_enqueuer`
+
+How `schedule_drain: true` queues the drain that consumes a `dirties_on` mark.
+
+```elixir
+config :reactive_dag, drain_enqueuer: fn -> MyApp.DrainJob.enqueue() end
+```
+
+The default enqueues `ReactiveDag.DrainWorker` on its `:drain` queue, which is
+almost always what you want. Override it when the drain needs to be YOUR job —
+a different queue, a longer debounce, or a wrapper that records the run id your
+activity page groups by.
+
+Called from inside the write's transaction, so it must be cheap: an INSERT, not
+the drain itself. Must return `{:ok, term}` or `{:error, term}`; an error is
+logged and swallowed, because the mark is already durable and a queue being down
+should not fail a user's write.
+
+Only read when a node declares `dirties_on … schedule_drain: true`.
 
 ### `:set_op_templates`
 
