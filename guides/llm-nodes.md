@@ -223,6 +223,55 @@ A recompute may return `{:ok, changed, meta}`, and the map rides on the drain's
 library never interprets the map — cache hits, retries and rows scanned are
 equally valid keys.
 
+### More than one model
+
+A graph that runs several models cannot answer "what did this cost" from a
+single summed count: models differ in price by an order of magnitude, so the
+number that matters is per model. Report the count as a map instead of a
+number:
+
+```elixir
+{:ok, changed, %{tokens_in: %{"claude-haiku-4-5" => 1200, "openai/gpt-5.6-luna" => 400}}}
+```
+
+`total/2` sums either shape to one number, so a cost line does not have to know
+which shape a node reports. `by/2` returns the breakdown:
+
+```elixir
+Report.by(report, :tokens_in)
+#=> %{"claude-haiku-4-5" => 1200, "openai/gpt-5.6-luna" => 400}
+```
+
+Mixing shapes across nodes is fine. A step reporting a bare number appears in
+`by/2` under `:unattributed` rather than being dropped — a node that reports
+tokens without saying which model produced them is a gap worth seeing, and
+hiding it would make the breakdown disagree with the total.
+
+Take the model name from the API **response**, not from the constant you sent:
+an alias resolves to a dated version, so what you asked for and what ran are not
+always the same string.
+
+### Pick one arity and keep it
+
+An op may return `{:ok, changed}` or `{:ok, changed, meta}`. The drain accepts
+both — but an op that returns the 2-tuple *sometimes* and the 3-tuple *other
+times*, say only when it actually called a model, is a trap for its own direct
+callers:
+
+```elixir
+# works in every test; raises the first time a cache hit adds meta
+{:ok, changed} = MyApp.Ops.Summaries.recompute(cell, keys)
+```
+
+A host app shipped exactly this. Two workers recomputed immediately after
+seeding a cache, so both took the meta path every time, and both sat inside a
+`rescue` — so the MatchError surfaced as a logged write failure over rows that
+had in fact been written correctly.
+
+If a node reports meta at all, report it on every path, including the ones that
+spent nothing. Zeros in a log are the renderer's problem, and a renderer can
+omit them; a shape that varies is every caller's problem.
+
 `per_key` populates it for you: `%{called: n, skipped: n}`, so the saving from
 `fingerprint:` is visible rather than assumed.
 
