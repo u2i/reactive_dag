@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.17.0-rc.26](https://github.com/u2i/reactive_dag/compare/v0.17.0-rc.25...v0.17.0-rc.26) (2026-08-17)
+
+
+### Features
+
+* slice poll_as — ask a SOURCE for one slice, not just stored rows ([555a5e5](https://github.com/u2i/reactive_dag/commit/555a5e5233ccf85e0b8000cd5ad4ea71c38b72ef))
+* slice poll_as — ask a SOURCE for one slice, not just stored rows ([f0a6389](https://github.com/u2i/reactive_dag/commit/f0a6389ad30d21a6e283c0dd2aab77facadec0ae))
+
 ## [0.17.0-rc.25](https://github.com/u2i/reactive_dag/compare/v0.17.0-rc.24...v0.17.0-rc.25) (2026-08-16)
 
 
