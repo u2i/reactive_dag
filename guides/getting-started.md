@@ -200,11 +200,36 @@ end
 
 Now `Ash.create!/1` on that resource marks its key dirty *inside the write's
 transaction* — a rolled-back write leaves no dirty key, a committed one always
-leaves one. Nothing else to call:
+leaves one.
+
+**But marking is not draining.** The mark sits in the frontier until something
+drains, and `dirties_on` alone schedules nothing:
 
 ```elixir
 MyApp.FiscalLines |> Ash.Changeset.for_create(:create, attrs) |> Ash.create!()
-ReactiveDag.Drain.run(plan, recompute: ..., key_rule: ...)
+ReactiveDag.Drain.run(plan, recompute: ..., key_rule: ...)   # ← still yours
+```
+
+For a graph with a polling source that is fine — the next sweep picks it up. For
+a write-fed leaf it means the result of a user's action appears whenever
+something else happens to drain, which may be never. Add `schedule_drain:`:
+
+```elixir
+reactive do
+  id :fiscal_lines
+  leaf? true
+  dirties_on [:create, :update, :destroy]
+  schedule_drain true
+end
+```
+
+That enqueues a `ReactiveDag.DrainWorker` job in the same transaction as the
+mark, so both commit or neither does, and the drain runs after the request rather
+than inside it. A burst of writes coalesces to one pending job. Needs Oban and a
+`drain` queue:
+
+```elixir
+config :my_app, Oban, queues: [drain: 1]
 ```
 
 **The scanner case.** When the data comes from outside — a fleet API, a repo, an
