@@ -74,18 +74,14 @@ defmodule ReactiveDag.Drain.Report do
   because a host chose to key by one. Mixing shapes across steps is fine: a
   graph where one node reports per-model tokens and another reports a bare
   count totals correctly rather than refusing to show a number.
+
+  The arithmetic is `ReactiveDag.Rollup`, shared with
+  `ReactiveDag.Source.detail_total/2` — a scan and a drain answer "what did this
+  cost" identically because it is one fold, not two that must agree.
   """
   @spec total(t(), atom()) :: number()
-  def total(%__MODULE__{steps: steps}, key) do
-    steps
-    |> Enum.map(&get_in(&1, [:meta, key]))
-    |> Enum.map(fn
-      n when is_number(n) -> n
-      m when is_map(m) -> m |> Map.values() |> Enum.filter(&is_number/1) |> Enum.sum()
-      _ -> 0
-    end)
-    |> Enum.sum()
-  end
+  def total(%__MODULE__{steps: steps}, key),
+    do: steps |> Enum.map(& &1[:meta]) |> ReactiveDag.Rollup.total(key)
 
   @doc """
   One key out of every step's `meta`, summed **per bucket** — the breakdown
@@ -110,22 +106,8 @@ defmodule ReactiveDag.Drain.Report do
   `%{}` when no step reported the key at all.
   """
   @spec by(t(), atom()) :: %{optional(String.t() | atom()) => number()}
-  def by(%__MODULE__{steps: steps}, key) do
-    steps
-    |> Enum.map(&get_in(&1, [:meta, key]))
-    |> Enum.reduce(%{}, fn
-      n, acc when is_number(n) ->
-        Map.update(acc, :unattributed, n, &(&1 + n))
-
-      m, acc when is_map(m) ->
-        for {bucket, n} <- m, is_number(n), reduce: acc do
-          inner -> Map.update(inner, bucket, n, &(&1 + n))
-        end
-
-      _, acc ->
-        acc
-    end)
-  end
+  def by(%__MODULE__{steps: steps}, key),
+    do: steps |> Enum.map(& &1[:meta]) |> ReactiveDag.Rollup.by(key)
 
   @doc "Total keys reported changed across every step."
   @spec changed_total(t()) :: non_neg_integer()
