@@ -44,6 +44,21 @@ defmodule ReactiveDag.DrainTest do
     def query!("SELECT COUNT" <> _, _params) do
       %{rows: [[Agent.get(__MODULE__, &MapSet.size/1)]]}
     end
+
+    # Enough of a transaction to test the property that matters: a snapshot,
+    # restored if the block raises. That is what the drain relies on to keep a
+    # claim when a recompute fails.
+    def transaction(fun, _opts) do
+      snapshot = Agent.get(__MODULE__, & &1)
+
+      try do
+        {:ok, fun.()}
+      rescue
+        e ->
+          Agent.update(__MODULE__, fn _ -> snapshot end)
+          reraise e, __STACKTRACE__
+      end
+    end
   end
 
   setup do
@@ -144,6 +159,48 @@ defmodule ReactiveDag.DrainTest do
     @behaviour ReactiveDag.RecomputeStrategy
     @impl true
     def recompute(_cell, keys), do: {:ok, keys}
+  end
+
+  describe "a recompute that raises does not lose its claim" do
+    # A claim is a DELETE, so without re-marking a transient failure — a
+    # deadlock, a timeout, an upstream 503 — silently drops work: the keys are
+    # gone from the frontier and nothing knows they are stale.
+    #
+    # The drain still fails loudly. Swallowing the error would mark keys clean
+    # over work that did not happen, which is the one thing this substrate must
+    # never do. The next drain retries instead of never knowing.
+    defmodule BoomStrategy do
+      @behaviour ReactiveDag.RecomputeStrategy
+      @impl true
+      def recompute(%ReactiveDag.Cell{leaf?: true}, keys), do: {:ok, keys}
+      def recompute(_cell, _keys), do: raise("upstream 503")
+    end
+
+    test "the keys are back on the frontier, and the drain still raises" do
+      Frontier.mark_dirty("a", ["k1", "k2"], "seed")
+
+      assert_raise RuntimeError, "upstream 503", fn ->
+        Drain.run(plan(), recompute: BoomStrategy, key_rule: ReactiveDag.Node.KeyRule)
+      end
+
+      # 'a' is a leaf and recomputed fine, propagating to 'b' — which blew up.
+      # Its claim must be back, or those keys are stale forever.
+      assert Frontier.claim("b") |> Enum.sort() == ["k1", "k2"]
+    end
+
+    test "a retry after the failure succeeds, so no work was lost" do
+      Frontier.mark_dirty("a", ["k1"], "seed")
+
+      assert_raise RuntimeError, fn ->
+        Drain.run(plan(), recompute: BoomStrategy, key_rule: ReactiveDag.Node.KeyRule)
+      end
+
+      # The whole point: the next drain picks up what the failed one dropped.
+      assert {:ok, report} =
+               Drain.run(plan(), recompute: SilentStrategy, key_rule: ReactiveDag.Node.KeyRule)
+
+      assert "b" in ReactiveDag.Drain.Report.cells(report)
+    end
   end
 
   test "a strategy may report meta; it rides on the step untouched" do
