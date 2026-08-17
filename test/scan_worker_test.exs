@@ -423,6 +423,40 @@ defmodule ReactiveDag.ScanWorkerTest do
       assert meta.detail == %{}
     end
 
+    test "the poll and its drain arrive as one `%ScanRun{}`" do
+      test_pid = self()
+
+      :telemetry.attach(
+        "scan-run-test",
+        [:reactive_dag, :scan, :stop],
+        fn _e, _m, meta, _ -> send(test_pid, {:scan_stop, meta}) end,
+        nil
+      )
+
+      on_exit(fn -> :telemetry.detach("scan-run-test") end)
+
+      Crawler.returns(%{changed: ["a"], detail: %{tokens_in: 900}})
+
+      perform_job(%{
+        "cell" => "docs",
+        "plan_mfa" => ["ReactiveDag.ScanWorkerTest", "plan_for_worker", []]
+      })
+
+      assert_received {:scan_stop, meta}
+      assert %ReactiveDag.ScanRun{} = run = meta.run
+
+      assert run.cell == "docs"
+      assert run.changed == ["a"]
+      assert run.detail == %{tokens_in: 900}
+      assert %ReactiveDag.Drain.Report{} = run.report
+
+      # The point of the pairing: one call for what the RUN cost, rather than
+      # the caller adding the poll's spend to the drain's.
+      assert ReactiveDag.ScanRun.total(run, :tokens_in) >= 900
+      assert ReactiveDag.ScanRun.drained?(run)
+      assert ReactiveDag.ScanRun.complete?(run)
+    end
+
     test "a missing plan raises with the fix, rather than a match error" do
       prev = Application.get_env(:reactive_dag, :plan_mfa)
       Application.delete_env(:reactive_dag, :plan_mfa)
@@ -682,6 +716,19 @@ defmodule ReactiveDag.ScanWorkerTest do
       assert m.changed == 0
       assert meta.not_scannable == {:not_scannable, :no_credential}
       assert meta.args["run_id"] == "run-5", "still attributable to its run"
+
+      # `detail` used to be OMITTED on this path only, so a handler got nil from
+      # an unscannable source and a map from every other, for no reason a caller
+      # could infer.
+      assert meta.detail == %{}
+
+      # A completed scan that never drained. `drained?` says so, rather than a
+      # host inferring it from a zero pass count — which means something else.
+      assert %ReactiveDag.ScanRun{} = run = meta.run
+      assert run.not_scannable == {:not_scannable, :no_credential}
+      refute ReactiveDag.ScanRun.drained?(run)
+      refute ReactiveDag.ScanRun.changed?(run)
+      assert ReactiveDag.ScanRun.total(run, :tokens_in) == 0
     end
   end
 
