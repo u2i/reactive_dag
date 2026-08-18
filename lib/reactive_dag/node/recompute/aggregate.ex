@@ -54,14 +54,18 @@ defmodule ReactiveDag.Node.Recompute.Aggregate do
     {key_attr, fn row -> row |> Map.fetch!(key_attr) |> to_string() end}
   end
 
-  defp write(resource, %{meta: %{identity_fields: fields}}, _key_attr, _cell_key, payload, action)
+  defp write(resource, %{meta: %{identity_fields: fields}} = cell, _key_attr, _cell_key, payload, action)
        when is_list(fields) do
-    ReactiveDag.Node.Payload.upsert_identity(resource, fields, payload, action)
+    ReactiveDag.Node.Payload.upsert_identity(resource, fields, payload, action, lapse_opts(cell))
   end
 
-  defp write(resource, _cell, key_attr, cell_key, payload, action) do
-    ReactiveDag.Node.Payload.upsert(resource, key_attr, cell_key, payload, action)
+  defp write(resource, cell, key_attr, cell_key, payload, action) do
+    ReactiveDag.Node.Payload.upsert(resource, key_attr, cell_key, payload, action, lapse_opts(cell))
   end
+
+  # what a recompute CLEARS — nil unless the node declares a `lapse`, so the
+  # aggregate path is untouched for every node that does not.
+  defp lapse_opts(%{meta: meta}), do: [lapse: meta[:lapse]]
 
   # add each aggregate to the query under its temp name, then LOAD them so they're
   # computed + present on the result rows (aggregate/5 defines; load selects).

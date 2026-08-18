@@ -442,11 +442,15 @@ defmodule ReactiveDag.Node.Recompute do
 
       resource ->
         action = meta[:payload_action] || :upsert
+        # what a recompute CLEARS: the human marks whose watched fields this
+        # write moves. Nil when the node declares no `lapse`, and the payload
+        # path then behaves exactly as before — survival, for free.
+        opts = [lapse: meta[:lapse]]
 
         case meta[:identity_fields] do
           fields when is_list(fields) ->
             fn _key, row ->
-              ReactiveDag.Node.Payload.upsert_identity(resource, fields, row, action) !=
+              ReactiveDag.Node.Payload.upsert_identity(resource, fields, row, action, opts) !=
                 :unchanged
             end
 
@@ -454,7 +458,8 @@ defmodule ReactiveDag.Node.Recompute do
             key_attr = meta[:payload_key] || :key
 
             fn key, row ->
-              ReactiveDag.Node.Payload.upsert(resource, key_attr, key, row, action) != :unchanged
+              ReactiveDag.Node.Payload.upsert(resource, key_attr, key, row, action, opts) !=
+                :unchanged
             end
         end
     end
