@@ -481,7 +481,7 @@ defmodule ReactiveDag.Node.Recompute do
         # what a recompute CLEARS: the human marks whose watched fields this
         # write moves. Nil when the node declares no `lapse`, and the payload
         # path then behaves exactly as before — survival, for free.
-        opts = [lapse: meta[:lapse]]
+        opts = [lapse: meta[:lapse], compare: meta[:compare]]
 
         case meta[:identity_fields] do
           fields when is_list(fields) ->

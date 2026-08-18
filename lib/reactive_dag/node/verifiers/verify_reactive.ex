@@ -47,6 +47,7 @@ defmodule ReactiveDag.Node.Verifiers.VerifyReactive do
          :ok <- verify_augmented_by(dsl),
          :ok <- verify_lapse(dsl),
          :ok <- verify_fingerprint_reaches_something(dsl, computations),
+         :ok <- verify_compare(dsl),
          :ok <- verify_combinators(dsl, computations),
          # LAST: a node with a broken declaration should hear about THAT. This
          # check is about where correct output goes, so it is the least specific
@@ -404,6 +405,48 @@ defmodule ReactiveDag.Node.Verifiers.VerifyReactive do
   # above: a warning about a silent no-op is discovered from its consequences,
   # long after the deploy. Both fixes are one line — `per_key` if the skip was
   # wanted, or delete the declaration.
+  # `compare` names the columns that constitute this node's result. A name that is
+  # not an attribute compares nothing — `Map.take` simply omits it — so a typo
+  # silently narrows the comparison further than intended, and the narrower it
+  # gets the more changes go unreported. That failure is invisible: the node keeps
+  # working and quietly stops telling anyone its rows moved.
+  #
+  # An empty list is refused for the same reason rather than treated as "compare
+  # nothing": a node that can never report a change is a node whose consumers are
+  # permanently stale, and if that is genuinely wanted it should be said by not
+  # declaring the node.
+  defp verify_compare(dsl) do
+    case Verifier.get_option(dsl, [:reactive], :compare) do
+      nil ->
+        :ok
+
+      [] ->
+        error(
+          dsl,
+          "`compare []` compares no columns, so this node could never report a change and " <>
+            "everything downstream of it would stay stale forever. Name the columns that " <>
+            "constitute the result, or omit `compare` to compare them all."
+        )
+
+      fields when is_list(fields) ->
+        attrs = dsl |> Ash.Resource.Info.attributes() |> Enum.map(& &1.name) |> MapSet.new()
+
+        case Enum.reject(fields, &MapSet.member?(attrs, &1)) do
+          [] ->
+            :ok
+
+          missing ->
+            error(
+              dsl,
+              "`compare` names #{inspect(missing)}, which this resource has no attribute(s) " <>
+                "for — a name that is not a column compares nothing, so the comparison would " <>
+                "be narrower than it reads and changes would go unreported. Declared: " <>
+                "#{inspect(MapSet.to_list(attrs))}"
+            )
+        end
+    end
+  end
+
   defp verify_fingerprint_reaches_something(dsl, computations) do
     cond do
       is_nil(Verifier.get_option(dsl, [:reactive], :fingerprint)) ->

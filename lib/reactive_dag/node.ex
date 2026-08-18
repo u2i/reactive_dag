@@ -1303,6 +1303,25 @@ defmodule ReactiveDag.Node do
         required: false,
         doc: "the attribute a leaf's `fingerprint` is stored in (default `:fingerprint`)."
       ],
+      compare: [
+        type: {:list, :atom},
+        required: false,
+        doc:
+          "which of this node's columns constitute its RESULT — the payload write compares " <>
+            "these and no others when deciding whether a key changed. Omit it and every " <>
+            "field the row carries is compared, which is right when every field is part of " <>
+            "the answer.\n\nDeclare it when the row carries fields that are part of the " <>
+            "RECORD but not the result: `doc_id` (which document this came from), `ordinal` " <>
+            "(position in the source, which a re-parse shifts without changing anything), a " <>
+            "`match_key` a downstream join builds. Comparing those reports a change nothing " <>
+            "made, and a spurious change re-runs every fold downstream — the cost that makes " <>
+            "a cascade O(graph) instead of O(real changes).\n\nDistinct from `fingerprint`, " <>
+            "which stores a digest and is for a LEAF, whose row carries fields that move on " <>
+            "every observation (`last_seen_at`, an `etag` a server re-issues). A digest of " <>
+            "columns already on the row earns nothing when the comparison can read them, so " <>
+            "a derived node wants this and a leaf wants that. `fingerprint` wins if both are " <>
+            "declared."
+      ],
       payload_key: [
         type: :atom,
         doc:
@@ -2262,6 +2281,7 @@ defmodule ReactiveDag.Node do
         payload_action: Ext.get_opt(resource, [:reactive], :payload_action, nil),
         fingerprint: Ext.get_opt(resource, [:reactive], :fingerprint, nil),
         fingerprint_attribute: Ext.get_opt(resource, [:reactive], :fingerprint_attribute, nil),
+        compare: Ext.get_opt(resource, [:reactive], :compare, nil),
         retain_if_vanished: retain_policy(resource),
         slices: slices(resource),
         lapse: lapses(resource),

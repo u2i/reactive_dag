@@ -70,6 +70,19 @@ defmodule ReactiveDag.Node.Payload do
     * `:fingerprint_attribute` — where the value is stored (default
       `:fingerprint`).
 
+    * `:compare` — compare ONLY these fields, storing nothing. For a DERIVED row
+      that carries fields which are part of the record but not part of the
+      result: `doc_id` (provenance), `ordinal` (position in the source document),
+      a `match_key` a join builds. A re-parse that reorders rows moves every
+      `ordinal`, and comparing them reports a change nothing made — which then
+      re-runs every fold downstream.
+
+      Prefer it to `:fingerprint` for a derived node: a fingerprint needs a column
+      to hold the digest, and a digest of fields already on the row earns nothing
+      when the comparison can just read them. `:fingerprint` remains the answer
+      for a leaf, where the fields that move are the ones you must NOT compare and
+      the honest witness is a hash of the ones you must.
+
     * `:lapse` — the human marks this write clears when the content moves (the
       assembled `lapse` entities, from `cell.meta[:lapse]`). Applied AFTER the
       create, as its own write, and only where the watched fields actually
@@ -373,10 +386,34 @@ defmodule ReactiveDag.Node.Payload do
   # nil because the source could not determine it) falls back to comparing
   # everything. That is the safe direction: it may report a change that did not
   # happen, where trusting a nil would miss one that did.
+  # Three answers to "did this move?", in precedence order:
+  #
+  #   * a declared FINGERPRINT — compare the one stored digest. For a source-fed
+  #     leaf, whose row carries fields that move on every observation without the
+  #     observation having changed.
+  #   * a declared COMPARE list — compare those columns and no others. For a
+  #     derived row carrying fields that are part of the RECORD but not part of
+  #     the RESULT: provenance (which document this came from), position (an
+  #     `ordinal` that shifts when a re-parse reorders rows), anything a consumer
+  #     never folds on. Comparing them reports a change nothing made.
+  #   * neither — compare every field the row carries, which is right when every
+  #     field is part of the result.
+  #
+  # `:compare` narrows with `Map.take`, exactly as `lapse_moved?/3` does. Both are
+  # the same question asked of fewer columns, and neither routes through the
+  # fingerprint: `Fingerprint.put/5` treats nil as a no-op, and a nil digest
+  # falling back to "compare everything" is the safe direction for change
+  # detection but not for a narrowed comparison, which must mean what it says.
   defp moved?(record, attrs, opts) do
     case fingerprint_attr(opts, attrs) do
-      {attr, value} when not is_nil(value) -> Map.get(record, attr) != value
-      _ -> differs?(record, attrs)
+      {attr, value} when not is_nil(value) ->
+        Map.get(record, attr) != value
+
+      _ ->
+        case opts[:compare] do
+          fields when is_list(fields) and fields != [] -> differs?(record, Map.take(attrs, fields))
+          _ -> differs?(record, attrs)
+        end
     end
   end
 
