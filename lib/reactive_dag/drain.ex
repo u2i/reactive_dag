@@ -78,6 +78,25 @@ defmodule ReactiveDag.Drain do
       `ReactiveDag.Drain.RunawayError`, whose `:report` field carries the
       partial trace — the step list showing which cells keep re-dirtying each
       other is exactly the diagnostic for the cycle the guard suspects.
+    * `:force` — a cell id, a list of them, or `:all`: these cells' claimed keys
+      propagate WHETHER OR NOT the recompute reported them changed. For a
+      RE-RUN, where the point is that the graph catches up rather than that the
+      work is redone.
+
+      It does not make an op work harder. One that memoises on something the
+      library cannot see — an md5-keyed cache, a content digest — still skips,
+      and should: the expensive call is rarely what a re-run is after. What
+      `:force` overrides is the conclusion drawn from `changed == []`, which
+      otherwise stops the cascade at that cell. So a host that recomputed a cell
+      out-of-band, or cleared a payload by hand, can drain and have everything
+      downstream reflect it:
+
+          Drain.run(plan, recompute: Strategy, force: "transcript_record")
+
+      Only the named cells are forced. Their parents propagate on their own
+      verdicts, so a genuinely unchanged consumer still stops the cascade —
+      forcing transitively would recompute the whole downstream graph on every
+      re-run and make change detection pointless past the first hop.
 
   ## Telemetry
 
@@ -342,7 +361,13 @@ defmodule ReactiveDag.Drain do
     # keys, and per-key propagation only carries survivors — it would strand
     # a vanished key in the parent. So escalate downstream when the claim was
     # whole, regardless of the per-parent key_rule.
-    prop = if "*" in keys, do: :all, else: changed
+    prop =
+      cond do
+        "*" in keys -> :all
+        forced?(opts, cell_id) -> forced_prop(keys, changed)
+        true -> changed
+      end
+
     parents = propagate(plan, cell_id, prop, opts, priors)
 
     step = %{
@@ -382,6 +407,41 @@ defmodule ReactiveDag.Drain do
 
     {cause, [Map.merge(step, %{cell: cell_id, pass: passes}) | steps], failed}
   end
+
+  # `force:` names cells whose claimed keys propagate WHETHER OR NOT the
+  # recompute reported them changed.
+  #
+  # It does not make the op work harder. An op that memoises — an md5-keyed cache,
+  # a content digest the library never sees — still skips, and it SHOULD: the
+  # expensive call is not what a re-run is usually after. What force overrides is
+  # the conclusion drawn from `changed == []`, which without it stops the cascade
+  # at this cell.
+  #
+  # That is exactly the situation a host is in when it re-runs a cell out-of-band
+  # and then wants the graph to catch up: the work is already done, so the op has
+  # nothing to report, and everything downstream would sit unrecomputed against a
+  # payload that DID move. Cascade's `Rerun` hand-marked the immediate parents to
+  # get around it, which reaches one level and reads like duplicated propagation.
+  #
+  # Only the FORCED cell is forced. Its parents propagate on their own verdicts,
+  # so a genuinely unchanged consumer still stops the cascade — the alternative
+  # (force everything transitively) would recompute the whole downstream graph on
+  # every re-run and make change detection pointless past the first hop.
+  defp forced?(opts, cell_id) do
+    case opts[:force] do
+      nil -> false
+      :all -> true
+      cells when is_list(cells) -> cell_id in cells
+      cell -> cell == cell_id
+    end
+  end
+
+  # The keys the claim was for, not the ones the op admitted to. `changed` is a
+  # subset of `keys` (an op reports what moved), so the union is just `keys` —
+  # except an op may legitimately report a key it was not claimed for (a
+  # whole-cell pass discovering a new one), and dropping that would be a
+  # regression.
+  defp forced_prop(keys, changed), do: Enum.uniq(keys ++ changed)
 
   defp timed(fun) do
     t0 = System.monotonic_time(:microsecond)
