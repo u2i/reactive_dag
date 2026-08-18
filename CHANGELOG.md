@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.17.0-rc.36](https://github.com/u2i/reactive_dag/compare/v0.17.0-rc.35...v0.17.0-rc.36) (2026-08-18)
+
+
+### Features
+
+* human augmentation — `augmented_by` and `lapse` ([#166](https://github.com/u2i/reactive_dag/issues/166)) ([5e213e3](https://github.com/u2i/reactive_dag/commit/5e213e31ffe5bf3c6b280b2d7493669a209cec83))
+
 ## [0.17.0-rc.35](https://github.com/u2i/reactive_dag/compare/v0.17.0-rc.34...v0.17.0-rc.35) (2026-08-18)
 
 
