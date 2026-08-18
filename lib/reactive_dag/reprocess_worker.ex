@@ -105,7 +105,7 @@ if Code.ensure_loaded?(Oban.Worker) do
             %{cell: cell_id, args: args, reason: reason}
           )
 
-          {:ok, report} = Drain.run(plan, Job.drain_opts(args))
+          {:ok, report} = Drain.run(plan)
 
           :telemetry.execute(
             [:reactive_dag, :reprocess, :stop],

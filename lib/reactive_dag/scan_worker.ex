@@ -219,7 +219,7 @@ if Code.ensure_loaded?(Oban.Worker) do
             # Drain even when nothing changed: another source may have marked
             # cells this job is now the first to reach, and an empty frontier is
             # a no-op anyway.
-            {:ok, report} = Drain.run(plan, ReactiveDag.Job.drain_opts(args))
+            {:ok, report} = Drain.run(plan)
 
             :telemetry.execute(
               [:reactive_dag, :scan, :stop],
@@ -361,7 +361,7 @@ if Code.ensure_loaded?(Oban.Worker) do
 
       case polled do
         {:ok, results} ->
-          {:ok, report} = Drain.run(plan, ReactiveDag.Job.drain_opts(args))
+          {:ok, report} = Drain.run(plan)
 
           changed =
             results |> Map.values() |> Enum.flat_map(&Map.get(&1, :changed, [])) |> Enum.uniq()

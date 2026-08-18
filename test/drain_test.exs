@@ -79,6 +79,9 @@ defmodule ReactiveDag.DrainTest do
   end
 
   # leaf a → derived b (no compute in meta: Node.Recompute passes keys through)
+  # A pass-through derived cell: no `compute` key at all, which
+  # `Node.Recompute`'s last clause treats like a leaf. (`compute: nil` WARNS —
+  # that is the hand-assembled-cell diagnostic, not this.)
   defp plan do
     Graph.build([
       %Cell{id: "a", leaf?: true},
@@ -86,11 +89,20 @@ defmodule ReactiveDag.DrainTest do
     ])
   end
 
+  # The cell DECLARES what recomputes it (`meta.compute`), which is how a real
+  # node does it — there is no strategy to pass to the drain.
+  defp plan(op) do
+    Graph.build([
+      %Cell{id: "a", leaf?: true},
+      %Cell{id: "b", inputs: ["a"], meta: %{key_rule: :identity, compute: op}}
+    ])
+  end
+
   test "drains leaf → parent in depth order, recording the causal trace" do
     Frontier.mark_dirty("a", ["k1"], "seed")
 
     {:ok, report} =
-      Drain.run(plan(), recompute: ReactiveDag.Node.Recompute, key_rule: ReactiveDag.Node.KeyRule)
+      Drain.run(plan())
 
     assert Enum.map(report.steps, & &1.cell) == ["a", "b"]
     assert [%{triggered_by: nil}, %{triggered_by: "a", claimed: ["k1"]}] = report.steps
@@ -99,14 +111,12 @@ defmodule ReactiveDag.DrainTest do
 
   # a recompute that re-dirties its own input — the runaway shape
   defmodule SelfDirtying do
-    @behaviour ReactiveDag.RecomputeStrategy
+    @behaviour ReactiveDag.Op
     @impl true
-    def recompute(%{id: "b"} = _cell, keys) do
+    def recompute(_cell, keys) do
       ReactiveDag.Frontier.mark_dirty("a", ["k1"], "loop")
       {:ok, keys}
     end
-
-    def recompute(_cell, keys), do: {:ok, keys}
   end
 
   test "the runaway guard raises RunawayError CARRYING the partial report" do
@@ -116,7 +126,7 @@ defmodule ReactiveDag.DrainTest do
 
     err =
       assert_raise Drain.RunawayError, ~r/exceeded 40 passes.*"b"/s, fn ->
-        Drain.run(plan(), recompute: SelfDirtying, max_passes: 40)
+        Drain.run(plan(SelfDirtying), max_passes: 40)
       end
 
     assert %ReactiveDag.Drain.Report{} = err.report
@@ -155,17 +165,14 @@ defmodule ReactiveDag.DrainTest do
   # interpreting it, so Insights and a dashboard can show it.
 
   defmodule CountingStrategy do
-    @behaviour ReactiveDag.RecomputeStrategy
-
+    @behaviour ReactiveDag.Op
     @impl true
-    def recompute(%ReactiveDag.Cell{leaf?: true}, keys), do: {:ok, keys}
-
     def recompute(_cell, keys),
       do: {:ok, keys, %{tokens_in: 100 * length(keys), tokens_out: 7, model: "stub"}}
   end
 
   defmodule SilentStrategy do
-    @behaviour ReactiveDag.RecomputeStrategy
+    @behaviour ReactiveDag.Op
     @impl true
     def recompute(_cell, keys), do: {:ok, keys}
   end
@@ -180,11 +187,9 @@ defmodule ReactiveDag.DrainTest do
     # transaction aborts the outer one, so only a value can be isolated by a
     # savepoint.
     defmodule FlakyStrategy do
-      @behaviour ReactiveDag.RecomputeStrategy
+      @behaviour ReactiveDag.Op
       @impl true
-      def recompute(%ReactiveDag.Cell{leaf?: true}, keys), do: {:ok, keys}
-      def recompute(%ReactiveDag.Cell{id: "b"}, _keys), do: {:error, :upstream_down}
-      def recompute(_cell, keys), do: {:ok, keys}
+      def recompute(_cell, _keys), do: {:error, :upstream_down}
     end
 
     test "the drain finishes, and the failed cell's keys stay dirty" do
@@ -192,7 +197,7 @@ defmodule ReactiveDag.DrainTest do
 
       # No raise: the drain completes and reports.
       assert {:ok, %ReactiveDag.Drain.Report{}} =
-               Drain.run(plan(), recompute: FlakyStrategy, key_rule: ReactiveDag.Node.KeyRule)
+               Drain.run(plan(FlakyStrategy))
 
       # 'b' rolled back, so its claim is intact for the next drain.
       assert Frontier.claim("b") == ["k1"]
@@ -225,9 +230,8 @@ defmodule ReactiveDag.DrainTest do
     # over work that did not happen, which is the one thing this substrate must
     # never do. The next drain retries instead of never knowing.
     defmodule BoomStrategy do
-      @behaviour ReactiveDag.RecomputeStrategy
+      @behaviour ReactiveDag.Op
       @impl true
-      def recompute(%ReactiveDag.Cell{leaf?: true}, keys), do: {:ok, keys}
       def recompute(_cell, _keys), do: raise("upstream 503")
     end
 
@@ -235,7 +239,7 @@ defmodule ReactiveDag.DrainTest do
       Frontier.mark_dirty("a", ["k1", "k2"], "seed")
 
       assert_raise RuntimeError, "upstream 503", fn ->
-        Drain.run(plan(), recompute: BoomStrategy, key_rule: ReactiveDag.Node.KeyRule)
+        Drain.run(plan(BoomStrategy))
       end
 
       # 'a' is a leaf and recomputed fine, propagating to 'b' — which blew up.
@@ -247,12 +251,12 @@ defmodule ReactiveDag.DrainTest do
       Frontier.mark_dirty("a", ["k1"], "seed")
 
       assert_raise RuntimeError, fn ->
-        Drain.run(plan(), recompute: BoomStrategy, key_rule: ReactiveDag.Node.KeyRule)
+        Drain.run(plan(BoomStrategy))
       end
 
       # The whole point: the next drain picks up what the failed one dropped.
       assert {:ok, report} =
-               Drain.run(plan(), recompute: SilentStrategy, key_rule: ReactiveDag.Node.KeyRule)
+               Drain.run(plan(SilentStrategy))
 
       assert "b" in ReactiveDag.Drain.Report.cells(report)
     end
@@ -262,7 +266,7 @@ defmodule ReactiveDag.DrainTest do
     Frontier.mark_dirty("a", ["k1", "k2"], "seed")
 
     {:ok, report} =
-      Drain.run(plan(), recompute: CountingStrategy, key_rule: ReactiveDag.Node.KeyRule)
+      Drain.run(plan(CountingStrategy))
 
     steps = Map.new(report.steps, &{&1.cell, &1})
 
@@ -277,7 +281,7 @@ defmodule ReactiveDag.DrainTest do
     Frontier.mark_dirty("a", ["k1"], "seed")
 
     {:ok, report} =
-      Drain.run(plan(), recompute: SilentStrategy, key_rule: ReactiveDag.Node.KeyRule)
+      Drain.run(plan(SilentStrategy))
 
     assert Enum.all?(report.steps, &(&1.meta == %{}))
   end
@@ -286,7 +290,7 @@ defmodule ReactiveDag.DrainTest do
     Frontier.mark_dirty("a", ["k1", "k2"], "seed")
 
     {:ok, report} =
-      Drain.run(plan(), recompute: CountingStrategy, key_rule: ReactiveDag.Node.KeyRule)
+      Drain.run(plan(CountingStrategy))
 
     # only the derived step reported tokens; the leaf contributes nothing
     assert ReactiveDag.Drain.Report.total(report, :tokens_in) == 200
@@ -301,23 +305,20 @@ defmodule ReactiveDag.DrainTest do
   # that is the whole question.
   describe "a strategy that returns an unusable shape" do
     defmodule BareListStrategy do
-      @behaviour ReactiveDag.RecomputeStrategy
+      @behaviour ReactiveDag.Op
       @impl true
-      def recompute(%ReactiveDag.Cell{leaf?: true}, keys), do: {:ok, keys}
       def recompute(_cell, keys), do: keys
     end
 
     defmodule ErrorTupleStrategy do
-      @behaviour ReactiveDag.RecomputeStrategy
+      @behaviour ReactiveDag.Op
       @impl true
-      def recompute(%ReactiveDag.Cell{leaf?: true}, keys), do: {:ok, keys}
       def recompute(_cell, _keys), do: {:error, :upstream_down}
     end
 
     defmodule BadMetaStrategy do
-      @behaviour ReactiveDag.RecomputeStrategy
+      @behaviour ReactiveDag.Op
       @impl true
-      def recompute(%ReactiveDag.Cell{leaf?: true}, keys), do: {:ok, keys}
       def recompute(_cell, keys), do: {:ok, keys, "tokens: lots"}
     end
 
@@ -326,7 +327,7 @@ defmodule ReactiveDag.DrainTest do
 
       err =
         assert_raise ArgumentError, fn ->
-          Drain.run(plan(), recompute: BareListStrategy, key_rule: ReactiveDag.Node.KeyRule)
+          Drain.run(plan(BareListStrategy))
         end
 
       assert err.message =~ ~s("b"), "must name the cell that produced it"
@@ -343,7 +344,7 @@ defmodule ReactiveDag.DrainTest do
       Frontier.mark_dirty("a", ["k1"], "seed")
 
       assert {:ok, _report} =
-               Drain.run(plan(), recompute: ErrorTupleStrategy, key_rule: ReactiveDag.Node.KeyRule)
+               Drain.run(plan(ErrorTupleStrategy))
 
       # Not marked clean over work that did not happen.
       assert Frontier.claim("b") == ["k1"]
@@ -353,7 +354,7 @@ defmodule ReactiveDag.DrainTest do
       Frontier.mark_dirty("a", ["k1"], "seed")
 
       assert_raise ArgumentError, ~r/meta_map/, fn ->
-        Drain.run(plan(), recompute: BadMetaStrategy, key_rule: ReactiveDag.Node.KeyRule)
+        Drain.run(plan(BadMetaStrategy))
       end
     end
   end

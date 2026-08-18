@@ -88,9 +88,9 @@ defmodule ReactiveDag.Node do
   resources; the substrate reads only the `reactive` block. Then:
 
       plan = ReactiveDag.Node.graph([FlowMonth, FiscalLines, …], for_each: &fetch/1)
-      ReactiveDag.Drain.run(plan,
-        recompute: ReactiveDag.Node.Recompute,
-        key_rule:  ReactiveDag.Node.KeyRule)
+      ReactiveDag.Drain.run(plan)
+
+  Nothing else to wire: the drain reads what each node declared.
 
   ## Config
 
@@ -306,8 +306,7 @@ defmodule ReactiveDag.Node do
         doc:
           "OPTIONAL free-atom label for this intermediate cell. Dispatches nothing here — " <>
             "recompute selects on the entity, not on `op` — so it is documentation, " <>
-            "load-bearing only for a `RecomputeStrategy` that reads it (e.g. " <>
-            "`ReactiveDag.SetOp`). See `ReactiveDag.Cell`."
+            "pure documentation — nothing dispatches on it. See `ReactiveDag.Cell`."
       ],
       compute: [type: :atom, doc: "the recompute module for this intermediate cell"],
       as: [type: :atom, doc: "an explicit id for this intermediate cell"],
@@ -1198,7 +1197,7 @@ defmodule ReactiveDag.Node do
       op: [
         type: :atom,
         doc:
-          "OPTIONAL free-atom label. Recompute dispatches on the `reduce`/`join`/`aggregate`/`compute` entity + `meta` shape, NOT on `op` — so `op` is documentation here, load-bearing only for a `RecomputeStrategy` that dispatches on it (e.g. `ReactiveDag.SetOp`). See `ReactiveDag.Cell`."
+          "OPTIONAL free-atom label. Recompute dispatches on the `reduce`/`join`/`aggregate`/`compute` entity + `meta` shape, NEVER on `op` — so `op` is documentation. See `ReactiveDag.Cell`."
       ],
       key_rule: [
         type: {:one_of, [:identity, :all]},
@@ -1345,11 +1344,10 @@ defmodule ReactiveDag.Node do
         TWO-CELL node: emit a COMPANION cell at this node's id (`<id>`) as a derived
         VIEW over the node's op-tree, and re-root the tree at `<id>/<suffix>` (default
         suffix `"set"`). The companion takes the tree root as its sole input and
-        carries a host-chosen `op:` — so `SetOp` recomputes it (e.g. a status FILTER
+        carries a host-chosen `op:` as a label (e.g. a status FILTER
         that keeps only the violation rows). Options:
 
-          * `op:` (atom, required) — the companion cell's op (its RecomputeStrategy
-            dispatch key).
+          * `op:` (atom, required) — the companion cell's label.
           * `id_suffix:` (string, default `"set"`) — the tree-root suffix under `<id>`.
           * `meta:` (keyword) — extra meta on the companion cell (e.g. `watched?: true`).
 

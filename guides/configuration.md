@@ -18,7 +18,6 @@ config :reactive_dag, repo: MyApp.Repo
 | [`:repo`](#repo) | — | **yes** | `Frontier` |
 | [`:dirty_table`](#dirty_table) | `"reactive_dag_dirty"` | no | `Frontier`, `Migration` |
 | [`:plan_mfa`](#plan_mfa) | — | only with `ScanWorker` | `ScanWorker` |
-| [`:set_op_templates`](#set_op_templates) | `%{}` | only with `SetOp` | `SetOp` |
 | [`:insights_keep`](#insights_keep) | `20` | no | `Insights` |
 | [`:drain_enqueuer`](#drain_enqueuer) | `DrainWorker.enqueue/0` | no | `dirties_on schedule_drain:` |
 | [`:around_poll`](#around_poll) | — | no | `ScanWorker` |
@@ -94,22 +93,6 @@ should not fail a user's write.
 
 Only read when a node declares `dirties_on … schedule_drain: true`.
 
-### `:set_op_templates`
-
-A registry of `op → template` functions for hosts whose recompute is set-based
-SQL keyed by `cell.op`, rather than per-key Elixir.
-
-```elixir
-config :reactive_dag, set_op_templates: %{
-  reconcile: &MyApp.Recompute.reconcile/2,
-  relation: &MyApp.Recompute.relation/2
-}
-```
-
-Only used by `ReactiveDag.SetOp`. A host using `ReactiveDag.Node.Recompute` —
-the common case — never sets this. An op with no registered template logs a
-warning and recomputes nothing, rather than crashing the drain.
-
 ### `:insights_keep`
 
 How many `%ReactiveDag.Drain.Report{}`s `ReactiveDag.Insights.record/1` retains
@@ -159,10 +142,11 @@ queried would make booting depend on the database being reachable.
 
 ## What is *not* configured here
 
-- **Scheduling** — when to call `Drain.run/2`, and with which strategy and key
-  rule, is passed per call. See [Getting started](getting-started.html).
-- **The recompute strategy and key rule** — also per-call `Drain.run/2` options,
-  not global config.
+- **Scheduling** — when to call `Drain.run/2` is the host's. See
+  [Getting started](getting-started.html).
+- **How a node recomputes, and how its changes propagate** — declared in the
+  node's `reactive` block and read off the plan, not configured and not passed
+  per call. `run/2`'s only option is `:max_passes`.
 - **Per-node behaviour** — `payload_key`, `payload_action`, `key_rule`,
   `recompute_by` and the rest are declared in a resource's `reactive` block, not
   in application config. See [Authoring nodes](authoring-nodes.html).

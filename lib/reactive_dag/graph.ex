@@ -21,21 +21,29 @@ defmodule ReactiveDag.Graph do
 
   @doc """
   The parents whose keys should be dirtied when `child` changed, applying the
-  host's `key_rule` module (a `ReactiveDag.KeyRule` impl). The rule sees the
-  parent, the specific child input, and the changed keys, and returns `:all`
-  (whole-cell recompute, the `"*"` wildcard) or `{:keys, mapped}`.
+  key rule each parent DECLARED. The rule sees the parent, the specific child
+  input, and the changed keys, and returns `:all` (whole-cell recompute, the
+  `"*"` wildcard) or `{:keys, mapped}`.
 
-  Returns `[{parent_id, [key]}]`. `key_rule` defaults to identity mapping.
+  Returns `[{parent_id, [key]}]`. `key_rule` defaults to
+  `ReactiveDag.Node.KeyRule`, which reads `:identity | :all | :group` off the
+  authored block — the drain always uses that one, and the parameter exists so a
+  host calling this directly (to pre-mark a re-run, say) gets the same answer.
 
   `priors` maps a changed key to the child row AS IT WAS when marked dirty (see
   `ReactiveDag.Frontier`). A rule that implements `rule/4` receives it and can
   derive a claim from a row that no longer exists; one implementing only
-  `rule/3` is called exactly as before, so a host's own KeyRule keeps working
-  untouched.
+  `rule/3` is called exactly as before.
   """
   @spec dirty_parents(Plan.t(), Cell.id(), [String.t()], module(), map()) ::
           [{Cell.id(), [String.t()]}]
-  def dirty_parents(%Plan{} = plan, child_id, keys, key_rule \\ ReactiveDag.KeyRule, priors \\ %{}) do
+  def dirty_parents(
+        %Plan{} = plan,
+        child_id,
+        keys,
+        key_rule \\ ReactiveDag.Node.KeyRule,
+        priors \\ %{}
+      ) do
     plan.parents
     |> Map.get(child_id, [])
     |> Enum.map(fn parent_id ->

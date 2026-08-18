@@ -44,18 +44,6 @@ defmodule ReactiveDag.Job do
   end
 
   @doc """
-  The `recompute:`/`key_rule:` a job drains with, defaulting to the `Node`
-  strategies a DSL-authored graph uses.
-  """
-  @spec drain_opts(map()) :: keyword()
-  def drain_opts(args) do
-    [
-      recompute: module_or(args["recompute"], ReactiveDag.Node.Recompute),
-      key_rule: module_or(args["key_rule"], ReactiveDag.Node.KeyRule)
-    ]
-  end
-
-  @doc """
   Run `fun` inside the host's configured wrapper, if it has one.
 
       config :reactive_dag, around_poll: {MyApp.Audit, :around, []}
@@ -112,6 +100,4 @@ defmodule ReactiveDag.Job do
   def module("Elixir." <> _ = m), do: String.to_existing_atom(m)
   def module(m), do: String.to_existing_atom("Elixir." <> m)
 
-  defp module_or(nil, default), do: default
-  defp module_or(name, _default), do: module(name)
 end

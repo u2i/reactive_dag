@@ -1,31 +1,62 @@
 defmodule ReactiveDag.Node.Recompute do
   @moduledoc """
-  A GENERIC `ReactiveDag.RecomputeStrategy` for graphs declared with
-  `ReactiveDag.Node`. Because `Node` standardizes where a cell's op module lives
-  — `cell.meta.compute`, a `ReactiveDag.Op` — the dispatch is uniform and the
-  host no longer hand-writes it:
+  THE engine: how a cell recomputes, decided by what its node DECLARED.
 
-      ReactiveDag.Drain.run(plan,
-        recompute: ReactiveDag.Node.Recompute,
-        key_rule:  ReactiveDag.Node.KeyRule)
+  `ReactiveDag.Drain` calls this — there is nothing to configure and no strategy
+  to pass. Dispatch reads the `reactive` block's own shape, in this order:
 
-  This is the per-key-Elixir shape (the op is a behaviour module the host
-  supplies). A host whose recompute is set-based SQL keyed by `cell.op` (the
-  compliance portal) still writes its own strategy; this generic one serves the
-  common "meta.compute is a ReactiveDag.Op module" case, of which cascade is the
-  archetype.
+  | the node declares | this runs |
+  |---|---|
+  | `leaf? true` | pass the claimed keys through (its source wrote the rows) |
+  | `reduce` | read the scoped slice of `over`, group, fold each group into a row |
+  | `join` | reconcile one input's two sides by key |
+  | `per_key` | one call per key, with the input-fingerprint skip |
+  | `union` | the union of its inputs' keys |
+  | `aggregate` | a datastore `GROUP BY` — no rows enter the BEAM |
+  | `run :action` | a generic Ash action on the node's own resource |
+  | `compute Mod` | the escape hatch: a `ReactiveDag.Op` module |
+  | nothing | pass through, LOUDLY (see below) |
+
+  The combinators match BEFORE `compute`, so a node declaring both gets its
+  combinator — which is why the verifier refuses that pair at compile time.
+
+  ## One engine
+
+  This was once one of two shipped strategies, passed in as `recompute:`, with a
+  set-based sibling that dispatched `cell.op` to a SQL template from config. Both
+  hosts ended up passing this one: what varied between them turned out to be
+  DATA the DSL can declare — a module named in `compute`, a combinator, a key
+  rule — not control flow. A pluggable engine everyone plugs the same thing into
+  is an indirection, so the plug went and the DSL kept the declaring.
+
+  `compute Mod` remains the escape hatch for work Ash cannot express (an LLM
+  call, a PDF parse). The distinction that matters: it is declared IN the node
+  and checked by the verifier, rather than looked up in a config map.
 
   A LEAF (or a cell with no compute) passes its claimed keys through as changed —
   a leaf's tuples were written by its source; if it reaches recompute at all, its
   claimed keys already ARE its changes.
   """
-  @behaviour ReactiveDag.RecomputeStrategy
 
   require Logger
   alias ReactiveDag.Cell
   alias ReactiveDag.Node.Recompute.{Declarative, Read}
 
-  @impl true
+  @doc """
+  Recompute `keys` of `cell` (or `[\"*\"]` for the whole cell), returning
+  `{:ok, changed}` — the subset whose output actually changed. Only those
+  propagate, which is what keeps a cascade O(real changes) rather than O(graph).
+
+  May return `{:ok, changed, meta}`: an arbitrary map the drain carries onto its
+  `%Report{}` step without interpreting. Token counts, cache hits and retries are
+  all just keys, so `ReactiveDag.Insights` and a dashboard can show what the work
+  cost.
+
+  `{:error, reason}` is a CONTAINED failure — the drain rolls that cell back and
+  carries on with the rest. It must be RETURNED, not raised: an exception inside
+  a nested transaction aborts the outer one, so only a value can be isolated by a
+  savepoint.
+  """
   def recompute(%Cell{leaf?: true}, keys), do: {:ok, keys}
 
   # a declarative REDUCE combinator — read `over` → group_by → into each group.

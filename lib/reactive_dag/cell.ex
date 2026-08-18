@@ -5,16 +5,15 @@ defmodule ReactiveDag.Cell do
   A cell is either a **leaf** (`inputs: []`, `leaf?: true`; fed by an external
   source) or a **derived** node computed from `inputs`.
 
-  `op` is an OPTIONAL free-atom label, NOT a fixed enum and NOT required. The
-  substrate never interprets it; how a cell recomputes is decided by the app's
-  `RecomputeStrategy`. Two patterns exist:
+  `op` is an OPTIONAL free-atom label and pure DOCUMENTATION: nothing dispatches
+  on it. How a cell recomputes is decided by what the node DECLARED — the `meta`
+  shape (`reduce`/`join`/`aggregate`/`per_key`/`union`/`run`/`compute`) that
+  `ReactiveDag.Node.Recompute` reads. An author may leave `op` nil.
 
-    * The `ReactiveDag.Node` surface dispatches on `meta` shape (`reduce`/`join`/
-      `aggregate`/`compute`), so `op` there is pure documentation — an author may
-      leave it `nil`.
-    * A set-based `RecomputeStrategy` MAY dispatch on `op` (see `ReactiveDag.SetOp`,
-      which maps `op` → a host SQL template). `op` is load-bearing only for such a
-      strategy; it exists as a field so that seam has somewhere to read.
+  It was briefly load-bearing for a set-based strategy that mapped `op` → a host
+  SQL template. That strategy is gone: what varied between hosts turned out to be
+  data the DSL can declare, not a dispatch table, so there is one engine and `op`
+  is a label on it again.
 
   `meta` is an open map for app-specific data the compiler wants to carry
   (compute module, SQL template name, key_rule tag, …). The substrate passes it

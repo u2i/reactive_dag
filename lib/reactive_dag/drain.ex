@@ -3,16 +3,16 @@ defmodule ReactiveDag.Drain do
   The reactive propagation loop — the heart of the substrate, shared by both
   hosts.
 
-  Given a compiled `Plan` and a host config (`recompute` strategy + `key_rule`),
-  drain the frontier to empty:
+  Given a compiled `Plan`, drain the frontier to empty:
 
     1. Pick the dirty cell with the smallest depth (`Frontier.next_cell`) — no
        cell recomputes while an input is still dirty (topological order, no
        external scheduler).
     2. Atomically claim its dirty keys (`Frontier.claim` — delete-returning).
-    3. Recompute via the host's `RecomputeStrategy` → the keys that changed.
+    3. Recompute it (`ReactiveDag.Node.Recompute`, dispatching on what the
+       node DECLARED) → the keys that changed.
     4. Propagate: mark the changed keys on the cell's parents, applying the
-       host's `KeyRule` (`Graph.dirty_parents`).
+       node's declared key rule (`Graph.dirty_parents`).
     5. Repeat until empty.
 
   Steps 2–4 run in ONE savepoint per cell, so a cell that fails leaves the
@@ -70,10 +70,20 @@ defmodule ReactiveDag.Drain do
   Failing that, make recomputes idempotent so a doubled recompute is merely
   wasted work.
 
+  ## One engine
+
+  There is no strategy to supply. A node's `reactive` block declares what it
+  computes and how its changes propagate, and the drain reads that — so the same
+  loop serves a per-key LLM pipeline and a set-based SQL model without either
+  one bringing its own dispatch.
+
+  Earlier versions took `recompute:`/`key_rule:` modules. Both hosts ended up
+  passing the library's own, because what actually varied between them was
+  DATA — a module named in `compute`, a combinator, a key rule — not control
+  flow. A pluggable engine that everyone plugs the same thing into is just an
+  indirection.
+
   `run/2` opts:
-    * `:recompute` — a `ReactiveDag.RecomputeStrategy` module (required unless the
-      graph is leaves-only).
-    * `:key_rule`  — a `ReactiveDag.KeyRule` module (default: identity mapping).
     * `:max_passes` — runaway guard (default #{100_000}): exceeding it raises
       `ReactiveDag.Drain.RunawayError`, whose `:report` field carries the
       partial trace — the step list showing which cells keep re-dirtying each
@@ -454,58 +464,47 @@ defmodule ReactiveDag.Drain do
 
   defp recompute(%Cell{leaf?: true}, keys, _opts), do: {keys, %{}}
 
-  defp recompute(cell, keys, opts) do
-    case opts[:recompute] do
-      nil ->
-        # a DERIVED cell reached with no strategy is a config error, not a
-        # recoverable state — passing keys through silently propagates values
-        # nothing recomputed. (Leaves never reach here; a leaves-only graph
-        # needs no :recompute.)
-        raise ArgumentError,
-              "reactive_dag: derived cell #{inspect(cell.id)} claimed dirty keys but " <>
-                "Drain.run was given no :recompute strategy"
+  defp recompute(cell, keys, _opts) do
+    case ReactiveDag.Node.Recompute.recompute(cell, keys) do
+      {:ok, changed} when is_list(changed) ->
+        {changed, %{}}
 
-      strategy ->
-        case strategy.recompute(cell, keys) do
-          {:ok, changed} when is_list(changed) ->
-            {changed, %{}}
+      # a recompute may report what the work cost (tokens, retries, cache hits);
+      # the library carries the map without interpreting it
+      {:ok, changed, meta} when is_list(changed) and is_map(meta) ->
+        {changed, meta}
 
-          # a strategy may report what the work cost (tokens, retries, cache
-          # hits); the library carries the map without interpreting it
-          {:ok, changed, meta} when is_list(changed) and is_map(meta) ->
-            {changed, meta}
+      # CONTAINED, not raised. Must be a RETURNED value: an exception inside a
+      # nested transaction aborts the outer one, so only this shape can be
+      # isolated by the savepoint. `ReactiveDag.Source`'s `poll/1` already
+      # returns errors "contained, not raised" for the same reason.
+      {:error, reason} ->
+        {:failed, reason}
 
-          # CONTAINED, not raised. Must be a RETURNED value: an exception inside
-          # a nested transaction aborts the outer one, so only this shape can be
-          # isolated by the savepoint. `ReactiveDag.Source`'s `poll/1` already
-          # returns errors "contained, not raised" for the same reason.
-          {:error, reason} ->
-            {:failed, reason}
+      other ->
+        # NAMED, rather than a CaseClauseError from inside the drain. The two
+        # accepted shapes differ only in arity, so the mistake this catches is
+        # nearly always a `compute` module that started reporting meta (or
+        # stopped) while something else still returns the other shape — and a
+        # bare CaseClauseError says which VALUE was unmatched without saying
+        # which cell produced it. In a drain over a dozen cells that is the
+        # whole question.
+        raise ArgumentError, """
+        reactive_dag: recomputing #{inspect(cell.id)} returned a value the drain cannot use.
 
-          other ->
-            # NAMED, rather than a CaseClauseError from inside the drain. The
-            # two accepted shapes differ only in arity, so the mistake this
-            # catches is nearly always a strategy that started reporting meta
-            # (or stopped) while something else still returns the other shape —
-            # and a bare CaseClauseError says which VALUE was unmatched without
-            # saying which cell produced it. In a drain over a dozen cells that
-            # is the whole question.
-            raise ArgumentError, """
-            reactive_dag: the :recompute strategy returned a value #{inspect(cell.id)} cannot use.
+            got:      #{inspect(other, limit: 5)}
+            expected: {:ok, changed_keys}  |  {:ok, changed_keys, meta_map}
 
-                got:      #{inspect(other, limit: 5)}
-                expected: {:ok, changed_keys}  |  {:ok, changed_keys, meta_map}
+        `changed_keys` is a list of the keys whose output actually changed
+        (returning every claimed key is always correct, just less efficient).
+        `meta_map` is anything the node wants to report about the work — the
+        library carries it onto the step without interpreting it.
 
-            `changed_keys` is a list of the keys whose output actually changed
-            (returning every claimed key is always correct, just less efficient).
-            `meta_map` is anything the strategy wants to report about the work —
-            the library carries it onto the step without interpreting it.
-
-            A recompute that FAILED should raise rather than return an error
-            tuple: the drain has already claimed these keys, so a swallowed
-            failure marks them clean over work that did not happen.
-            """
-        end
+        This is almost always a `compute Mod` whose `recompute/2` returned
+        something else. A recompute that FAILED should raise rather than return
+        an error tuple: the drain has already claimed these keys, so a swallowed
+        failure marks them clean over work that did not happen.
+        """
     end
   end
 
@@ -520,10 +519,8 @@ defmodule ReactiveDag.Drain do
     parents
   end
 
-  defp propagate(plan, cell_id, changed, opts, priors) do
-    key_rule = opts[:key_rule] || ReactiveDag.KeyRule
-
-    parents = Graph.dirty_parents(plan, cell_id, changed, key_rule, priors)
+  defp propagate(plan, cell_id, changed, _opts, priors) do
+    parents = Graph.dirty_parents(plan, cell_id, changed, ReactiveDag.Node.KeyRule, priors)
 
     Enum.each(parents, fn {parent_id, keys} ->
       Frontier.mark_dirty(parent_id, keys, "propagated from #{cell_id}")

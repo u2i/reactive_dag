@@ -1,7 +1,6 @@
 defmodule ReactiveDag.Source do
   @moduledoc """
-  A **scanner** — the third seam, alongside `ReactiveDag.RecomputeStrategy` and
-  `ReactiveDag.KeyRule`.
+  A **scanner** — how the world gets in.
 
   A source reads external state (a fleet API, a cloud estate, a repo, an LLM) and
   writes a **leaf cell**'s rows in a *poll* phase deliberately OUTSIDE the drain:
@@ -394,7 +393,7 @@ defmodule ReactiveDag.Source do
           | {:error, term()}
   def refresh(graph, cell_id, opts \\ []) do
     {reason, poll_opts} = Keyword.pop(opts, :reason, "scan")
-    key_rule = Keyword.get(poll_opts, :key_rule, ReactiveDag.KeyRule)
+    key_rule = Keyword.get(poll_opts, :key_rule, ReactiveDag.Node.KeyRule)
     poll_opts = Keyword.delete(poll_opts, :key_rule)
 
     case poll_cell(graph, cell_id, poll_opts) do

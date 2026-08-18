@@ -17,10 +17,10 @@ defmodule ReactiveDag.Drain.Report do
         * `:triggered_by` — the cell whose propagation dirtied this one
           (`nil` for the seeded frontier), reconstructing the causal tree
         * `:duration_us` — microseconds the recompute took
-        * `:meta` — whatever the recompute strategy reported about the work
-          (`%{}` when it reported nothing). The library never interprets it:
-          token/cost counts for an LLM node, cache hits, retries and rows
-          scanned are all just keys. A strategy opts in by returning
+        * `:meta` — whatever the recompute reported about the work (`%{}` when
+          it reported nothing). The library never interprets it: token/cost
+          counts for an LLM node, cache hits, retries and rows scanned are all
+          just keys. A `compute` module opts in by returning
           `{:ok, changed, meta}`. A count may be reported flat
           (`tokens_in: 1600`) or broken down (`tokens_in: %{"model-a" => 1200,
           "model-b" => 400}`) — see `total/2` and `by/2`.

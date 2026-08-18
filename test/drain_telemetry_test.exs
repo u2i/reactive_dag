@@ -148,7 +148,7 @@ defmodule ReactiveDag.DrainTelemetryTest do
   defp plan, do: ReactiveDag.Node.graph([Expenses, CategoryTotals])
 
   defp drain do
-    Drain.run(plan(), recompute: ReactiveDag.Node.Recompute, key_rule: ReactiveDag.Node.KeyRule)
+    Drain.run(plan())
   end
 
   describe "start / stop" do
@@ -263,8 +263,6 @@ defmodule ReactiveDag.DrainTelemetryTest do
 
       assert_raise Drain.RunawayError, fn ->
         Drain.run(plan(),
-          recompute: ReactiveDag.Node.Recompute,
-          key_rule: ReactiveDag.Node.KeyRule,
           max_passes: 1
         )
       end
@@ -278,14 +276,25 @@ defmodule ReactiveDag.DrainTelemetryTest do
 
     test "a raising recompute emits :exception and re-raises" do
       defmodule Boom do
+        @behaviour ReactiveDag.Op
+        @impl true
         def recompute(_cell, _keys), do: raise("boom")
       end
 
       attach([[:reactive_dag, :drain, :exception]])
-      Frontier.mark_dirty("expenses", ["*"], "seed")
+      Frontier.mark_dirty("category_totals", ["*"], "seed")
+
+      # The cell DECLARES what recomputes it, so a raising op is stamped on the
+      # cell rather than passed to the drain. `Node.Recompute` matches the
+      # combinator FIRST, so the `reduce` has to come off for `compute` to be
+      # reached — which is the dispatch order a real node relies on.
+      boom_plan =
+        update_in(plan().cells["category_totals"].meta, fn meta ->
+          meta |> Map.delete(:reduce) |> Map.put(:compute, Boom)
+        end)
 
       assert_raise RuntimeError, "boom", fn ->
-        Drain.run(plan(), recompute: Boom, key_rule: ReactiveDag.Node.KeyRule)
+        Drain.run(boom_plan)
       end
 
       assert_received {:telemetry, [:reactive_dag, :drain, :exception], _m, meta}
@@ -300,8 +309,6 @@ defmodule ReactiveDag.DrainTelemetryTest do
 
       assert_raise Drain.RunawayError, fn ->
         Drain.run(plan(),
-          recompute: ReactiveDag.Node.Recompute,
-          key_rule: ReactiveDag.Node.KeyRule,
           max_passes: 1
         )
       end
