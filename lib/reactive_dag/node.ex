@@ -1320,7 +1320,11 @@ defmodule ReactiveDag.Node do
             "every observation (`last_seen_at`, an `etag` a server re-issues). A digest of " <>
             "columns already on the row earns nothing when the comparison can read them, so " <>
             "a derived node wants this and a leaf wants that. `fingerprint` wins if both are " <>
-            "declared."
+            "declared.\n\nOn an `aggregate` node it is INERT unless the node declares two or " <>
+            "more aggregates: that path builds the row from the key column plus each " <>
+            "aggregate's `dest` and nothing else, so there is no bookkeeping column on it to " <>
+            "narrow past. It bites when one aggregate is the result and another is not — a " <>
+            "`count` that moves when a re-parse splits readings without shifting the `avg`."
       ],
       payload_key: [
         type: :atom,
