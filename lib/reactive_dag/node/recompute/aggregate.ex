@@ -65,7 +65,7 @@ defmodule ReactiveDag.Node.Recompute.Aggregate do
 
   # what a recompute CLEARS — nil unless the node declares a `lapse`, so the
   # aggregate path is untouched for every node that does not.
-  defp lapse_opts(%{meta: meta}), do: [lapse: meta[:lapse]]
+  defp lapse_opts(%{meta: meta}), do: [lapse: meta[:lapse], compare: meta[:compare]]
 
   # add each aggregate to the query under its temp name, then LOAD them so they're
   # computed + present on the result rows (aggregate/5 defines; load selects).
