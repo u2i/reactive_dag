@@ -48,17 +48,26 @@ defmodule ReactiveDag.DrainTest do
     # Enough of a transaction to test the property that matters: a snapshot,
     # restored if the block raises. That is what the drain relies on to keep a
     # claim when a recompute fails.
-    def transaction(fun, _opts) do
+    # Enough of a transaction to test the two properties the drain relies on: a
+    # snapshot restored when the block RAISES, and one restored when it calls
+    # `rollback/1` — which is how a savepoint contains a reported failure.
+    def transaction(fun, _opts \\ []) do
       snapshot = Agent.get(__MODULE__, & &1)
 
       try do
         {:ok, fun.()}
+      catch
+        :throw, {:rollback, reason} ->
+          Agent.update(__MODULE__, fn _ -> snapshot end)
+          {:error, reason}
       rescue
         e ->
           Agent.update(__MODULE__, fn _ -> snapshot end)
           reraise e, __STACKTRACE__
       end
     end
+
+    def rollback(reason), do: throw({:rollback, reason})
   end
 
   setup do
@@ -159,6 +168,52 @@ defmodule ReactiveDag.DrainTest do
     @behaviour ReactiveDag.RecomputeStrategy
     @impl true
     def recompute(_cell, keys), do: {:ok, keys}
+  end
+
+  describe "a recompute that REPORTS a failure is contained" do
+    # A fallible unit — a poll that could not reach its upstream — must not take
+    # the drain down with it. `Source.poll_all/2` gives a sweep exactly this
+    # containment; a cell that reports `{:error, _}` gets it where the work
+    # actually happens.
+    #
+    # It must RETURN the failure, not raise: an exception inside a nested
+    # transaction aborts the outer one, so only a value can be isolated by a
+    # savepoint.
+    defmodule FlakyStrategy do
+      @behaviour ReactiveDag.RecomputeStrategy
+      @impl true
+      def recompute(%ReactiveDag.Cell{leaf?: true}, keys), do: {:ok, keys}
+      def recompute(%ReactiveDag.Cell{id: "b"}, _keys), do: {:error, :upstream_down}
+      def recompute(_cell, keys), do: {:ok, keys}
+    end
+
+    test "the drain finishes, and the failed cell's keys stay dirty" do
+      Frontier.mark_dirty("a", ["k1"], "seed")
+
+      # No raise: the drain completes and reports.
+      assert {:ok, %ReactiveDag.Drain.Report{}} =
+               Drain.run(plan(), recompute: FlakyStrategy, key_rule: ReactiveDag.Node.KeyRule)
+
+      # 'b' rolled back, so its claim is intact for the next drain.
+      assert Frontier.claim("b") == ["k1"]
+    end
+
+    test "it is not re-selected forever — the drain terminates" do
+      # The hazard the skip set exists for: a rolled-back claim leaves the keys
+      # dirty, so `next_cell` would hand back the same cell on every pass and
+      # the drain would spin to the runaway guard.
+      Frontier.mark_dirty("a", ["k1"], "seed")
+
+      assert {:ok, report} =
+               Drain.run(plan(),
+                 recompute: FlakyStrategy,
+                 key_rule: ReactiveDag.Node.KeyRule,
+                 max_passes: 20
+               )
+
+      # A handful of passes, not twenty.
+      assert report.passes < 10
+    end
   end
 
   describe "a recompute that raises does not lose its claim" do
@@ -279,19 +334,19 @@ defmodule ReactiveDag.DrainTest do
       assert err.message =~ "{:ok, changed_keys, meta_map}"
     end
 
-    test "an error tuple is rejected, with the reason it must raise instead" do
-      # The drain has already CLAIMED these keys. Accepting `{:error, _}` as a
-      # quiet no-op would mark them clean over work that did not happen, which
-      # is the one failure this substrate must never produce.
+    test "an error tuple is a CONTAINED failure, not a rejected shape" do
+      # This used to raise. `{:error, reason}` is now how a fallible cell — a
+      # poll that could not reach its upstream — reports without taking the
+      # drain down: the savepoint rolls it back, its keys stay dirty, and the
+      # rest of the cascade runs. Accepting it as a quiet SUCCESS would still be
+      # the unforgivable bug; it is not accepted as one.
       Frontier.mark_dirty("a", ["k1"], "seed")
 
-      err =
-        assert_raise ArgumentError, fn ->
-          Drain.run(plan(), recompute: ErrorTupleStrategy, key_rule: ReactiveDag.Node.KeyRule)
-        end
+      assert {:ok, _report} =
+               Drain.run(plan(), recompute: ErrorTupleStrategy, key_rule: ReactiveDag.Node.KeyRule)
 
-      assert err.message =~ "upstream_down", "shows what it actually got"
-      assert err.message =~ "should raise"
+      # Not marked clean over work that did not happen.
+      assert Frontier.claim("b") == ["k1"]
     end
 
     test "a 3-tuple whose meta is not a map is rejected" do

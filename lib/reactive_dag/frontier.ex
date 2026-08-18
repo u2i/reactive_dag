@@ -83,10 +83,17 @@ defmodule ReactiveDag.Frontier do
     Enum.map(rows, fn [id] -> id end)
   end
 
-  @doc "The dirty cell with the smallest depth, or nil if the frontier is empty."
-  @spec next_cell(%{String.t() => non_neg_integer()}) :: String.t() | nil
-  def next_cell(depths) do
-    case dirty_cells() do
+  @doc """
+  The dirty cell with the smallest depth, or nil if the frontier is empty.
+
+  `except` skips cells a caller has already tried this run. The drain uses it
+  for a cell whose recompute FAILED: the failure rolled back, so its keys are
+  still dirty and `next_cell` would hand back the same cell forever. Excluding
+  it lets the rest of the cascade drain and leaves the retry to the next run.
+  """
+  @spec next_cell(%{String.t() => non_neg_integer()}, [String.t()]) :: String.t() | nil
+  def next_cell(depths, except \\ []) do
+    case Enum.reject(dirty_cells(), &(&1 in except)) do
       [] -> nil
       ids -> Enum.min_by(ids, &Map.get(depths, &1, 1_000_000))
     end
@@ -195,6 +202,55 @@ defmodule ReactiveDag.Frontier do
       case repo.transaction(fun, timeout: :infinity) do
         {:ok, result} -> result
         {:error, reason} -> raise "reactive_dag: transaction rolled back: #{inspect(reason)}"
+      end
+    else
+      fun.()
+    end
+  end
+
+  @doc """
+  Run `fun` in a SAVEPOINT: if it returns `{:error, reason}`, everything it did
+  is undone and `{:error, reason}` comes back — without disturbing the
+  transaction around it.
+
+  This is what lets one fallible unit fail inside a drain that is otherwise
+  committing. A poll that could not reach its upstream rolls back its own claim
+  and any rows it managed to write, and the drain carries on with every other
+  cell — which is the containment `Source.poll_all/2` gives a sweep, expressed
+  where the work actually happens.
+
+  ## It must RETURN its failure, not raise
+
+  An exception inside a nested transaction aborts the OUTER one: Postgres marks
+  the connection failed and every later statement errors until the whole thing
+  rolls back. A savepoint only isolates a failure that arrives as a value.
+
+  That is why `ReactiveDag.Source`'s `poll/1` returns `{:error, reason}`
+  "contained, not raised" — the contract was already the right shape for this.
+  A scanner that raises anyway is a scanner that takes the drain down with it,
+  and the `rescue` in `safe_poll/2` is what stops that.
+
+  Returns `fun`'s value unchanged when it does not error, and `{:error, reason}`
+  when it does. A repo without `transaction/2` runs `fun` directly: no
+  savepoint, so a failure is not isolated — the same degradation
+  `transaction/1` makes.
+  """
+  @spec savepoint((-> result)) :: result | {:error, term()} when result: term()
+  def savepoint(fun) when is_function(fun, 0) do
+    repo = repo()
+
+    if function_exported?(repo, :transaction, 2) do
+      case repo.transaction(
+             fn ->
+               case fun.() do
+                 {:error, reason} -> repo.rollback(reason)
+                 other -> other
+               end
+             end,
+             timeout: :infinity
+           ) do
+        {:ok, result} -> result
+        {:error, reason} -> {:error, reason}
       end
     else
       fun.()
