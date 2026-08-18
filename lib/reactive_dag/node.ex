@@ -211,6 +211,30 @@ defmodule ReactiveDag.Node do
       :__identifier__,
       :__spark_metadata__
     ]
+
+    @doc """
+    The unit as a `group_by` entry list: `[unit: :from]` — this node's column on
+    the left, the input's field on the right. `nil` when the unit does no
+    grouping.
+
+    Three shapes, and code that handles only some of them is the bug this
+    function exists to prevent: the compile-time verifier once re-derived this
+    with the composite clause missing, so a composite unit read as "groups by
+    nothing" and the `into:` check it feeds reported `would carry [nil]` on
+    every build. A warning that fires on a correct declaration trains readers to
+    ignore the one that matters.
+
+      * `:cell` — the whole cell is one unit, so nothing is grouped.
+      * `[fund: :fund_code, fy: :fy]` — the COMPOSITE form IS the grouping, and
+        passes straight through (which is why `group_by:` is not restated).
+      * `:month` + `from: :read_on` — one pair. Without `from:` the grouping is
+        left to the combinator.
+    """
+    @spec group_by(struct()) :: keyword() | nil
+    def group_by(%__MODULE__{unit: :cell}), do: nil
+    def group_by(%__MODULE__{unit: pairs}) when is_list(pairs), do: pairs
+    def group_by(%__MODULE__{from: nil}), do: nil
+    def group_by(%__MODULE__{unit: u, from: f}), do: [{u, f}]
   end
 
   @recompute_by %Spark.Dsl.Entity{
@@ -1822,7 +1846,7 @@ defmodule ReactiveDag.Node do
         %{
           r
           | over: over,
-            group_by: r.group_by || unit_group_by(u),
+            group_by: r.group_by || RecomputeBy.group_by(u),
             key_rule: r.key_rule || unit_key_rule(u),
             read: r.read || u.read
         }
@@ -1846,17 +1870,6 @@ defmodule ReactiveDag.Node do
 
   defp edge!(%RecomputeBy{to: to}, %{over: over}, _resource), do: to || over
 
-  # the unit as a `group_by` entry: `[unit: :from]` — this node's column on the
-  # left, the input's field on the right. `:cell` groups nothing (the whole cell
-  # is one unit); a unit with no `from:` leaves grouping to the combinator.
-  defp unit_group_by(%RecomputeBy{unit: :cell}), do: nil
-
-  # the COMPOSITE form IS the grouping: `[fund: :fund_code, fy: :fy]` is already
-  # the `group_by` pair list, so it passes straight through.
-  defp unit_group_by(%RecomputeBy{unit: pairs}) when is_list(pairs), do: pairs
-
-  defp unit_group_by(%RecomputeBy{from: nil}), do: nil
-  defp unit_group_by(%RecomputeBy{unit: u, from: f}), do: [{u, f}]
 
   # the unit as the claim rule it replaces.
   defp unit_key_rule(%RecomputeBy{unit: :cell}), do: :all

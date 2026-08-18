@@ -46,6 +46,7 @@ defmodule ReactiveDag.Node.Verifiers.VerifyReactive do
          :ok <- some_computation(dsl, computations),
          :ok <- verify_augmented_by(dsl),
          :ok <- verify_lapse(dsl),
+         :ok <- verify_fingerprint_reaches_something(dsl, computations),
          :ok <- verify_combinators(dsl, computations) do
       :ok
     end
@@ -339,6 +340,53 @@ defmodule ReactiveDag.Node.Verifiers.VerifyReactive do
     end
   end
 
+  # The TOP-LEVEL `fingerprint` is read on exactly two paths: `Node.Rows.write/3`
+  # (a source-fed leaf's reconcile) and `Recompute.PerKey`. A node that is neither
+  # — one whose computation is a `compute` module, a combinator, a `run` action —
+  # never consults it, so the declaration is inert.
+  #
+  # Inert is the whole problem. Cascade declared `fingerprint & &1.agenda_fingerprint`
+  # on a `compute` node and wrote TWO comments, in two files, explaining the skip
+  # it believed it had bought; the extraction re-ran and re-propagated on every
+  # pass regardless (u2i/muni_watch#20). Nothing failed, so nothing said so.
+  #
+  # An error rather than a warning, for the reason `some_computation/2` gives
+  # above: a warning about a silent no-op is discovered from its consequences,
+  # long after the deploy. Both fixes are one line — `per_key` if the skip was
+  # wanted, or delete the declaration.
+  defp verify_fingerprint_reaches_something(dsl, computations) do
+    cond do
+      is_nil(Verifier.get_option(dsl, [:reactive], :fingerprint)) ->
+        :ok
+
+      # a leaf reconciles through `Rows`, which is one of the two readers
+      Verifier.get_option(dsl, [:reactive], :leaf?) == true ->
+        :ok
+
+      Enum.any?(computations, &match?(%PerKey{}, &1)) ->
+        :ok
+
+      true ->
+        error(
+          dsl,
+          "`fingerprint` is declared here but nothing will read it. It is consulted on " <>
+            "two paths only: a `leaf? true` node's reconcile, and `per_key`. This node " <>
+            "is neither#{computation_kind(computations)}, so the recompute runs in full " <>
+            "every time the cell is claimed and the row is written and propagated — the " <>
+            "cost the declaration reads as avoiding.\n\n" <>
+            "Either declare `per_key` (if the input-comparison skip is what you want), " <>
+            "or remove `fingerprint` and skip inside the computation itself, which is " <>
+            "where a `compute` module already decides what work to do."
+        )
+    end
+  end
+
+  defp computation_kind([]), do: ""
+
+  defp computation_kind([c | _]) do
+    " (it declares #{c.__struct__ |> Module.split() |> List.last() |> Macro.underscore()})"
+  end
+
   # a fingerprint needs somewhere to live, or the skip can never fire — a
   # silently-never-skipping node is exactly the expensive mistake the rung exists
   # to prevent, so it is a compile error rather than a runtime surprise.
@@ -384,12 +432,16 @@ defmodule ReactiveDag.Node.Verifiers.VerifyReactive do
   end
 
   # the `recompute_by` unit, as the group_by it lowers to.
-  defp block_group_by(dsl) do
-    case unit(dsl) do
-      %RecomputeBy{unit: u, from: f} when not is_nil(f) -> [{u, f}]
-      _ -> nil
-    end
-  end
+  # ONE derivation, shared with assembly (`RecomputeBy.group_by/1`). This used to
+  # re-derive it and handled only the `unit: u, from: f` shape — so a COMPOSITE
+  # unit (`recompute_by [fund: :fund_code, fy: :fy]`) read as nil, and
+  # `verify_dests` then reported the row "would carry [nil]" on every build of a
+  # perfectly correct node. The composite path went unverified as a result, which
+  # is worse than having no check: the warning read as coverage.
+  defp block_group_by(dsl), do: dsl |> unit() |> group_by_of()
+
+  defp group_by_of(nil), do: nil
+  defp group_by_of(%RecomputeBy{} = u), do: RecomputeBy.group_by(u)
 
   defp unit(dsl) do
     Verifier.get_entities(dsl, [:reactive]) |> Enum.find(&match?(%RecomputeBy{}, &1))
