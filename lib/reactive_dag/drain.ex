@@ -91,7 +91,10 @@ defmodule ReactiveDag.Drain do
       out-of-band, or cleared a payload by hand, can drain and have everything
       downstream reflect it:
 
-          Drain.run(plan, recompute: Strategy, force: "transcript_record")
+          Drain.run(plan,
+            recompute: ReactiveDag.Node.Recompute,
+            force: "transcript_record"
+          )
 
       Only the named cells are forced. Their parents propagate on their own
       verdicts, so a genuinely unchanged consumer still stops the cascade —
