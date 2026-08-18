@@ -174,7 +174,34 @@ defmodule ReactiveDag.NativeGuaranteesTest do
 
   # ── SHAPE 5: second-order (over: computed from the graph) ─────────────────────
   defmodule Readiness do
-    use Ash.Resource, domain: Domain, data_layer: Ash.DataLayer.Simple, extensions: [ReactiveDag.Node]
+    use Ash.Resource, domain: Domain, data_layer: Ash.DataLayer.Ets, extensions: [ReactiveDag.Node]
+
+    ets do
+      private?(true)
+    end
+
+    # a guarantee's row is its verdict per key — the columns a `compute` op of
+    # this shape emits. Nothing here recomputes (the test reads `meta` only), but
+    # a node that computes must own a table to write into.
+    attributes do
+      attribute :key, :string, primary_key?: true, allow_nil?: false, public?: true
+      attribute :status, :string, public?: true
+    end
+
+    actions do
+      defaults [:read, :destroy]
+
+      create :upsert do
+        upsert?(true)
+        upsert_identity(:by_key)
+        accept([:key, :status])
+      end
+    end
+
+    identities do
+      identity :by_key, [:key]
+    end
+
     reactive do
       id :"g:readiness"
       op :guarantee

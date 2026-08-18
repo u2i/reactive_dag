@@ -5,13 +5,25 @@ is the node and its own payload table**: the `reactive do … end` block declare
 the computation; the resource's `attributes` are the rows it materializes. This
 guide covers every shape that block can take.
 
-## The three node shapes
+## The node shapes
 
 | shape | data_layer | attributes | `reactive` block | result lives in |
 |---|---|---|---|---|
-| **payload** | AshPostgres/Ets | the payload columns + an `:upsert` action | a combinator, no `upsert:` | the resource itself |
-| **write-elsewhere** | Simple | none | a combinator + a custom `upsert:` | wherever `upsert:` writes |
-| **escape hatch** | Simple | none | `compute MyOp` | up to the op |
+| **derived** | AshPostgres/Ets | the payload columns + an `:upsert` action | a combinator, or `compute MyOp` | the resource itself |
+| **leaf** | AshPostgres/Ets | the observed columns + an `:upsert` action | `leaf? true` + `poll MyScan` | the resource itself |
+| **compose** | Simple | none | `compose … do … end` | its legs' resources |
+
+A cell owns the rows it computes. Only a `compose` node is tableless, and it is
+not a cell — its nested legs are, and each of those owns its own. The verifier
+refuses a node that computes something with nowhere to put the answer.
+
+An earlier version allowed a **write-elsewhere** shape: no attributes, plus a
+custom `upsert:` closure writing into another resource's table. It is gone. Such
+a node could not use the payload loop, so it got no change detection and reported
+a change on every recompute; the library could not see it held rows, so every
+question about them answered empty; and vanished units were never reconciled
+away. If rows belong in another resource's table, that resource's node is where
+they should be computed.
 
 Every node emits **rows**. A node whose answer is one word emits a row with a
 `:status` column — see below.

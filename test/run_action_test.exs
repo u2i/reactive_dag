@@ -17,13 +17,38 @@ defmodule ReactiveDag.RunActionTest do
     end
   end
 
+  # A `run` node's action does its OWN domain writes and returns the changed
+  # keys, so nothing here goes through the payload loop — but the rows it writes
+  # are still this node's rows, and it must own a table to hold them
+  # (`VerifyReactive.verify_owns_rows/2`). `:key` is that table; the actions
+  # below never touch it, which is the point of `run`.
   defmodule Extractor do
     use Ash.Resource,
       domain: Domain,
-      data_layer: Ash.DataLayer.Simple,
+      data_layer: Ash.DataLayer.Ets,
       extensions: [ReactiveDag.Node]
 
+    ets do
+      private?(true)
+    end
+
+    attributes do
+      attribute :key, :string, primary_key?: true, allow_nil?: false, public?: true
+    end
+
+    identities do
+      identity :by_key, [:key]
+    end
+
     actions do
+      defaults [:read, :destroy]
+
+      create :upsert do
+        upsert?(true)
+        upsert_identity(:by_key)
+        accept([:key])
+      end
+
       action :recompute_keys, {:array, :string} do
         argument :keys, {:array, :string}, allow_nil?: true
         argument :cell_id, :string
@@ -46,10 +71,30 @@ defmodule ReactiveDag.RunActionTest do
   defmodule NoArgs do
     use Ash.Resource,
       domain: Domain,
-      data_layer: Ash.DataLayer.Simple,
+      data_layer: Ash.DataLayer.Ets,
       extensions: [ReactiveDag.Node]
 
+    ets do
+      private?(true)
+    end
+
+    attributes do
+      attribute :key, :string, primary_key?: true, allow_nil?: false, public?: true
+    end
+
+    identities do
+      identity :by_key, [:key]
+    end
+
     actions do
+      defaults [:read, :destroy]
+
+      create :upsert do
+        upsert?(true)
+        upsert_identity(:by_key)
+        accept([:key])
+      end
+
       action :refresh, {:array, :string} do
         run fn _input, _ctx ->
           send(self(), :refreshed)
@@ -68,10 +113,30 @@ defmodule ReactiveDag.RunActionTest do
   defmodule Failing do
     use Ash.Resource,
       domain: Domain,
-      data_layer: Ash.DataLayer.Simple,
+      data_layer: Ash.DataLayer.Ets,
       extensions: [ReactiveDag.Node]
 
+    ets do
+      private?(true)
+    end
+
+    attributes do
+      attribute :key, :string, primary_key?: true, allow_nil?: false, public?: true
+    end
+
+    identities do
+      identity :by_key, [:key]
+    end
+
     actions do
+      defaults [:read, :destroy]
+
+      create :upsert do
+        upsert?(true)
+        upsert_identity(:by_key)
+        accept([:key])
+      end
+
       action :boom, {:array, :string} do
         run fn _input, _ctx -> {:error, "the upstream API said no"} end
       end

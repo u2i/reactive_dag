@@ -119,9 +119,11 @@ defmodule ReactiveDag.PayloadLoopTest do
     assert second == []
   end
 
-  test "meta.resource is what the lib writes into (the field is now USED, not just carried)" do
-    cell = cell()
-    assert cell.meta.resource == FlowMonth
-    assert cell.meta.reduce.upsert == nil     # no override — the lib owns the write
+  test "meta.resource is what the lib writes into (the field is USED, not just carried)" do
+    # This used to also assert `cell.meta.reduce.upsert == nil` — "no override, so
+    # the lib owns the write". There is no `upsert:` slot to override any more, so
+    # the library owning the write is structural rather than a property of this
+    # node: `meta.resource` is the only destination there is.
+    assert cell().meta.resource == FlowMonth
   end
 end

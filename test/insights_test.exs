@@ -134,6 +134,55 @@ defmodule ReactiveDag.InsightsTest do
     def recompute(_cell, _keys), do: {:ok, []}
   end
 
+  # A node that owns a table, over a `compose` LEG that does not. The leg is the
+  # tableless cell that still exists: its work is real and its keys flow, but it
+  # is an intermediate — `meta.resource` is nil, so there is no table to read and
+  # "nothing lives here" is the honest answer rather than a failure to look.
+  #
+  # The `:elsewhere` state used to be reached through the write-elsewhere shape
+  # (`Simple`, no attributes, a compute module). A derived NODE may no longer be
+  # tableless, so it is reached through the one shape that legitimately has no
+  # resource — which is what `Insights.rows_kind/1` has always keyed on.
+  defmodule Publish do
+    use Ash.Resource,
+      domain: Domain,
+      data_layer: Ash.DataLayer.Ets,
+      extensions: [ReactiveDag.Node]
+
+    ets do
+      private?(true)
+    end
+
+    attributes do
+      attribute(:key, :string, primary_key?: true, allow_nil?: false, public?: true)
+    end
+
+    actions do
+      defaults([:read, :destroy])
+
+      create :upsert do
+        upsert?(true)
+        upsert_identity(:by_key)
+        accept([:key])
+      end
+    end
+
+    identities do
+      identity(:by_key, [:key])
+    end
+
+    reactive do
+      id(:publish)
+      compute(ReactiveDag.InsightsTest.NoopOp)
+
+      compose :fold do
+        as(:published_rows)
+        compute(ReactiveDag.InsightsTest.NoopOp)
+        ref(:expenses)
+      end
+    end
+  end
+
   defmodule FakeRepo do
     def start_link, do: Agent.start_link(fn -> MapSet.new() end, name: __MODULE__)
 
@@ -309,47 +358,23 @@ defmodule ReactiveDag.InsightsTest do
       assert status.key_count == 0
     end
 
-    test "a node that keeps its rows elsewhere reports :elsewhere" do
-      # the declared write-elsewhere / escape-hatch shape: Simple, no
-      # attributes, a compute module. Nothing to read is not a failure to read.
-      defmodule Publish do
-        use Ash.Resource,
-          domain: ReactiveDag.InsightsTest.Domain,
-          data_layer: Ash.DataLayer.Simple,
-          extensions: [ReactiveDag.Node]
-
-        reactive do
-          id(:publish)
-          depends_on([:expenses])
-          compute(ReactiveDag.InsightsTest.NoopOp)
-        end
-      end
-
+    test "a cell that keeps no rows of its own reports :elsewhere" do
       plan = ReactiveDag.Node.graph([Expenses, Publish])
-      status = Insights.cell_status(plan, "publish")
+      status = Insights.cell_status(plan, "published_rows")
 
       assert status.rows == :elsewhere
       assert status.key_count == 0
       assert status.statuses == %{}
+
+      # …and the node that DOES own a table reads as :stored, so the two states
+      # are told apart by where the rows live rather than by node shape.
+      assert Insights.cell_status(plan, "publish").rows == :stored
     end
 
     test "and it is not confused with a failed read" do
-      defmodule Publish2 do
-        use Ash.Resource,
-          domain: ReactiveDag.InsightsTest.Domain,
-          data_layer: Ash.DataLayer.Simple,
-          extensions: [ReactiveDag.Node]
+      plan = ReactiveDag.Node.graph([Expenses, Publish])
 
-        reactive do
-          id(:publish2)
-          depends_on([:expenses])
-          compute(ReactiveDag.InsightsTest.NoopOp)
-        end
-      end
-
-      plan = ReactiveDag.Node.graph([Expenses, Publish2])
-
-      refute Insights.cell_status(plan, "publish2").rows == :unreadable
+      refute Insights.cell_status(plan, "published_rows").rows == :unreadable
     end
   end
 
