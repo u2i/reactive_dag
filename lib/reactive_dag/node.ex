@@ -829,6 +829,135 @@ defmodule ReactiveDag.Node do
     ]
   }
 
+  defmodule Lapse do
+    @moduledoc """
+    What a machine recompute does to a HUMAN's mark: `lapse :approved_at,
+    when_changed: :any`.
+
+    The default needs no declaration and is SURVIVAL. The payload write only sets
+    what the computation emits, so a column the upsert action does not `accept`
+    is never touched — a transcript correction is about the *recording*, and
+    re-extracting it does not make "you misheard that name" any less true.
+
+    Survival is wrong for a sign-off. "I checked this" is a claim about content,
+    and when the content moves the claim is stale. That is what this declares:
+
+        lapse :approved_at,   when_changed: :any
+        lapse :signed_off_by, when_changed: [:total, :vote_count]
+        lapse MyApp.Correction, key: :meeting_id, when_changed: [:speaker_ids]
+
+    ## Its own comparison, not the propagate verdict
+
+    `when_changed:` runs a SECOND content comparison, narrowed to the fields
+    named. This is not a convenience — the two grains are genuinely independent.
+    A recompute can be `:changed` overall (so it propagates) while the lapse
+    fields sat still, and the mark must then survive: a spelling fix that moves
+    `:label` leaves an approval of `:total` standing. Reusing the propagate
+    verdict would clear every approval on every cosmetic edit, and an approval
+    that lapses constantly stops being read as information.
+
+    ## Its own write, ordered after the payload
+
+    A lapse is a SEPARATE write, made after the payload create and only when it
+    fires. That ordering is what keeps survival free. Folding the nulling into
+    the payload upsert's attrs would require the payload action to `accept` the
+    human column — and it would then null that column on EVERY pass, destroying
+    the default the feature is built around. So lapse needs an action of its own
+    (`lapse_action:`, default `:lapse`) accepting the lapsing attributes; for a
+    child resource, a destroy action.
+
+    A failure to clear is LOGGED, never raised: the payload write runs inside the
+    drain's per-cell savepoint, and a raise in a nested transaction aborts the
+    outer one — a mark that could not be cleared must not cost the recompute that
+    moved the content. Everything checkable without writing (a missing attribute,
+    a child resource with no destroy action, an `over:` naming a unit this node
+    does not declare) raises at compile time or assembly instead, which is off
+    the hot path.
+
+    ## `:created` never lapses
+
+    No prior record means no mark. A lapse is a comparison against what was
+    there, and on the pass that first creates the row there is nothing to
+    compare and nothing to clear.
+    """
+    defstruct [
+      :target,
+      :when_changed,
+      :key,
+      :over,
+      :lapse_action,
+      :__identifier__,
+      :__spark_metadata__
+    ]
+  end
+
+  @lapse %Spark.Dsl.Entity{
+    name: :lapse,
+    target: Lapse,
+    args: [:target],
+    describe:
+      "What a machine recompute does to a HUMAN's mark — `lapse :approved_at, when_changed: " <>
+        "[:total]`. The default (no declaration) is SURVIVAL, and costs nothing: the payload " <>
+        "action never accepts the human column, so the normal path cannot touch it. Declare " <>
+        "this when the mark is a CLAIM ABOUT CONTENT — a sign-off is stale the moment the " <>
+        "figures move. `when_changed:` runs its OWN comparison, narrowed to the fields named: " <>
+        "a recompute can be `:changed` overall while those fields sat still, and the mark " <>
+        "then survives, so a spelling fix does not clear an approval of the totals.",
+    schema: [
+      target: [
+        type: {:or, [:atom, :module]},
+        required: true,
+        doc:
+          "WHAT is cleared: an attribute on this resource (nulled), or a child RESOURCE " <>
+            "whose rows attached to the lapsing key are destroyed (then `key:` is required). " <>
+            "The two are indistinguishable at parse time — both are atoms — so which one " <>
+            "this is resolves at assembly, against the resource's attributes."
+      ],
+      when_changed: [
+        type: {:or, [{:one_of, [:any]}, {:list, :atom}]},
+        required: true,
+        doc:
+          "WHEN it is cleared: `:any` whenever the computed content moves at all, or a list " <>
+            "of the fields the mark was actually ABOUT. The narrow form is worth the thought " <>
+            "it takes — `:any` is safe and will clear approvals for reasons nobody considers " <>
+            "meaningful (a re-ordered label, a rounding change), and a mark that lapses " <>
+            "constantly stops being read as information. Required rather than defaulted: the " <>
+            "grain is the whole decision, and a default would be made silently."
+      ],
+      key: [
+        type: :atom,
+        required: false,
+        doc:
+          "for a child RESOURCE: the child's column holding this node's cell key. Required " <>
+            "rather than inferred, because a resource may reference a node by more than one " <>
+            "column and guessing wrong here DELETES THE WRONG ROWS."
+      ],
+      over: [
+        type: :atom,
+        required: false,
+        doc:
+          "SET-GRAIN: the mark lives once over a whole unit — `over: :fy` for \"I approve " <>
+            "fiscal year 2026\" — rather than on each of nine hundred rows. Must name the " <>
+            "unit this node declares with `recompute_by`, verified at compile time: the graph " <>
+            "knows how to invalidate a `recompute_by` unit, so \"what exactly did I approve\" " <>
+            "has an answer the substrate can also act on. A sign-off over a set the graph has " <>
+            "no name for is a promise nobody can keep. A set-grain mark lapses when ANY " <>
+            "member moves, which is correct (you approved a total that no longer holds) and " <>
+            "broad — pair it with a narrow `when_changed:` list."
+      ],
+      lapse_action: [
+        type: :atom,
+        required: false,
+        doc:
+          "the action the clearing write goes through: an `update` accepting the lapsing " <>
+            "attributes (default `:lapse`), or for a child resource a `destroy` (default " <>
+            "`:destroy`). It is deliberately NOT the payload action — that one must never " <>
+            "accept the human column, or every recompute would null it and survival would " <>
+            "stop being the default."
+      ]
+    ]
+  }
+
   defmodule Poll do
     @moduledoc """
     This node's rows come from OUTSIDE the graph: `poll MuniWatch.Crawler`.
@@ -1034,7 +1163,8 @@ defmodule ReactiveDag.Node do
       @compute,
       @run,
       @poll,
-      @slice
+      @slice,
+      @lapse
     ],
     schema: [
       id: [
@@ -1087,14 +1217,41 @@ defmodule ReactiveDag.Node do
             "Ash dispatches notifications after commit.) Opt-in, and not implied by " <>
             "`leaf?` — a leaf fed by a `ReactiveDag.Source` poll would double-trigger. " <>
             "Marks but does not SCHEDULE: pair with `schedule_drain: true` unless " <>
-            "something else already drains on a cadence you are happy to wait for."
+            "something else already drains on a cadence you are happy to wait for. " <>
+            "For a SOURCE-FED LEAF, where every write is an observation; a COMPUTED " <>
+            "node whose rows the library writes itself needs `augmented_by`, which " <>
+            "names actions rather than types and so cannot catch the payload upsert."
+      ],
+      augmented_by: [
+        type: {:list, :atom},
+        required: false,
+        doc:
+          "make a HUMAN EDIT on a COMPUTED node trigger the cascade: a write through any " <>
+            "of these named ACTIONS on this resource marks the written record's key dirty " <>
+            "on this cell, so the next drain re-runs everything downstream of the " <>
+            "correction. The human edit attaches to the node's key by construction — the " <>
+            "write goes through the node's own action, on the node's own row.\n\n" <>
+            "`dirties_on` cannot do this job. It names action TYPES and wires ONE GLOBAL " <>
+            "change, which is right for a source-fed LEAF (every write is an observation, " <>
+            "and no write site can be forgotten) and unusable on a computed node: the " <>
+            "library writes that node's rows itself through `payload_action`, which is an " <>
+            "ordinary Ash write, so a global change would make every recompute re-dirty " <>
+            "the cell it just computed — an infinite drain. Naming ACTIONS excludes the " <>
+            "payload upsert by construction rather than by a filter someone must " <>
+            "maintain, and naming it here is rejected at compile time.\n\n" <>
+            "Wired as an `after_action` change on each named action, so the mark runs " <>
+            "INSIDE the write's transaction, exactly as `dirties_on` does — a rolled-back " <>
+            "correction leaves no dirty key, a committed one always leaves one. Composes " <>
+            "with `schedule_drain: true` (same meaning: enqueue the drain in the same " <>
+            "transaction) and with `dirties_on` on a leaf that is ALSO human-augmented; " <>
+            "an action covered by both marks ONCE."
       ],
       schedule_drain: [
         type: :boolean,
         required: false,
         default: false,
         doc:
-          "with `dirties_on`, enqueue a `ReactiveDag.DrainWorker` job in the SAME " <>
+          "with `dirties_on` or `augmented_by`, enqueue a `ReactiveDag.DrainWorker` job in the SAME " <>
             "transaction as the mark — so a write is promptly reflected rather than " <>
             "merely durable. Without it the mark waits for whatever drains next (in " <>
             "practice the hourly sweep), which for a write-fed leaf with no polling " <>
@@ -1823,6 +1980,217 @@ defmodule ReactiveDag.Node do
     end
   end
 
+  # What a recompute CLEARS, validated at assembly. Everything checkable without
+  # writing is checked here, because the write itself happens inside the drain's
+  # per-cell savepoint, where raising would abort the outer transaction — a mark
+  # that cannot be cleared must not cost the recompute that moved the content.
+  # So the failures that would otherwise surface as a logged warning at 3am
+  # (a missing attribute, a child with no destroy action) surface at boot.
+  defp lapses(resource) do
+    case Ext.get_entities(resource, [:reactive]) |> Enum.filter(&match?(%Lapse{}, &1)) do
+      [] ->
+        # nil rather than `[]`: extra_meta strips nils, so a node that declares
+        # no lapse carries no `:lapse` key at all and the write path's `meta[:lapse]`
+        # is a plain nil check rather than an empty-list special case.
+        nil
+
+      entities ->
+        Enum.map(entities, &lapse_spec!(&1, resource))
+    end
+  end
+
+  defp lapse_spec!(%Lapse{target: target} = l, resource) do
+    validate_when_changed!(l, resource)
+    validate_over!(l, resource)
+
+    # An atom is ambiguous at parse time — `:approved_at` and `MyApp.Correction`
+    # are both atoms — so the discrimination happens HERE, against the resource's
+    # own attributes, which is the only place that can tell them apart.
+    if Ash.Resource.Info.attribute(resource, target) do
+      attribute_lapse!(l, resource)
+    else
+      child_lapse!(l, resource)
+    end
+  end
+
+  # An ATTRIBUTE lapse nulls the column through an update action. The action must
+  # ACCEPT the attribute, or the write would succeed and change nothing — a mark
+  # silently surviving content it no longer describes, which is the exact failure
+  # the declaration exists to prevent.
+  defp attribute_lapse!(%Lapse{target: attr} = l, resource) do
+    action_name = l.lapse_action || :lapse
+
+    case Ash.Resource.Info.action(resource, action_name) do
+      %{type: :update} = action ->
+        unless attr in (action.accept || []) do
+          raise ArgumentError,
+                "reactive_dag: `lapse #{inspect(attr)}` on #{inspect(resource)} clears the " <>
+                  "column through the #{inspect(action_name)} action, which does not accept " <>
+                  "#{inspect(attr)} — the write would succeed and change nothing, leaving the " <>
+                  "mark standing over content it no longer describes. Add it: " <>
+                  "`update #{inspect(action_name)} do accept([#{inspect(attr)}]) end`."
+        end
+
+      %{type: other} ->
+        raise ArgumentError,
+              "reactive_dag: `lapse #{inspect(attr)}` on #{inspect(resource)} names " <>
+                "#{inspect(action_name)}, a #{inspect(other)} action. Clearing an attribute " <>
+                "is an UPDATE (the row stays, the column is nulled) — a destroy would take " <>
+                "the computed row with it."
+
+      nil ->
+        raise ArgumentError,
+              "reactive_dag: `lapse #{inspect(attr)}` on #{inspect(resource)} needs an " <>
+                "action to clear the column with, and there is no " <>
+                "#{inspect(action_name)} action. A lapse is its OWN write, deliberately: " <>
+                "the payload action must never accept #{inspect(attr)}, or every recompute " <>
+                "would null it and survival would stop being the default. Add " <>
+                "`update :lapse do accept([#{inspect(attr)}]) end`, or name another with " <>
+                "`lapse_action:`."
+    end
+
+    %{
+      kind: :attribute,
+      attribute: attr,
+      when_changed: l.when_changed,
+      over: l.over,
+      action: action_name
+    }
+  end
+
+  # A CHILD lapse destroys the rows attached to the lapsing key. `key:` is
+  # required rather than inferred for the reason the guide gives: a resource may
+  # reference a node by more than one column, and guessing wrong here deletes the
+  # wrong rows — a mistake nothing downstream can detect, since the rows are
+  # simply gone.
+  defp child_lapse!(%Lapse{target: child} = l, resource) do
+    unless Code.ensure_loaded?(child) and function_exported?(child, :spark_dsl_config, 0) do
+      attrs = Ash.Resource.Info.attributes(resource) |> Enum.map(& &1.name)
+
+      raise ArgumentError,
+            "reactive_dag: `lapse #{inspect(child)}` on #{inspect(resource)} names neither " <>
+              "an attribute of this resource nor an Ash resource, so there is nothing to " <>
+              "clear. Attributes declared: #{inspect(attrs)}"
+    end
+
+    unless l.key do
+      raise ArgumentError,
+            "reactive_dag: `lapse #{inspect(child)}` on #{inspect(resource)} clears CHILD " <>
+              "ROWS, so it needs `key:` — the child's column holding this node's cell key. " <>
+              "It is required rather than inferred because a resource may reference a node " <>
+              "by more than one column, and guessing wrong here deletes the wrong rows."
+    end
+
+    unless Ash.Resource.Info.attribute(child, l.key) do
+      raise ArgumentError,
+            "reactive_dag: `lapse #{inspect(child)}, key: #{inspect(l.key)}` — " <>
+              "#{inspect(child)} has no such attribute, so the destroy would filter on " <>
+              "nothing. Its attributes: " <>
+              "#{inspect(Ash.Resource.Info.attributes(child) |> Enum.map(& &1.name))}"
+    end
+
+    action_name = l.lapse_action || :destroy
+
+    case Ash.Resource.Info.action(child, action_name) do
+      %{type: :destroy} ->
+        :ok
+
+      %{type: other} ->
+        raise ArgumentError,
+              "reactive_dag: `lapse #{inspect(child)}` names #{inspect(action_name)}, a " <>
+                "#{inspect(other)} action. Clearing child rows DESTROYS them — a lapsed " <>
+                "mark is simply gone, and the state afterwards is the state before anyone " <>
+                "marked anything."
+
+      nil ->
+        raise ArgumentError,
+              "reactive_dag: `lapse #{inspect(child)}` needs a #{inspect(action_name)} " <>
+                "action on #{inspect(child)} to clear its rows with, for the same reason " <>
+                "`retain_if_vanished` demands one: a row that should have gone but silently " <>
+                "stayed is indistinguishable from a live one. Add `defaults [:destroy]`, or " <>
+                "name another with `lapse_action:`."
+    end
+
+    %{
+      kind: :child,
+      resource: child,
+      key: l.key,
+      when_changed: l.when_changed,
+      over: l.over,
+      action: action_name
+    }
+  end
+
+  # The watched fields must be real columns of the row this node WRITES. A field
+  # the payload never carries can never move, so the lapse could never fire — a
+  # sign-off that silently outlives every recompute, which reads exactly like a
+  # sign-off that is still true.
+  defp validate_when_changed!(%Lapse{when_changed: :any}, _resource), do: :ok
+
+  defp validate_when_changed!(%Lapse{when_changed: []} = l, resource) do
+    raise ArgumentError,
+          "reactive_dag: `lapse #{inspect(l.target)}, when_changed: []` on " <>
+            "#{inspect(resource)} watches no fields, so it could never fire. Name the " <>
+            "fields the mark is about, or `when_changed: :any` for \"whenever the content " <>
+            "moves at all\"."
+  end
+
+  defp validate_when_changed!(%Lapse{when_changed: fields} = l, resource) when is_list(fields) do
+    attrs = Ash.Resource.Info.attributes(resource) |> Enum.map(& &1.name)
+
+    case Enum.reject(fields, &(&1 in attrs)) do
+      [] ->
+        :ok
+
+      missing ->
+        raise ArgumentError,
+              "reactive_dag: `lapse #{inspect(l.target)}, when_changed: #{inspect(fields)}` " <>
+                "on #{inspect(resource)} watches #{inspect(missing)}, which this resource " <>
+                "has no attribute for. A field the payload never carries can never move, so " <>
+                "the lapse could never fire — and a sign-off that silently outlives every " <>
+                "recompute reads exactly like one that is still true. " <>
+                "Declared: #{inspect(attrs)}"
+    end
+  end
+
+  # `over:` must name the unit this node declares with `recompute_by`. That
+  # constraint is the whole reason set-grain works: the graph knows how to
+  # invalidate a `recompute_by` unit, so "what exactly did I approve" has an
+  # answer the substrate can also act on.
+  defp validate_over!(%Lapse{over: nil}, _resource), do: :ok
+
+  defp validate_over!(%Lapse{over: over} = l, resource) do
+    units =
+      case recompute_by(resource) do
+        %RecomputeBy{unit: :cell} -> [:cell]
+        %RecomputeBy{unit: pairs} when is_list(pairs) -> Keyword.keys(pairs)
+        %RecomputeBy{unit: u} -> [u]
+        nil -> []
+      end
+
+    cond do
+      units == [] ->
+        raise ArgumentError,
+              "reactive_dag: `lapse #{inspect(l.target)}, over: #{inspect(over)}` on " <>
+                "#{inspect(resource)}, which declares no `recompute_by` — so the graph has " <>
+                "no name for the set being signed off, and no way to say when it moved. A " <>
+                "sign-off over a set the graph cannot invalidate is a promise nobody can " <>
+                "keep. Declare `recompute_by #{inspect(over)}, …`, or drop `over:` for a " <>
+                "row-grain mark."
+
+      over not in units ->
+        raise ArgumentError,
+              "reactive_dag: `lapse #{inspect(l.target)}, over: #{inspect(over)}` on " <>
+                "#{inspect(resource)}, whose `recompute_by` declares #{inspect(units)}. " <>
+                "`over:` must name a unit this node already recomputes by — that is what " <>
+                "makes the set one the substrate can act on rather than a label only the " <>
+                "human understands."
+
+      true ->
+        :ok
+    end
+  end
+
   defp identity_fields(resource) do
     case Ash.Resource.Info.primary_key(resource) do
       pk when is_list(pk) and length(pk) > 1 -> pk
@@ -1885,6 +2253,7 @@ defmodule ReactiveDag.Node do
         fingerprint_attribute: Ext.get_opt(resource, [:reactive], :fingerprint_attribute, nil),
         retain_if_vanished: retain_policy(resource),
         slices: slices(resource),
+        lapse: lapses(resource),
         identity_fields: identity_fields(resource),
         context_inputs: context_inputs(resource)
       }

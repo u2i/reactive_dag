@@ -42,6 +42,7 @@ defmodule ReactiveDag.MixProject do
         "guides/getting-started.md",
         "guides/configuration.md",
         "guides/authoring-nodes.md",
+        "guides/human-augmentation.md",
         "guides/llm-nodes.md",
         "guides/sources.md",
         "guides/seams.md",

@@ -595,7 +595,8 @@ defmodule ReactiveDag.Node.Rows do
   defp write(key, row, meta) do
     opts = [
       fingerprint: meta[:fingerprint],
-      fingerprint_attribute: meta[:fingerprint_attribute]
+      fingerprint_attribute: meta[:fingerprint_attribute],
+      lapse: meta[:lapse]
     ]
 
     case meta[:identity_fields] do

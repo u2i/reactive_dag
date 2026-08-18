@@ -44,8 +44,138 @@ defmodule ReactiveDag.Node.Verifiers.VerifyReactive do
 
     with :ok <- one_computation(dsl, computations),
          :ok <- some_computation(dsl, computations),
+         :ok <- verify_augmented_by(dsl),
+         :ok <- verify_lapse(dsl),
          :ok <- verify_combinators(dsl, computations) do
       :ok
+    end
+  end
+
+  # `lapse … over:` is SET-GRAIN: one mark covering a whole unit. The unit must
+  # be one this node already declares with `recompute_by`, and that constraint is
+  # the whole reason set-grain works — the graph knows how to invalidate a
+  # `recompute_by` unit, so "what exactly did I approve" has an answer the
+  # substrate can also act on. A sign-off over a set the graph has no name for is
+  # a promise nobody can keep, so it is refused here rather than at the drain,
+  # where the only symptom would be an approval that never lapses.
+  #
+  # The rest of the entity's checking — the target being an attribute or a
+  # resource, the clearing action existing and accepting the column — happens at
+  # ASSEMBLY (`ReactiveDag.Node.lapses/1`), because a CHILD lapse's checks are
+  # about the OTHER resource, and cross-resource facts are not reliably known at
+  # `defmodule` time. `over:` is checkable here: it names this node's own unit.
+  defp verify_lapse(dsl) do
+    dsl
+    |> Verifier.get_entities([:reactive])
+    |> Enum.filter(&match?(%ReactiveDag.Node.Lapse{}, &1))
+    |> Enum.reject(&is_nil(&1.over))
+    |> Enum.reduce_while(:ok, fn l, :ok ->
+      case verify_lapse_over(dsl, l) do
+        :ok -> {:cont, :ok}
+        {:error, _} = err -> {:halt, err}
+      end
+    end)
+  end
+
+  defp verify_lapse_over(dsl, l) do
+    units =
+      case unit(dsl) do
+        %RecomputeBy{unit: :cell} -> [:cell]
+        %RecomputeBy{unit: pairs} when is_list(pairs) -> Keyword.keys(pairs)
+        %RecomputeBy{unit: u} -> [u]
+        nil -> []
+      end
+
+    cond do
+      units == [] ->
+        error(
+          dsl,
+          "`lapse #{inspect(l.target)}, over: #{inspect(l.over)}` is a SET-GRAIN mark, but " <>
+            "this node declares no `recompute_by` — so the graph has no name for the set " <>
+            "being signed off, and no way to say when it moved. A sign-off over a set the " <>
+            "graph cannot invalidate is a promise nobody can keep. Declare " <>
+            "`recompute_by #{inspect(l.over)}, …`, or drop `over:` for a row-grain mark."
+        )
+
+      l.over not in units ->
+        error(
+          dsl,
+          "`lapse #{inspect(l.target)}, over: #{inspect(l.over)}` names a unit this node " <>
+            "does not recompute by — `recompute_by` declares #{inspect(units)}. `over:` " <>
+            "must name one of them: that is what makes the set one the substrate can act " <>
+            "on rather than a label only the human understands."
+        )
+
+      true ->
+        :ok
+    end
+  end
+
+  # `augmented_by` names ACTIONS, and a name that doesn't resolve wires nothing
+  # at all — the worst outcome for a feature whose whole job is that a human's
+  # correction is not silently dropped. So each name is checked here, where the
+  # actions are already known, rather than discovered as a correction that never
+  # propagated.
+  defp verify_augmented_by(dsl) do
+    case Verifier.get_option(dsl, [:reactive], :augmented_by) do
+      names when is_list(names) and names != [] ->
+        payload_action = Verifier.get_option(dsl, [:reactive], :payload_action) || :upsert
+        actions = Ash.Resource.Info.actions(dsl)
+
+        Enum.reduce_while(names, :ok, fn name, :ok ->
+          case verify_augmented_action(dsl, name, payload_action, actions) do
+            :ok -> {:cont, :ok}
+            {:error, _} = err -> {:halt, err}
+          end
+        end)
+
+      _ ->
+        :ok
+    end
+  end
+
+  defp verify_augmented_action(dsl, name, payload_action, actions) do
+    found = Enum.find(actions, &(&1.name == name))
+
+    cond do
+      # The infinite loop, refused at compile time. The library writes this
+      # node's rows through the payload action; marking there would re-dirty
+      # the cell the drain just computed, and the next drain would do it again.
+      name == payload_action ->
+        error(
+          dsl,
+          "`augmented_by #{inspect(name)}` names the PAYLOAD action — the action the " <>
+            "library itself writes this node's rows with. Marking there would re-dirty " <>
+            "the cell on every recompute, so the drain would never settle: compute, " <>
+            "mark, compute, mark. `augmented_by` names the actions a HUMAN writes " <>
+            "through (`:correct`, `:approve`), which excludes the payload upsert by " <>
+            "construction — that is the whole reason it names actions rather than " <>
+            "action types the way `dirties_on` does. Drop it from the list, or (if a " <>
+            "human really does edit through it) give the payload loop its own action " <>
+            "with `payload_action`."
+        )
+
+      is_nil(found) ->
+        writes = for %{type: t, name: n} <- actions, t in [:create, :update, :destroy], do: n
+
+        error(
+          dsl,
+          "`augmented_by #{inspect(name)}` names an action this resource doesn't have, " <>
+            "so the human edit it stands for would mark nothing and the correction would " <>
+            "never propagate. Write actions declared: #{inspect(writes)}"
+        )
+
+      found.type not in [:create, :update, :destroy] ->
+        error(
+          dsl,
+          "`augmented_by #{inspect(name)}` names a #{inspect(found.type)} action, and a " <>
+            "mark is a consequence of a WRITE — there is nothing to dirty when nothing " <>
+            "changed. Name the `:create`/`:update`/`:destroy` action the human's edit " <>
+            "actually goes through."
+        )
+
+      true ->
+        :ok
     end
   end
 
