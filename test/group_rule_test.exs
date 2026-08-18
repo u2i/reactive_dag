@@ -258,8 +258,7 @@ defmodule ReactiveDag.GroupRuleTest do
         # same fact stated twice, and the two can disagree
         recompute_by :category, to: :expenses, from: :category
 
-        reduce into: fn _c, _rows -> %{} end,
-               upsert: fn _, _ -> true end
+        reduce into: fn _c, _rows -> %{} end
       end
     end
 

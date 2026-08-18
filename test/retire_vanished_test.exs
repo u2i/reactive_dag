@@ -255,25 +255,38 @@ defmodule ReactiveDag.RetireVanishedTest do
     assert rows() == [{"travel", 100.0, 1}]
   end
 
-  test "a node with a custom `upsert:` owns its own writes — the library does not reconcile" do
-    defmodule CustomWrite do
+  # This replaces "a node with a custom `upsert:` owns its own writes — the library
+  # does not reconcile", which asserted that a write-elsewhere node retired
+  # NOTHING: `retire_vanished/4` returned `[]` for any node supplying its own
+  # `upsert:`.
+  #
+  # That was a hole, not a feature. The one shape whose rows the library could not
+  # see was also the one it never reconciled, so its stale units lingered forever —
+  # exactly the failure the five tests above exist to prevent, exempted from the
+  # fix. The shape is gone (rc.39), so every derived node reconciles, and a node
+  # that cannot be reconciled cannot be declared.
+  test "a derived node with nowhere to write its rows is a COMPILE-TIME error" do
+    alias ReactiveDag.Node.Verifiers.VerifyReactive
+
+    defmodule Tableless do
       use Ash.Resource,
         domain: ReactiveDag.RetireVanishedTest.Domain,
         data_layer: Ash.DataLayer.Simple,
         extensions: [ReactiveDag.Node]
 
       reactive do
-        id(:custom_write)
+        id(:tableless)
         recompute_by :category, to: :expenses, from: :category
-        reduce into: fn cat, items -> %{category: cat, n: length(items)} end,
-               upsert: fn _key, _row -> true end
+        reduce into: fn cat, items -> %{category: cat, n: length(items)} end
       end
     end
 
-    p = ReactiveDag.Node.graph([Expenses, CustomWrite])
-    {:ok, changed} = Recompute.recompute(p.cells["custom_write"], ["*"])
+    assert {:error, %Spark.Error.DslError{message: msg}} =
+             VerifyReactive.verify(Tableless.spark_dsl_config())
 
-    # only what the pass produced; nothing retired on the host's behalf
-    assert Enum.sort(changed) == ["meals", "travel"]
+    assert msg =~ "declares no attributes"
+    # and it says what to do about it
+    assert msg =~ "leaf? true"
+    assert msg =~ "one node, one table"
   end
 end

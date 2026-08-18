@@ -2,15 +2,20 @@ defmodule ReactiveDag.NodeTest do
   @moduledoc "The ReactiveDag.Node resource extension: reactive block → cells → plan."
   use ExUnit.Case, async: true
 
-  # Toy node resources. Ash.DataLayer.Simple = no persistence; we only exercise
-  # the `reactive` extension, not any table. A tableless node (Meetings) simply
-  # declares no attributes beyond its implicit fields.
+  # Toy node resources. This file exercises the `reactive` extension — cell
+  # derivation, generators, plan assembly — and nothing here recomputes, so no
+  # row is ever written. The DERIVED nodes still declare a table and an
+  # `:upsert`, because a node that computes something must have somewhere to put
+  # the answer (`VerifyReactive.verify_owns_rows/2`); the columns below are the
+  # minimum that shape requires, not something any assertion reads. The SOURCE
+  # nodes stay `Simple` + `leaf? true`: their rows come from outside the graph.
   defmodule Domain do
     use Ash.Domain, validate_config_inclusion?: false
     resources do
       allow_unregistered? true
     end
   end
+
 
   defmodule FakeAgendaDriver do
     @behaviour ReactiveDag.Source
@@ -33,7 +38,30 @@ defmodule ReactiveDag.NodeTest do
   end
 
   defmodule MeetingShell do
-    use Ash.Resource, domain: Domain, data_layer: Ash.DataLayer.Simple, extensions: [ReactiveDag.Node]
+    use Ash.Resource, domain: Domain, data_layer: Ash.DataLayer.Ets, extensions: [ReactiveDag.Node]
+
+    ets do
+      private?(true)
+    end
+
+    attributes do
+      attribute :key, :string, primary_key?: true, allow_nil?: false, public?: true
+    end
+
+    actions do
+      defaults [:read, :destroy]
+
+      create :upsert do
+        upsert?(true)
+        upsert_identity(:by_key)
+        accept([:key])
+      end
+    end
+
+    identities do
+      identity :by_key, [:key]
+    end
+
     reactive do
       op :union
       compute FakeShell
@@ -42,7 +70,30 @@ defmodule ReactiveDag.NodeTest do
   end
 
   defmodule Meeting do
-    use Ash.Resource, domain: Domain, data_layer: Ash.DataLayer.Simple, extensions: [ReactiveDag.Node]
+    use Ash.Resource, domain: Domain, data_layer: Ash.DataLayer.Ets, extensions: [ReactiveDag.Node]
+
+    ets do
+      private?(true)
+    end
+
+    attributes do
+      attribute :key, :string, primary_key?: true, allow_nil?: false, public?: true
+    end
+
+    actions do
+      defaults [:read, :destroy]
+
+      create :upsert do
+        upsert?(true)
+        upsert_identity(:by_key)
+        accept([:key])
+      end
+    end
+
+    identities do
+      identity :by_key, [:key]
+    end
+
     reactive do
       op :join
       compute FakeJoin
@@ -52,8 +103,31 @@ defmodule ReactiveDag.NodeTest do
   end
 
   defmodule Meetings do
-    # a TABLELESS publish-root: an explicit id + a single `ref` input edge.
-    use Ash.Resource, domain: Domain, data_layer: Ash.DataLayer.Simple, extensions: [ReactiveDag.Node]
+    # the publish-root: an explicit id + a single `ref` input edge.
+    use Ash.Resource, domain: Domain, data_layer: Ash.DataLayer.Ets, extensions: [ReactiveDag.Node]
+
+    ets do
+      private?(true)
+    end
+
+    attributes do
+      attribute :key, :string, primary_key?: true, allow_nil?: false, public?: true
+    end
+
+    actions do
+      defaults [:read, :destroy]
+
+      create :upsert do
+        upsert?(true)
+        upsert_identity(:by_key)
+        accept([:key])
+      end
+    end
+
+    identities do
+      identity :by_key, [:key]
+    end
+
     reactive do
       id :meetings
       op :passthrough
@@ -171,7 +245,31 @@ defmodule ReactiveDag.NodeTest do
 
   defmodule RuleConcerns do
     # portal generator: one guarantee template → N instances over a population.
-    use Ash.Resource, domain: Domain, data_layer: Ash.DataLayer.Simple, extensions: [ReactiveDag.Node]
+    use Ash.Resource, domain: Domain, data_layer: Ash.DataLayer.Ets, extensions: [ReactiveDag.Node]
+
+    ets do
+      private?(true)
+    end
+
+    attributes do
+      attribute :key, :string, primary_key?: true, allow_nil?: false, public?: true
+      attribute :status, :string, public?: true
+    end
+
+    actions do
+      defaults [:read, :destroy]
+
+      create :upsert do
+        upsert?(true)
+        upsert_identity(:by_key)
+        accept([:key, :status])
+      end
+    end
+
+    identities do
+      identity :by_key, [:key]
+    end
+
     reactive do
       id :rule_concern
       op :guarantee
@@ -183,7 +281,31 @@ defmodule ReactiveDag.NodeTest do
 
   defmodule Readiness do
     # portal second-order: population computed from the graph (over: :findings).
-    use Ash.Resource, domain: Domain, data_layer: Ash.DataLayer.Simple, extensions: [ReactiveDag.Node]
+    use Ash.Resource, domain: Domain, data_layer: Ash.DataLayer.Ets, extensions: [ReactiveDag.Node]
+
+    ets do
+      private?(true)
+    end
+
+    attributes do
+      attribute :key, :string, primary_key?: true, allow_nil?: false, public?: true
+      attribute :status, :string, public?: true
+    end
+
+    actions do
+      defaults [:read, :destroy]
+
+      create :upsert do
+        upsert?(true)
+        upsert_identity(:by_key)
+        accept([:key, :status])
+      end
+    end
+
+    identities do
+      identity :by_key, [:key]
+    end
+
     reactive do
       id :readiness
       op :analysis

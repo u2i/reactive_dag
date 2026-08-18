@@ -105,10 +105,9 @@ defmodule ReactiveDag.Insights do
   defp build_status(cell, depth) do
     {statuses, rows} =
       case rows_kind(cell) do
-        # No table by DESIGN — a write-elsewhere or escape-hatch node
-        # (`Ash.DataLayer.Simple`, no attributes). Reading it is not a failure,
-        # and an empty histogram here means "nothing lives here", which is a
-        # different sentence from "I could not look".
+        # No table of its own — a `compose` node, whose nested legs hold the rows.
+        # Reading it is not a failure, and an empty histogram here means "nothing
+        # lives here", which is a different sentence from "I could not look".
         :elsewhere ->
           {%{}, :elsewhere}
 
@@ -139,9 +138,9 @@ defmodule ReactiveDag.Insights do
     }
   end
 
-  # A node with no attributes has no table to read — that is the declared
-  # write-elsewhere / escape-hatch shape, not a fault. Mirrors the guard
-  # `Rows.queryable/1` uses.
+  # A cell with no attributes has no table to read. Since rc.39 that means a
+  # `compose` node's leg — every cell that computes something owns its rows — so
+  # it is a shape, not a fault. Mirrors the guard `Rows.queryable/1` uses.
   defp rows_kind(cell) do
     resource = cell.meta[:resource]
 

@@ -35,10 +35,11 @@ defmodule ReactiveDag.Node do
         end
       end
 
-  The library closes the payload loop: a `reduce`/`join` whose `into` returns a
-  row, with **no `upsert:`**, has that row written into the node's own resource
-  (`ReactiveDag.Node.Payload`) with change-detection. Writing into a *different*
-  resource is the explicit deviation — supply a custom `upsert:` for that.
+  The library closes the payload loop: a `reduce`/`join` whose `into` returns a row
+  has that row written into the node's **own** resource
+  (`ReactiveDag.Node.Payload`) with change-detection. There is nowhere else for it
+  to go — a node owns its rows, and one that would write into a neighbour's table
+  should be that neighbour's node.
 
   Keys work like Ash keys. A SINGLE-attribute primary key is the payload key
   (derived — declare `payload_key` only for a non-PK key column); a COMPOSITE
@@ -66,9 +67,22 @@ defmodule ReactiveDag.Node do
 
   | shape | data_layer | attributes | actions | `reactive` |
   |---|---|---|---|---|
-  | **payload** (materializes typed rows) | AshPostgres/Ets | the payload columns | an `:upsert` action | a combinator, no `upsert:` |
-  | **write-elsewhere** | Simple | none | none | a combinator + a custom `upsert:` |
-  | **escape hatch** | Simple | none | none | `compute Mod` |
+  | **derived** (materializes typed rows) | AshPostgres/Ets | the payload columns | an `:upsert` action | a combinator, or `compute Mod` |
+  | **leaf** (a source writes its rows) | AshPostgres/Ets | the observed columns | an `:upsert` action | `leaf? true` + `poll Mod` |
+  | **compose** (its legs are the cells) | Simple | none | none | `compose … do … end` |
+
+  Only a `compose` node is tableless, and it is not a cell — its nested legs are.
+  Every cell that computes something owns the rows it computes, which the verifier
+  enforces; a `compute Mod` escape hatch is no exception, since its op writes its
+  node's own resource like any other.
+
+  There used to be a **write-elsewhere** shape — `Simple`, no attributes, a
+  combinator plus a custom `upsert:` closure writing into another resource. It is
+  gone (rc.39). It could not use the payload loop, so it got no change detection
+  and reported a change on every recompute; the library could not see it held rows,
+  so every question about them answered empty; and `retire_vanished` skipped it
+  outright, so its stale units lingered forever. Three of them accumulated in one
+  host, each causing a bug that took reading dispatch code to find.
 
   A payload node's `into` row is written into the resource itself (the payload
   loop, `ReactiveDag.Node.Payload`); the cell key maps to the `payload_key`
@@ -343,7 +357,6 @@ defmodule ReactiveDag.Node do
       :expand,
       :read,
       :query,
-      :upsert,
       :__identifier__,
       :__spark_metadata__
     ]
@@ -439,12 +452,6 @@ defmodule ReactiveDag.Node do
             "distinct from \"this one is gone\": returning nothing for it retires it, " <>
             "which reports a change and repeats on every pass. A node projecting one kind " <>
             "out of a shared input needs this."
-      ],
-      upsert: [
-        type: {:fun, 2},
-        required: false,
-        doc:
-          "OPTIONAL override `(key, row -> boolean)` — write the row's payload + return true iff CHANGED. OMIT it for the common case: the library writes `into`'s row into the node's OWN resource (`ReactiveDag.Node.Payload`). Supply `upsert:` only to write somewhere other than the node itself."
       ]
     ]
   }
@@ -472,7 +479,6 @@ defmodule ReactiveDag.Node do
       :key_prefix,
       :key_rule,
       :into,
-      :upsert,
       outer: false,
       __identifier__: nil,
       __spark_metadata__: nil
@@ -547,12 +553,6 @@ defmodule ReactiveDag.Node do
         type: :boolean,
         default: false,
         doc: "FULL OUTER: right-only keys also emit, via `into.(jk, nil, right_item)`. Default false (left join)."
-      ],
-      upsert: [
-        type: {:fun, 2},
-        required: false,
-        doc:
-          "OPTIONAL override `(key, row -> boolean)`. OMIT it → the library writes the row into the node's own resource (see `ReactiveDag.Node.Payload`)."
       ]
     ]
   }
@@ -1947,9 +1947,9 @@ defmodule ReactiveDag.Node do
           # true but misleading when the answer is "no attributes at all".
           raise ArgumentError,
                 "reactive_dag: `slice #{inspect(sl.column)}` on #{inspect(resource)}, which " <>
-                  "keeps no rows of its own (no attributes — a write-elsewhere or " <>
-                  "escape-hatch node). A slice filters this node's OWN rows, so there is " <>
-                  "nothing here to select. Declare it on the node that holds the rows."
+                  "keeps no rows of its own (no attributes). A slice filters this node's " <>
+                  "OWN rows, so there is nothing here to select. Declare it on the node " <>
+                  "that holds the rows."
 
         is_nil(Ash.Resource.Info.attribute(resource, sl.column)) ->
           raise ArgumentError,

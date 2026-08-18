@@ -296,8 +296,7 @@ defmodule ReactiveDag.DeclarativeJoinTest do
         join over: :entries,
              left: :acct,
              right: :acct,
-             into: [left: [amount: :a], middle: [amount: :b]],
-             upsert: fn _, _ -> true end
+             into: [left: [amount: :a], middle: [amount: :b]]
       end
     end
 

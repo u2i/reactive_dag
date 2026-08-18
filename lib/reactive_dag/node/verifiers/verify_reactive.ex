@@ -47,8 +47,58 @@ defmodule ReactiveDag.Node.Verifiers.VerifyReactive do
          :ok <- verify_augmented_by(dsl),
          :ok <- verify_lapse(dsl),
          :ok <- verify_fingerprint_reaches_something(dsl, computations),
-         :ok <- verify_combinators(dsl, computations) do
+         :ok <- verify_combinators(dsl, computations),
+         # LAST: a node with a broken declaration should hear about THAT. This
+         # check is about where correct output goes, so it is the least specific
+         # thing that can be wrong and must not mask the rest.
+         :ok <- verify_owns_rows(dsl, computations) do
       :ok
+    end
+  end
+
+  # THE TWIN of `some_computation/2` above: that one asks whether a node will
+  # compute anything, this one asks whether it has anywhere to put the answer.
+  #
+  # A derived node's rows ARE its resource's rows. Until rc.39 a node could
+  # declare no attributes and hand the library an `upsert:` closure writing into
+  # some OTHER resource's table — the "write-elsewhere" shape. It is gone, and the
+  # cost it carried is why: a node whose rows live under another node's resource
+  # cannot use the payload loop, so it gets no change detection and reports a
+  # change on every recompute; and the library cannot see it holds rows at all, so
+  # every question about them answers empty. Cascade accumulated three such cells
+  # and each one caused a bug that took reading dispatch code to find.
+  #
+  # The exemptions are `some_computation/2`'s, for the same reasons: a LEAF's rows
+  # are written by a source outside the graph, a `compose` node's cells are its
+  # nested legs (the outer module builds none), and a node with no computation at
+  # all is already refused above with a better message.
+  defp verify_owns_rows(dsl, computations) do
+    cond do
+      computations == [] ->
+        :ok
+
+      Verifier.get_option(dsl, [:reactive], :leaf?) == true ->
+        :ok
+
+      Enum.any?(Verifier.get_entities(dsl, [:reactive]), &match?(%Compose{}, &1)) ->
+        :ok
+
+      Ash.Resource.Info.attributes(dsl) == [] ->
+        error(
+          dsl,
+          "this node computes something but declares no attributes, so its rows have " <>
+            "nowhere to go. A derived node's rows are its own resource's rows.\n\n" <>
+            "Give it a data layer and the columns its result carries (an " <>
+            "`AshPostgres`/`Ets` resource with an `:upsert` action), or `leaf? true` if " <>
+            "a `ReactiveDag.Source` writes them.\n\n" <>
+            "If the rows would land in ANOTHER resource's table, this node should be " <>
+            "that resource's node instead — one node, one table. Writing into a " <>
+            "neighbour's table costs the change detection the payload loop provides, " <>
+            "and makes this cell look empty to everything that asks."
+        )
+
+      true ->
+        :ok
     end
   end
 
@@ -666,41 +716,42 @@ defmodule ReactiveDag.Node.Verifiers.VerifyReactive do
     end)
   end
 
-  # when the node closes the payload loop (no upsert:, not verdict, has payload
-  # attributes), every column the declarative row produces must be an attribute.
-  defp verify_dests(dsl, %Reduce{upsert: nil, group_by: group_by}, folds) do
+  # Every column the declarative row produces must be an attribute of this node —
+  # the payload loop writes them there, and there is nowhere else for them to go.
+  #
+  # This used to fork twice: a clause matching `upsert: nil` (with a fallthrough
+  # skipping any node that supplied one) and, inside it, a skip for a resource with
+  # NO attributes. Both existed because a node could write into another resource's
+  # table. It cannot; `verify_owns_rows/2` refuses a derived node with no
+  # attributes, so an empty set is now unreachable here and every node reaching
+  # this check writes its own rows.
+  defp verify_dests(dsl, %Reduce{group_by: group_by}, folds) do
     payload_attrs =
       dsl |> Ash.Resource.Info.attributes() |> Enum.map(& &1.name) |> MapSet.new()
 
-    if MapSet.size(payload_attrs) == 0 do
-      :ok
-    else
-      dests = Declarative.group_dests(group_by) ++ fold_dests(folds)
+    dests = Declarative.group_dests(group_by) ++ fold_dests(folds)
 
-      cond do
-        (missing = Enum.reject(dests, &MapSet.member?(payload_attrs, &1))) != [] ->
-          error(
-            dsl,
-            "the declarative `into:` row would carry #{inspect(missing)}, but this " <>
-              "resource has no such attribute(s) — the payload loop writes row columns " <>
-              "into the node's own attributes. Declared: #{inspect(MapSet.to_list(payload_attrs))}"
-          )
+    cond do
+      (missing = Enum.reject(dests, &MapSet.member?(payload_attrs, &1))) != [] ->
+        error(
+          dsl,
+          "the declarative `into:` row would carry #{inspect(missing)}, but this " <>
+            "resource has no such attribute(s) — the payload loop writes row columns " <>
+            "into the node's own attributes. Declared: #{inspect(MapSet.to_list(payload_attrs))}"
+        )
 
-        (uncovered = identity_uncovered(dsl, dests)) != [] ->
-          error(
-            dsl,
-            "an IDENTITY-KEYED node's row must produce every primary-key field — " <>
-              "#{inspect(uncovered)} never appear(s) in the group columns or fold " <>
-              "destinations, so the upsert could not identify its row"
-          )
+      (uncovered = identity_uncovered(dsl, dests)) != [] ->
+        error(
+          dsl,
+          "an IDENTITY-KEYED node's row must produce every primary-key field — " <>
+            "#{inspect(uncovered)} never appear(s) in the group columns or fold " <>
+            "destinations, so the upsert could not identify its row"
+        )
 
-        true ->
-          :ok
-      end
+      true ->
+        :ok
     end
   end
-
-  defp verify_dests(_dsl, _reduce_with_upsert, _folds), do: :ok
 
   # for a composite primary key, the row IS its identity: every pk field must
   # be produced by the declarative row (group dests ∪ fold dests).

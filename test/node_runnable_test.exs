@@ -85,8 +85,33 @@ defmodule ReactiveDag.NodeRunnableTest do
     defmodule Fold do
       use Ash.Resource,
         domain: Domain2,
-        data_layer: Ash.DataLayer.Simple,
+        data_layer: Ash.DataLayer.Ets,
         extensions: [ReactiveDag.Node]
+
+      ets do
+        private?(true)
+      end
+
+      # EchoOp returns the changed keys itself — a `compute` op owns its writes,
+      # so the recompute below writes nothing through this table. It exists
+      # because a node that computes must have somewhere for its rows to go.
+      attributes do
+        attribute :key, :string, primary_key?: true, allow_nil?: false, public?: true
+      end
+
+      actions do
+        defaults [:read, :destroy]
+
+        create :upsert do
+          upsert?(true)
+          upsert_identity(:by_key)
+          accept([:key])
+        end
+      end
+
+      identities do
+        identity :by_key, [:key]
+      end
 
       reactive do
         op :fold

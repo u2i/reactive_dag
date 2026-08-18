@@ -28,7 +28,30 @@ defmodule ReactiveDag.ContextEdgeTest do
   end
 
   defmodule EnhancedMinutes do
-    use Ash.Resource, domain: Domain, data_layer: Ash.DataLayer.Simple, extensions: [ReactiveDag.Node]
+    use Ash.Resource, domain: Domain, data_layer: Ash.DataLayer.Ets, extensions: [ReactiveDag.Node]
+
+    ets do
+      private?(true)
+    end
+
+    attributes do
+      attribute :key, :string, primary_key?: true, allow_nil?: false, public?: true
+      attribute :body, :string, public?: true
+    end
+
+    actions do
+      defaults [:read, :destroy]
+
+      create :upsert do
+        upsert?(true)
+        upsert_identity(:by_key)
+        accept([:key, :body])
+      end
+    end
+
+    identities do
+      identity :by_key, [:key]
+    end
 
     reactive do
       id :enhanced_minutes

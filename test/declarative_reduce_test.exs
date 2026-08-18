@@ -306,6 +306,12 @@ defmodule ReactiveDag.DeclarativeReduceTest do
 
   describe "assembly errors (graph/2 is where the over resource is known)" do
     test "a declarative read over a VERDICT node raises with guidance" do
+      # INTENTIONALLY TABLELESS. `SomeVerdict` is the node under test: assembly
+      # must refuse to read over a resource with no attributes, and the only way
+      # to reach that check is a node that has none. It therefore also trips
+      # `verify_owns_rows/2` at its own `defmodule` — a warning here, since a
+      # runtime-defined module reports verifier errors as async diagnostics.
+      # Giving it a table would delete the assertion below.
       defmodule SomeVerdict do
         use Ash.Resource,
           domain: ReactiveDag.DeclarativeReduceTest.Domain,
@@ -323,11 +329,36 @@ defmodule ReactiveDag.DeclarativeReduceTest do
         end
       end
 
+      # the READER, which owns its rows — so the raise below is unambiguously
+      # about what it reads over, not about where its own answer would go.
       defmodule OverVerdict do
         use Ash.Resource,
           domain: ReactiveDag.DeclarativeReduceTest.Domain,
-          data_layer: Ash.DataLayer.Simple,
+          data_layer: Ash.DataLayer.Ets,
           extensions: [ReactiveDag.Node]
+
+        ets do
+          private?(true)
+        end
+
+        attributes do
+          attribute :key, :string, primary_key?: true, allow_nil?: false, public?: true
+          attribute :status, :string, public?: true
+        end
+
+        actions do
+          defaults [:read, :destroy]
+
+          create :upsert do
+            upsert?(true)
+            upsert_identity(:by_key)
+            accept([:key, :status])
+          end
+        end
+
+        identities do
+          identity :by_key, [:key]
+        end
 
         reactive do
           id(:over_verdict)
@@ -349,8 +380,34 @@ defmodule ReactiveDag.DeclarativeReduceTest do
       defmodule BadAction do
         use Ash.Resource,
           domain: ReactiveDag.DeclarativeReduceTest.Domain,
-          data_layer: Ash.DataLayer.Simple,
+          data_layer: Ash.DataLayer.Ets,
           extensions: [ReactiveDag.Node]
+
+        ets do
+          private?(true)
+        end
+
+        # a table, so the raise under test is about the READ ACTION it names and
+        # nothing about where its own row would land. `into:` emits `%{status:}`
+        # and the key is derived, which is exactly these two columns.
+        attributes do
+          attribute :key, :string, primary_key?: true, allow_nil?: false, public?: true
+          attribute :status, :string, public?: true
+        end
+
+        actions do
+          defaults [:read, :destroy]
+
+          create :upsert do
+            upsert?(true)
+            upsert_identity(:by_key)
+            accept([:key, :status])
+          end
+        end
+
+        identities do
+          identity :by_key, [:key]
+        end
 
         reactive do
           id(:bad_action)
@@ -373,8 +430,33 @@ defmodule ReactiveDag.DeclarativeReduceTest do
       defmodule BadAttr do
         use Ash.Resource,
           domain: ReactiveDag.DeclarativeReduceTest.Domain,
-          data_layer: Ash.DataLayer.Simple,
+          data_layer: Ash.DataLayer.Ets,
           extensions: [ReactiveDag.Node]
+
+        ets do
+          private?(true)
+        end
+
+        # a table, so the raise under test is about the group_by column missing
+        # on the OVER resource, not about this node's own rows.
+        attributes do
+          attribute :key, :string, primary_key?: true, allow_nil?: false, public?: true
+          attribute :status, :string, public?: true
+        end
+
+        actions do
+          defaults [:read, :destroy]
+
+          create :upsert do
+            upsert?(true)
+            upsert_identity(:by_key)
+            accept([:key, :status])
+          end
+        end
+
+        identities do
+          identity :by_key, [:key]
+        end
 
         reactive do
           id(:bad_attr)
@@ -418,8 +500,7 @@ defmodule ReactiveDag.DeclarativeReduceTest do
           id(:into_needs_group)
           reduce over: :fiscal_lines,
                  group_by: &Function.identity/1,
-                 into: [count: :n],
-                 upsert: fn _, _ -> true end
+                 into: [count: :n]
         end
       end
 
@@ -440,8 +521,7 @@ defmodule ReactiveDag.DeclarativeReduceTest do
           id(:bad_kind)
           reduce over: :fiscal_lines,
                  group_by: :fund,
-                 into: [median: :m],
-                 upsert: fn _, _ -> true end
+                 into: [median: :m]
         end
       end
 
@@ -498,8 +578,7 @@ defmodule ReactiveDag.DeclarativeReduceTest do
                  group_by: :fund,
                  key: &to_string/1,
                  key_prefix: "x",
-                 into: fn f, _ -> %{key: f} end,
-                 upsert: fn _, _ -> true end
+                 into: fn f, _ -> %{key: f} end
         end
       end
 

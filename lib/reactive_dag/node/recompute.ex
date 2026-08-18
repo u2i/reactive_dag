@@ -90,7 +90,7 @@ defmodule ReactiveDag.Node.Recompute do
       |> Enum.group_by(group_by)
       |> Enum.flat_map(fn {group, items} -> emit.(group, items) end)
 
-    {:ok, materialize(cell, pairs, r.upsert, scope(keys))}
+    {:ok, materialize(cell, pairs, scope(keys))}
   end
 
   # a declarative JOIN combinator — read `over` into a LEFT and RIGHT index
@@ -123,7 +123,7 @@ defmodule ReactiveDag.Node.Recompute do
         []
       end
 
-    {:ok, materialize(cell, left_pairs ++ right_only_pairs, j.upsert, scope(keys))}
+    {:ok, materialize(cell, left_pairs ++ right_only_pairs, scope(keys))}
   end
 
   # a PER-KEY map — for each claimed input row, call a generic action with that
@@ -148,7 +148,7 @@ defmodule ReactiveDag.Node.Recompute do
     {pairs, meta} =
       ReactiveDag.Node.Recompute.Union.pairs(spec, cell.meta[:union_sources] || %{}, claimed)
 
-    {:ok, materialize(cell, pairs, nil, claimed), meta}
+    {:ok, materialize(cell, pairs, claimed), meta}
   end
 
   # a PURE-ASH-QUERY aggregate — the datastore groups + aggregates the `over`
@@ -374,12 +374,12 @@ defmodule ReactiveDag.Node.Recompute do
     raise "reactive_dag: #{cell_id}: `expand:` must return a LIST of rows, got #{inspect(other)}"
   end
 
-  # write each {key, row} and return the changed keys. Shared by
-  # reduce/expand + join. Three write modes, in precedence order:
-  #   * host `upsert:` callback (override) — `(key, row) -> changed?`.
-  #   * the LIB closing the loop into the node's OWN resource (`meta.resource`).
-  defp materialize(cell, pairs, upsert, claimed) do
-    write = writer_fn(cell, upsert)
+  # write each {key, row} and return the changed keys. Shared by reduce/expand +
+  # join. ONE write mode: the library closes the loop into the node's own resource
+  # (`meta.resource`). A host `upsert:` override used to take precedence; it is
+  # gone, because a node owns its rows.
+  defp materialize(cell, pairs, claimed) do
+    write = writer_fn(cell)
 
     {declined, pairs} = Enum.split_with(pairs, &match?({_key, :skip}, &1))
 
@@ -393,7 +393,7 @@ defmodule ReactiveDag.Node.Recompute do
     kept = Enum.map(declined, &elem(&1, 0))
     produced = Enum.map(pairs, &elem(&1, 0))
 
-    changed ++ retire_vanished(cell, produced ++ kept, claimed, upsert)
+    changed ++ retire_vanished(cell, produced ++ kept, claimed)
   end
 
   # RECONCILE, not just upsert. A fold writes the units it produced; a unit whose
@@ -406,9 +406,13 @@ defmodule ReactiveDag.Node.Recompute do
   # only the units it claimed (reconciling wider would retire live units that
   # simply weren't visited). Destroying the row IS the retirement — the key is
   # returned as changed, so propagation carries it downstream.
-  defp retire_vanished(_cell, _want, _claimed, upsert) when is_function(upsert, 2), do: []
-
-  defp retire_vanished(%Cell{meta: meta} = cell, want, claimed, _upsert) do
+  #
+  # A write-elsewhere node used to return early here — `[]`, unconditionally, for
+  # any node supplying its own `upsert:`. So the one shape that could not be
+  # reconciled was also the one whose rows the library could not see, and its stale
+  # units lingered forever: exactly the failure the paragraph above describes,
+  # exempted from the fix. Removing the shape removes the exemption.
+  defp retire_vanished(%Cell{meta: meta} = cell, want, claimed) do
     want_set = MapSet.new(want)
 
     case vanished_baseline(cell, claimed) do
@@ -447,28 +451,29 @@ defmodule ReactiveDag.Node.Recompute do
   #
   # `nil` means "cannot enumerate — do not reconcile", and is NOT the same as
   # `[]`, which would claim the node holds nothing and retire every key it has.
-  # Only a node that reconciles reaches here, and a reconciling node always has
-  # rows of its own: `retire_vanished` returns early for a custom `upsert:`, and
-  # a node with neither a resource nor an `upsert:` cannot write at all
-  # (`writer_fn` raises). So the rescue is the guard that matters — an
-  # unreadable resource must not be read as an empty one.
+  # Every derived node has rows of its own — the verifier refuses one that does
+  # not — so the rescue is the guard that matters: an unreadable resource must not
+  # be read as an empty one.
   defp current_keys(%Cell{meta: meta, id: id}) do
     %Cell{id: id, meta: meta} |> ReactiveDag.Node.Rows.all() |> Enum.map(& &1.key)
   rescue
     _ -> nil
   end
 
-  # `(key, row) -> changed?`. An explicit `upsert:` wins; otherwise the row is
-  # written into the node's own resource (the unified "resource IS payload" shape).
-  defp writer_fn(_cell, upsert) when is_function(upsert, 2), do: upsert
-
-  defp writer_fn(%Cell{meta: meta, id: id}, nil) do
+  # `(key, row) -> changed?`. The row goes into the node's OWN resource — one node,
+  # one table. There used to be an `upsert:` slot that took a closure writing
+  # somewhere else, and a raise here for the node that declared neither; both are
+  # gone, and `VerifyReactive.verify_owns_rows/2` refuses at COMPILE time what this
+  # raised at drain time.
+  defp writer_fn(%Cell{meta: meta, id: id}) do
     case meta[:resource] do
       nil ->
+        # A hand-assembled `%Cell{}` bypasses the verifier, so this stays as the
+        # backstop for the one path that can still reach it.
         raise """
-        reactive_dag: node #{inspect(id)} has a reduce/join with no `upsert:`, no
-        backing resource. Either give the node an AshPostgres resource (its rows
-        ARE its payload), or supply an explicit `upsert:`.
+        reactive_dag: node #{inspect(id)} computes rows but its cell carries no
+        resource, so there is nowhere to write them. A DSL-authored node is caught
+        at compile time; a hand-built %Cell{} needs `meta.resource`.
         """
 
       resource ->
