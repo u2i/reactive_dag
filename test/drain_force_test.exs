@@ -80,27 +80,31 @@ defmodule ReactiveDag.DrainForceTest do
   # root → mid → top. Three levels, so "only the forced cell is forced" is
   # observable: forcing `root` must reach `mid` and stop there if `mid` is honest
   # about not having changed.
-  defp plan do
+  # Each cell DECLARES what recomputes it (`meta.compute`) — there is no strategy
+  # to pass to the drain. `root_op` is the memoised one under test; the rest
+  # recompute honestly unless a test says otherwise.
+  defp plan(root_op, rest_op \\ __MODULE__.Works) do
     Graph.build([
-      %Cell{id: "root", inputs: [], meta: %{key_rule: :identity}},
-      %Cell{id: "mid", inputs: ["root"], meta: %{key_rule: :identity}},
-      %Cell{id: "top", inputs: ["mid"], meta: %{key_rule: :identity}}
+      %Cell{id: "root", inputs: [], meta: %{key_rule: :identity, compute: root_op}},
+      %Cell{id: "mid", inputs: ["root"], meta: %{key_rule: :identity, compute: rest_op}},
+      %Cell{id: "top", inputs: ["mid"], meta: %{key_rule: :identity, compute: rest_op}}
     ])
   end
 
   # Every cell reports NOTHING changed — the memoised op's answer, and the
   # situation force exists for.
   defmodule Memoised do
-    @behaviour ReactiveDag.RecomputeStrategy
+    @behaviour ReactiveDag.Op
     @impl true
     def recompute(_cell, _keys), do: {:ok, []}
   end
 
   # `root` skips (memoised), but `mid` genuinely recomputes when it is reached.
-  defmodule MidWorks do
-    @behaviour ReactiveDag.RecomputeStrategy
+  # `root` skips (memoised) while `mid`/`top` genuinely recompute — so the plan
+  # stamps a different op per cell, which is how a real graph says it.
+  defmodule Works do
+    @behaviour ReactiveDag.Op
     @impl true
-    def recompute(%{id: "root"}, _keys), do: {:ok, []}
     def recompute(_cell, keys), do: {:ok, keys}
   end
 
@@ -109,7 +113,7 @@ defmodule ReactiveDag.DrainForceTest do
     # has nothing to report, and nothing downstream hears about it.
     Frontier.mark_dirty("root", ["k1"], "seed")
 
-    {:ok, report} = Drain.run(plan(), recompute: Memoised, key_rule: ReactiveDag.Node.KeyRule)
+    {:ok, report} = Drain.run(plan(Memoised, Memoised))
 
     assert Enum.map(report.steps, & &1.cell) == ["root"]
   end
@@ -118,11 +122,7 @@ defmodule ReactiveDag.DrainForceTest do
     Frontier.mark_dirty("root", ["k1"], "seed")
 
     {:ok, report} =
-      Drain.run(plan(),
-        recompute: Memoised,
-        key_rule: ReactiveDag.Node.KeyRule,
-        force: "root"
-      )
+      Drain.run(plan(Memoised, Memoised), force: "root")
 
     assert Enum.map(report.steps, & &1.cell) == ["root", "mid"]
 
@@ -137,11 +137,7 @@ defmodule ReactiveDag.DrainForceTest do
     Frontier.mark_dirty("root", ["k1"], "seed")
 
     {:ok, report} =
-      Drain.run(plan(),
-        recompute: Memoised,
-        key_rule: ReactiveDag.Node.KeyRule,
-        force: "root"
-      )
+      Drain.run(plan(Memoised, Memoised), force: "root")
 
     refute "top" in Enum.map(report.steps, & &1.cell),
            "forcing must not cascade transitively — that would recompute the whole graph"
@@ -151,11 +147,7 @@ defmodule ReactiveDag.DrainForceTest do
     Frontier.mark_dirty("root", ["k1"], "seed")
 
     {:ok, report} =
-      Drain.run(plan(),
-        recompute: MidWorks,
-        key_rule: ReactiveDag.Node.KeyRule,
-        force: "root"
-      )
+      Drain.run(plan(Memoised), force: "root")
 
     assert Enum.map(report.steps, & &1.cell) == ["root", "mid", "top"],
            "mid recomputed for real, so its own verdict carries the cascade to top"
@@ -165,11 +157,7 @@ defmodule ReactiveDag.DrainForceTest do
     Frontier.mark_dirty("root", ["k1"], "seed")
 
     {:ok, report} =
-      Drain.run(plan(),
-        recompute: Memoised,
-        key_rule: ReactiveDag.Node.KeyRule,
-        force: ["root", "mid"]
-      )
+      Drain.run(plan(Memoised, Memoised), force: ["root", "mid"])
 
     assert Enum.map(report.steps, & &1.cell) == ["root", "mid", "top"]
   end
@@ -178,11 +166,7 @@ defmodule ReactiveDag.DrainForceTest do
     Frontier.mark_dirty("root", ["k1"], "seed")
 
     {:ok, report} =
-      Drain.run(plan(),
-        recompute: Memoised,
-        key_rule: ReactiveDag.Node.KeyRule,
-        force: :all
-      )
+      Drain.run(plan(Memoised, Memoised), force: :all)
 
     assert Enum.map(report.steps, & &1.cell) == ["root", "mid", "top"]
   end
@@ -192,11 +176,7 @@ defmodule ReactiveDag.DrainForceTest do
     Frontier.mark_dirty("root", ["k1"], "seed")
 
     {:ok, report} =
-      Drain.run(plan(),
-        recompute: Memoised,
-        key_rule: ReactiveDag.Node.KeyRule,
-        force: "top"
-      )
+      Drain.run(plan(Memoised, Memoised), force: "top")
 
     assert Enum.map(report.steps, & &1.cell) == ["root"]
   end
@@ -204,21 +184,16 @@ defmodule ReactiveDag.DrainForceTest do
   # An op may report a key it was not claimed for — a whole-cell pass finding a
   # new one. Forcing must not drop that.
   defmodule ReportsExtra do
-    @behaviour ReactiveDag.RecomputeStrategy
+    @behaviour ReactiveDag.Op
     @impl true
-    def recompute(%{id: "root"}, _keys), do: {:ok, ["k2"]}
-    def recompute(_cell, keys), do: {:ok, keys}
+    def recompute(_cell, _keys), do: {:ok, ["k2"]}
   end
 
   test "force propagates claimed keys UNION whatever the op reported" do
     Frontier.mark_dirty("root", ["k1"], "seed")
 
     {:ok, report} =
-      Drain.run(plan(),
-        recompute: ReportsExtra,
-        key_rule: ReactiveDag.Node.KeyRule,
-        force: "root"
-      )
+      Drain.run(plan(ReportsExtra), force: "root")
 
     mid = Enum.find(report.steps, &(&1.cell == "mid"))
     assert Enum.sort(mid.claimed) == ["k1", "k2"]
