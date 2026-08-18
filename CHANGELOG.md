@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.17.0-rc.35](https://github.com/u2i/reactive_dag/compare/v0.17.0-rc.34...v0.17.0-rc.35) (2026-08-18)
+
+
+### Features
+
+* a cell may FAIL without failing the drain ([#164](https://github.com/u2i/reactive_dag/issues/164)) ([7381858](https://github.com/u2i/reactive_dag/commit/7381858365721b55bab00742a2b9d7f031759355))
+
 ## [0.17.0-rc.34](https://github.com/u2i/reactive_dag/compare/v0.17.0-rc.33...v0.17.0-rc.34) (2026-08-17)
 
 
