@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.17.0-rc.37](https://github.com/u2i/reactive_dag/compare/v0.17.0-rc.36...v0.17.0-rc.37) (2026-08-18)
+
+
+### Bug Fixes
+
+* two verifiers that covered one DSL form and passed on the other ([#171](https://github.com/u2i/reactive_dag/issues/171)) ([c36a031](https://github.com/u2i/reactive_dag/commit/c36a031dfbbcaeaed4e9c7d9621620453865f257))
+
 ## [0.17.0-rc.36](https://github.com/u2i/reactive_dag/compare/v0.17.0-rc.35...v0.17.0-rc.36) (2026-08-18)
 
 
