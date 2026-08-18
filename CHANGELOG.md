@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.17.0-rc.38](https://github.com/u2i/reactive_dag/compare/v0.17.0-rc.37...v0.17.0-rc.38) (2026-08-18)
+
+
+### ⚠ BREAKING CHANGES
+
+* one engine — the DSL declares, the drain runs ([#175](https://github.com/u2i/reactive_dag/issues/175))
+
+### Features
+
+* `force:` — propagate a cell's keys whether or not it reported a change ([#173](https://github.com/u2i/reactive_dag/issues/173)) ([a24252d](https://github.com/u2i/reactive_dag/commit/a24252d51e333077833d49d185445b09bcfbbeb3))
+* one engine — the DSL declares, the drain runs ([#175](https://github.com/u2i/reactive_dag/issues/175)) ([8547c0c](https://github.com/u2i/reactive_dag/commit/8547c0c3e1491b414c546f59f3d5c4ac99c33cb8))
+
 ## [0.17.0-rc.37](https://github.com/u2i/reactive_dag/compare/v0.17.0-rc.36...v0.17.0-rc.37) (2026-08-18)
 
 
