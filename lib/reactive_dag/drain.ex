@@ -15,11 +15,26 @@ defmodule ReactiveDag.Drain do
        host's `KeyRule` (`Graph.dirty_parents`).
     5. Repeat until empty.
 
-  Steps 2–4 run in ONE transaction, so a recompute that raises leaves the
+  Steps 2–4 run in ONE savepoint per cell, so a cell that fails leaves the
   frontier exactly as it found it. A claim is a delete: without that, a
   transient failure — a deadlock, a timeout, an upstream 503 — consumes the
-  work item and those keys go silently stale. The drain still fails loudly;
-  the next one retries rather than never knowing.
+  work item and those keys go silently stale.
+
+  A recompute reports failure two ways, and they mean different things:
+
+    * it RAISES — the drain rolls that cell back and re-raises. Something is
+      wrong with the graph or the host, and stopping is right.
+    * it returns `{:error, reason}` — the drain rolls that cell back, records
+      it, and CARRIES ON with every other cell. The failed cell is excluded
+      from selection for the rest of the run (its keys are still dirty, so it
+      would otherwise be re-selected forever) and retried by the next drain.
+
+  The second is what lets a fallible unit live in the graph. A poll that could
+  not reach its upstream is one cell staying dirty while the rest of the
+  cascade runs — the containment `ReactiveDag.Source.poll_all/2` gives a sweep,
+  expressed where the work happens. It must be a RETURNED value: an exception
+  inside a nested transaction aborts the outer one, so only a value can be
+  isolated.
 
   A leaf carries no recompute — a source writes its tuples and marks parents
   dirty directly, so a leaf shouldn't appear in the frontier; if one does, its
@@ -76,6 +91,7 @@ defmodule ReactiveDag.Drain do
   | `[:reactive_dag, :drain, :start]` | `system_time` | `cells` (count in the plan) |
   | `[:reactive_dag, :drain, :step]` | `duration_us`, `claimed`, `changed` | `cell`, `pass`, `changed_keys`, `triggered_by`, `step` |
   | `[:reactive_dag, :drain, :stop]` | `duration_us`, `passes`, `steps`, `changed` | `report`, `cells_touched` |
+  | `[:reactive_dag, :drain, :cell_failed]` | `duration_us` | `cell`, `pass`, `reason`, `claimed` |
   | `[:reactive_dag, :drain, :exception]` | `duration_us` | `kind`, `reason`, `report` |
 
   `:step` carries the changed KEYS, not just their count, because that is what
@@ -123,7 +139,7 @@ defmodule ReactiveDag.Drain do
     )
 
     try do
-      result = do_run(plan, opts, 0, %{}, [], t0)
+      result = do_run(plan, opts, 0, %{}, [], t0, [])
       emit_stop(result, t0)
       result
     catch
@@ -157,7 +173,7 @@ defmodule ReactiveDag.Drain do
   defp partial_report(%RunawayError{report: report}), do: report
   defp partial_report(_reason), do: nil
 
-  defp do_run(plan, opts, passes, cause, steps, t0) do
+  defp do_run(plan, opts, passes, cause, steps, t0, failed) do
     max = opts[:max_passes] || @max_passes
 
     if passes >= max do
@@ -176,12 +192,12 @@ defmodule ReactiveDag.Drain do
             "the exception's :report holds the full partial trace)",
         report: report
     else
-      drain_pass(plan, opts, passes, cause, steps, t0)
+      drain_pass(plan, opts, passes, cause, steps, t0, failed)
     end
   end
 
-  defp drain_pass(plan, opts, passes, cause, steps, t0) do
-    case Frontier.next_cell(plan.depths) do
+  defp drain_pass(plan, opts, passes, cause, steps, t0, failed) do
+    case Frontier.next_cell(plan.depths, failed) do
       nil ->
         {:ok,
          %Report{
@@ -204,14 +220,29 @@ defmodule ReactiveDag.Drain do
         # affordable only because drains are SERIALIZED (`with_lock/2`) — one
         # connection, not one per concurrent drain. Readers are unaffected:
         # Postgres readers never block on the row locks a DELETE takes.
-        {next_cause, next_steps} =
-          Frontier.transaction(fn -> drain_cell(plan, opts, passes, cause, steps, cell_id) end)
+        # ONE SAVEPOINT per cell, over claim → recompute → propagate. A cell
+        # that reports a failure rolls all three back: its keys were never
+        # taken, so the next drain retries them, and every cell already
+        # recomputed this run is untouched.
+        outcome =
+          Frontier.savepoint(fn ->
+            drain_cell(plan, opts, passes, cause, steps, cell_id, failed)
+          end)
 
-        do_run(plan, opts, passes + 1, next_cause, next_steps, t0)
+        case outcome do
+          # Rolled back, so its keys are still dirty — which is why it must be
+          # EXCLUDED for the rest of this run, or `next_cell` hands back the
+          # same cell forever and the drain spins to the runaway guard.
+          {:error, {:cell_failed, id}} ->
+            do_run(plan, opts, passes + 1, cause, steps, t0, [id | failed])
+
+          {next_cause, next_steps, next_failed} ->
+            do_run(plan, opts, passes + 1, next_cause, next_steps, t0, next_failed)
+        end
     end
   end
 
-  defp drain_cell(plan, opts, passes, cause, steps, cell_id) do
+  defp drain_cell(plan, opts, passes, cause, steps, cell_id, failed) do
     # A whole-cell claim ("*") SUBSUMES any co-claimed specific keys: if "*"
     # is present, the claim is normalized to exactly ["*"]. Recompute strategies
     # test `keys == ["*"]` to mean "recompute the whole cell", so a stray "*"
@@ -227,7 +258,7 @@ defmodule ReactiveDag.Drain do
 
     cond do
       keys == [] ->
-        {cause, steps}
+        {cause, steps, failed}
 
       not Map.has_key?(plan.cells, cell_id) ->
         # A STALE frontier row — the dirty table outlives any one plan, so
@@ -242,55 +273,114 @@ defmodule ReactiveDag.Drain do
             "dropping its claimed dirty keys #{inspect(keys)}"
         )
 
-        {cause, steps}
+        {cause, steps, failed}
 
       true ->
         cell = Map.fetch!(plan.cells, cell_id)
-        {{changed, meta}, us} = timed(fn -> recompute(cell, keys, opts) end)
-        # A WHOLE-CELL claim ("*") propagates :all: a whole recompute can DELETE
-        # keys, and per-key propagation only carries survivors — it would strand
-        # a vanished key in the parent. So escalate downstream when the claim was
-        # whole, regardless of the per-parent key_rule.
-        prop = if "*" in keys, do: :all, else: changed
-        parents = propagate(plan, cell_id, prop, opts, priors)
+        {outcome, us} = timed(fn -> recompute(cell, keys, opts) end)
 
-        step = %{
-          claimed: keys,
-          changed: changed,
-          triggered_by: Map.get(cause, cell_id),
-          duration_us: us,
-          # `op` and `depth` are both in hand here and neither is
-          # recoverable from a step alone — a consumer would need the plan
-          # to look them up, and a durable processing log is usually read
-          # long after the plan that produced it has moved on
-          # (u2i/reactive_dag#114).
-          op: cell.op,
-          depth: Map.get(plan.depths, cell_id),
-          meta: meta
-        }
+        case outcome do
+          {:failed, reason} ->
+            # CONTAINED. The savepoint inside `recompute/3` already rolled this
+            # cell back, so its keys are still dirty and the next drain retries
+            # them. Failing the whole drain here would throw away every cell
+            # already recomputed this pass — which is exactly what
+            # `Source.poll_all/2` refuses to do for a sweep, and a fallible cell
+            # deserves the same.
+            Logger.warning(
+              "reactive_dag: #{cell_id} failed to recompute (#{inspect(reason)}); " <>
+                "its keys stay dirty for the next drain"
+            )
 
-        :telemetry.execute(
-          [:reactive_dag, :drain, :step],
-          %{duration_us: us, claimed: length(keys), changed: length(changed)},
-          %{
-            cell: cell_id,
-            pass: passes,
-            # the KEYS, not just the count: a consumer that knows which
-            # keys moved can read only those, which is the whole point
-            changed_keys: changed,
-            triggered_by: Map.get(cause, cell_id),
-            step: step
-          }
-        )
+            :telemetry.execute(
+              [:reactive_dag, :drain, :cell_failed],
+              %{duration_us: us},
+              %{cell: cell_id, pass: passes, reason: reason, claimed: keys}
+            )
 
-        # Every parent we just dirtied was triggered by this cell.
-        cause =
-          Enum.reduce(parents, cause, fn parent_id, acc ->
-            Map.put(acc, parent_id, cell_id)
-          end)
+            # AS AN ERROR, so the savepoint around this cell rolls back — the
+            # claim included. That is the whole mechanism: the keys were never
+            # taken, so the next drain retries them.
+            {:error, {:cell_failed, cell_id}}
 
-        {cause, [Map.merge(step, %{cell: cell_id, pass: passes}) | steps]}
+          {changed, meta} ->
+            recomputed(
+              plan,
+              opts,
+              passes,
+              cause,
+              steps,
+              cell_id,
+              cell,
+              keys,
+              priors,
+              changed,
+              meta,
+              us,
+              failed
+            )
+        end
     end
+  end
+
+  defp recomputed(
+         plan,
+         opts,
+         passes,
+         cause,
+         steps,
+         cell_id,
+         cell,
+         keys,
+         priors,
+         changed,
+         meta,
+         us,
+         failed
+       ) do
+    # A WHOLE-CELL claim ("*") propagates :all: a whole recompute can DELETE
+    # keys, and per-key propagation only carries survivors — it would strand
+    # a vanished key in the parent. So escalate downstream when the claim was
+    # whole, regardless of the per-parent key_rule.
+    prop = if "*" in keys, do: :all, else: changed
+    parents = propagate(plan, cell_id, prop, opts, priors)
+
+    step = %{
+      claimed: keys,
+      changed: changed,
+      triggered_by: Map.get(cause, cell_id),
+      duration_us: us,
+      # `op` and `depth` are both in hand here and neither is
+      # recoverable from a step alone — a consumer would need the plan
+      # to look them up, and a durable processing log is usually read
+      # long after the plan that produced it has moved on
+      # (u2i/reactive_dag#114).
+      op: cell.op,
+      depth: Map.get(plan.depths, cell_id),
+      meta: meta
+    }
+
+    :telemetry.execute(
+      [:reactive_dag, :drain, :step],
+      %{duration_us: us, claimed: length(keys), changed: length(changed)},
+      %{
+        cell: cell_id,
+        pass: passes,
+        # the KEYS, not just the count: a consumer that knows which
+        # keys moved can read only those, which is the whole point
+        changed_keys: changed,
+        triggered_by: Map.get(cause, cell_id),
+        step: step
+      }
+    )
+
+    # Every parent we just dirtied was triggered by this cell.
+    cause =
+      Enum.reduce(parents, cause, fn parent_id, acc ->
+        Map.put(acc, parent_id, cell_id)
+      end)
+
+    {cause, [Map.merge(step, %{cell: cell_id, pass: passes}) | steps], failed}
   end
 
   defp timed(fun) do
@@ -321,6 +411,13 @@ defmodule ReactiveDag.Drain do
           # hits); the library carries the map without interpreting it
           {:ok, changed, meta} when is_list(changed) and is_map(meta) ->
             {changed, meta}
+
+          # CONTAINED, not raised. Must be a RETURNED value: an exception inside
+          # a nested transaction aborts the outer one, so only this shape can be
+          # isolated by the savepoint. `ReactiveDag.Source`'s `poll/1` already
+          # returns errors "contained, not raised" for the same reason.
+          {:error, reason} ->
+            {:failed, reason}
 
           other ->
             # NAMED, rather than a CaseClauseError from inside the drain. The
