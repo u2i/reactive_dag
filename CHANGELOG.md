@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.17.0-rc.39](https://github.com/u2i/reactive_dag/compare/v0.17.0-rc.38...v0.17.0-rc.39) (2026-08-18)
+
+
+### ⚠ BREAKING CHANGES
+
+* the `upsert:` option on `reduce` and `join` is removed. A node that wrote elsewhere becomes the node of the resource it was writing to — one node, one table. `ReactiveDag.Node.Rows.reconcile/3`'s `upsert:` is a different option (a leaf's fetch function) and is unchanged.
+
+### Features
+
+* `compare:` — which of a node's columns constitute its result ([#180](https://github.com/u2i/reactive_dag/issues/180)) ([5e6ed45](https://github.com/u2i/reactive_dag/commit/5e6ed45aa35f8aaff9b070d09d252d349c4f5f16))
+* a node owns its rows — write-elsewhere is gone ([#178](https://github.com/u2i/reactive_dag/issues/178)) ([06ce11e](https://github.com/u2i/reactive_dag/commit/06ce11e061527ec27acabac9f7eea101bdbd14c7))
+
 ## [0.17.0-rc.38](https://github.com/u2i/reactive_dag/compare/v0.17.0-rc.37...v0.17.0-rc.38) (2026-08-18)
 
 
