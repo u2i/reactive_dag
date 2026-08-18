@@ -23,8 +23,7 @@ Every node emits **rows**. A node whose answer is one word emits a row with a
 > `op :map` reads like the field that decides how a node recomputes. It is not.
 > Recompute dispatches on the **entity** — `aggregate` / `reduce` / `join` /
 > `union` / `per_key` / `run` / `compute` — and never on `op`, which is a free
-> atom for documentation, load-bearing only for a host `RecomputeStrategy` that
-> chooses to read it (`ReactiveDag.SetOp` does).
+> atom for documentation. Nothing in the library reads it.
 >
 > A block with an `op` and no entity declares no computation at all, and is
 > rejected at compile time.
@@ -642,8 +641,11 @@ recompute:
 - `:all` — any child change → whole-cell recompute. For folds whose output
   grain differs from the input's.
 
-A custom mapping (prefix-remap, expansions) means bringing your own
-`ReactiveDag.KeyRule` — see [The seams](seams.md).
+Those are the rules the drain applies, read off the block. A host marking the
+frontier *itself* — pre-marking a re-run, say — can state a different
+propagation for that one call, by passing a module exporting `rule/3` to
+`ReactiveDag.Graph.dirty_parents/5`; see
+[One engine, and where the domain enters](seams.md).
 
 ## Generators: one sub-tree per member
 

@@ -155,11 +155,7 @@ node shape.
 ```elixir
 plan = ReactiveDag.Node.graph([MyApp.FiscalLines, MyApp.BudgetRollups])
 
-{:ok, report} =
-  ReactiveDag.Drain.run(plan,
-    recompute: ReactiveDag.Node.Recompute,   # dispatches reduce/join/aggregate/compute
-    key_rule: ReactiveDag.Node.KeyRule       # reads :identity | :all off the block
-  )
+{:ok, report} = ReactiveDag.Drain.run(plan)
 
 report.steps
 # one entry per cell recompute, in execution order:
@@ -177,6 +173,10 @@ drain, attach to the `[:reactive_dag, :drain, :step]` telemetry event — see
 `graph/2` validates the whole thing at assembly: every edge resolves, ids are
 unique, the graph is acyclic — an authoring mistake fails loudly here, not
 silently at runtime.
+
+**Nothing is passed to the drain but the plan.** How a node recomputes and how
+its changes propagate are declared in its `reactive` block, and the drain reads
+them from there — `run/2`'s only option is `:max_passes`, a runaway guard.
 
 The drain is **incremental**: it processes only cells with dirty keys, in
 dependency (depth) order, and propagates only the keys each recompute reports
@@ -207,7 +207,7 @@ drains, and `dirties_on` alone schedules nothing:
 
 ```elixir
 MyApp.FiscalLines |> Ash.Changeset.for_create(:create, attrs) |> Ash.create!()
-ReactiveDag.Drain.run(plan, recompute: ..., key_rule: ...)   # ← still yours
+ReactiveDag.Drain.run(plan)                                  # ← still yours
 ```
 
 For a graph with a polling source that is fine — the next sweep picks it up. For
@@ -239,9 +239,9 @@ the leaf's rows, then mark what changed:
 ```elixir
 # 1. write the leaf's rows (your resource, your upsert)
 # 2. mark the changed keys dirty upward
-ReactiveDag.Graph.dirty_parents(plan, "fiscal_lines", changed, ReactiveDag.Node.KeyRule)
+ReactiveDag.Graph.dirty_parents(plan, "fiscal_lines", changed)
 # 3. drain
-ReactiveDag.Drain.run(plan, recompute: ..., key_rule: ...)
+ReactiveDag.Drain.run(plan)
 ```
 
 For a scanner with a real contract (id, leaf binding, failure containment),
@@ -281,5 +281,6 @@ than answers.
 - [Authoring nodes](authoring-nodes.md) — every node shape and combinator.
 - [Sources and scanning](sources.md) — the poll/drain split and the
   honest-gap discipline.
-- [The seams](seams.md) — custom recompute strategies, key rules, extension
-  columns, and hand-assembled graphs.
+- [One engine, and where the domain enters](seams.md) — what the drain reads off
+  the plan, the two seams that remain (`Source`, `compute`), and hand-assembled
+  graphs.

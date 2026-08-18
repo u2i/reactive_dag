@@ -7,7 +7,7 @@ defmodule ReactiveDag.CompanionCellTest do
   distinguish "green" (covered, no violations) from "unknown" (never evaluated).
 
   The library provides the two-cell STRUCTURE + id rooting; the host provides the
-  companion's recompute (via its `op:`, dispatched by a RecomputeStrategy) and the
+  companion's recompute (via its `op:`) and the
   read-side disambiguation. This mirrors the compliance portal's `g:<id>` (guarantee)
   over `g:<id>/set` (reconcile) split.
   """

@@ -16,7 +16,7 @@ defmodule ReactiveDag.MixProject do
         "Reactive DAG engine as an Ash extension: dirty frontier, depth-ordered " <>
           "incremental drain, change propagation. Author nodes as Ash resources " <>
           "with reduce/join/aggregate combinators; each node's results are its own " <>
-          "rows, and the domain plugs in at three seams.",
+          "rows. You declare the relationships; one engine runs them.",
       elixirc_paths: elixirc_paths(Mix.env()),
       deps: deps(),
       docs: docs(),
@@ -60,22 +60,14 @@ defmodule ReactiveDag.MixProject do
           ReactiveDag.Node.Recompute.Aggregate,
           ReactiveDag.Calendar
         ],
-        Attestation: [
-          ReactiveDag.Attestation,
-          ReactiveDag.Attestation.Scope,
-          ReactiveDag.Attestation.Basis,
-          ReactiveDag.Attestation.Requirement,
-          ReactiveDag.Attestation.Evaluation,
-          ReactiveDag.Attestation.Op
-        ],
-        Seams: [
+        "Getting data in": [
           ReactiveDag.Source,
-          ReactiveDag.RecomputeStrategy,
-          ReactiveDag.KeyRule,
-          ReactiveDag.CoordinationWriter
+          ReactiveDag.Op
         ],
         Engine: [
           ReactiveDag.Drain,
+          ReactiveDag.Node.Recompute,
+          ReactiveDag.Node.KeyRule,
           ReactiveDag.Graph,
           ReactiveDag.Lowering,
           ReactiveDag.Plan,
@@ -91,8 +83,8 @@ defmodule ReactiveDag.MixProject do
   defp elixirc_paths(_), do: ["lib"]
 
   # Both host apps are Ash/AshPostgres/Spark, so the library IS an Ash extension:
-  # it owns the frontier + substrate resources and the reactive-DAG Spark DSL.
-  # Only the op algebra + recompute model stay app-side (the two real seams).
+  # it owns the frontier, the substrate resources, the reactive-DAG Spark DSL AND
+  # the engine that reads it. A host declares; it does not bring a strategy.
   defp deps do
     [
       {:ash, "~> 3.5"},

@@ -1,23 +1,26 @@
 defmodule ReactiveDag.Node.KeyRule do
   @moduledoc """
-  A GENERIC `ReactiveDag.KeyRule` for graphs declared with `ReactiveDag.Node`.
-  `Node` records each node's `key_rule` (`:identity | :all`) in `cell.meta`;
-  this reads it:
+  THE propagation rule: how a change reaches a parent, decided by what the parent
+  DECLARED. `ReactiveDag.Drain` calls this — there is nothing to configure.
+
+  `Node` records each node's `key_rule` in `cell.meta`; this reads it:
 
     * `:all`      — any input change escalates to a whole-cell recompute (the
       drain turns this into `"*"`). For aggregate / cross-range (reduce) cells.
     * `:identity` — a changed input key maps to the same output key (pass through).
       For key-local (map) cells. The default.
 
-  This is the uniform per-cell rule (cascade's shape). A host needing per-op,
-  per-input-leg rules (the portal's product/relation escalation) still writes its
-  own KeyRule; this generic one covers the `:identity | :all` case.
-  """
-  @behaviour ReactiveDag.KeyRule
+  A `recompute_by` unit lowers to the `:group` forms below, which are richer than
+  either: they map a changed CHILD key to the parent UNIT it belongs to, so a
+  fold reprices one group rather than escalating to the whole cell.
 
+  `rule/3` takes the specific child input, not just the parent — so a node whose
+  legs propagate differently (a change to the *members* leg passing keys through
+  while a change to the *fn* leg escalates) is expressible without a bespoke
+  module. That was the last thing a host wrote its own rule for.
+  """
   alias ReactiveDag.Cell
 
-  @impl true
   def rule(%Cell{meta: %{key_rule: :all}}, _child, _changed), do: :all
 
   # `{:group, from: :key}` — pure resolution: the key's leading `|`-segments

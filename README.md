@@ -27,7 +27,7 @@ by both.
 · [LLM nodes](https://hexdocs.pm/reactive_dag/llm-nodes.html)
 · [Sources and scanning](https://hexdocs.pm/reactive_dag/sources.html)
 · [Configuration](https://hexdocs.pm/reactive_dag/configuration.html)
-· [The seams](https://hexdocs.pm/reactive_dag/seams.html)
+· [One engine](https://hexdocs.pm/reactive_dag/seams.html)
 
 ---
 
@@ -132,11 +132,11 @@ A verdict is an ordinary row with a `:status` column. "What is failing?" is
 ```elixir
 plan = ReactiveDag.Node.graph([MyApp.Expenses, MyApp.CategoryTotals, MyApp.BudgetHealth])
 
-{:ok, report} =
-  ReactiveDag.Drain.run(plan,
-    recompute: ReactiveDag.Node.Recompute,
-    key_rule:  ReactiveDag.Node.KeyRule)
+{:ok, report} = ReactiveDag.Drain.run(plan)
 ```
+
+The plan is the only argument: how each node recomputes and how its changes
+propagate are declared in its `reactive` block, and the drain reads them there.
 
 `graph/2` assembles and validates at that point: every edge resolves, ids are
 unique, the graph is acyclic, declared attributes exist. An authoring mistake
@@ -374,10 +374,10 @@ Then poll and drain:
 ```elixir
 {:ok, results} = ReactiveDag.Source.poll_all(plan)
 for {_source, %{changed: keys}} <- results do
-  ReactiveDag.Graph.dirty_parents(plan, "docs", keys, ReactiveDag.Node.KeyRule)
+  ReactiveDag.Graph.dirty_parents(plan, "docs", keys)
 end
 
-ReactiveDag.Drain.run(plan, recompute: ..., key_rule: ...)
+ReactiveDag.Drain.run(plan)
 ```
 
 `poll_all/1` finds every scanner from the plan's `poll` declarations, so there is
@@ -543,27 +543,35 @@ moved rather than re-reading the graph.
 
 ---
 
-## The seams
+## One engine
 
 The engine decides *when* and *in what order* cells recompute. It never decides
-*how*, or *what a value means*. Three named seams take the domain:
+*what a value means*. There is no strategy to supply: a node declares what it
+computes (a combinator, or `compute MyOp`) and what a change invalidates
+(`recompute_by`, `key_rule`), and the drain reads those declarations off the
+plan.
 
-- **`ReactiveDag.RecomputeStrategy`** — how a cell recomputes. `Node.Recompute`
-  handles everything above; a host with a different execution model (the
-  compliance portal runs set-based SQL keyed on `op`) brings its own.
-- **`ReactiveDag.KeyRule`** — how a change propagates to a parent. `Node.KeyRule`
-  reads it off the block; `recompute_by` usually means you never touch this.
+Earlier versions took `recompute:` and `key_rule:` modules per call, with a
+strategy behaviour a host implemented. Both hosts ended up passing the library's
+own modules, because what varied between them was **data the DSL can declare**
+— a module named in `compute`, a combinator, a key rule — not control flow.
+
+Two seams remain, and both are declared **in the node**, so `graph/2` checks
+them:
+
 - **`ReactiveDag.Source`** — how outside state gets into a leaf, in a poll phase
   outside the drain so one unreachable vendor cannot wedge the rest.
+- **`compute MyOp`** (a `ReactiveDag.Op`) — recompute that outgrows Ash
+  entirely: an LLM call, a PDF parse. It returns the keys that actually changed,
+  and that is the whole contract.
 
-A host can also skip the DSL entirely: build `ReactiveDag.Cell` structs, call
-`ReactiveDag.Graph.build/1`, and bring its own strategy. That is how both apps
-ran before adopting the `Node` surface, and the substrate still supports it —
-`Cell`'s `meta` is an open map with an `Access` impl, so host fields ride along
-and read as `cell[:field]`.
+A host can also skip the DSL entirely: build `ReactiveDag.Cell` structs and call
+`ReactiveDag.Graph.build/1`. That is how both apps ran before adopting the `Node`
+surface, and the substrate still supports it — `Cell`'s `meta` is an open map
+with an `Access` impl, so host fields ride along and read as `cell[:field]`.
 
-The library owns the schedule and one table. The host owns its resources, its op
-algebra, and its executor.
+The library owns the schedule and one table. The host owns its resources and its
+ops.
 
 ## Design notes
 

@@ -286,5 +286,5 @@ sign-off standing, while a change to the figures clears it.
 
 - [Authoring nodes](authoring-nodes.md) — `recompute_by`, the payload loop,
   and the combinators whose output a mark attaches to.
-- [The seams](seams.md) — where domain meaning belongs when it outgrows these
-  two declarations.
+- [One engine, and where the domain enters](seams.md) — where domain meaning
+  belongs when it outgrows these two declarations.

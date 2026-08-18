@@ -3,8 +3,10 @@ defmodule ReactiveDag.Op do
   The behaviour a node's `compute` module implements — the recompute for ONE op,
   the per-cell unit of work.
 
-  A `ReactiveDag.Node` records its compute module in `cell.meta.compute`; the
-  generic `ReactiveDag.Node.Recompute` strategy dispatches to it. The op reads
+  A `ReactiveDag.Node` records its compute module in `cell.meta.compute`, and
+  `ReactiveDag.Node.Recompute` dispatches to it — after every combinator, so a
+  node declaring both gets its combinator (which the verifier refuses). The op
+  reads
   its inputs (the input cells' rows, and/or the host's own resources) and writes
   its output, returning the keys that ACTUALLY changed — only those propagate,
   keeping the cascade O(real changes).

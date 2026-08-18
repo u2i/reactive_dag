@@ -135,7 +135,7 @@ if Code.ensure_loaded?(Oban.Worker) do
       # once duplicates work and can interleave passes. The loser stands down —
       # the frontier is a set, so the winner drains what the loser would have.
       case ReactiveDag.Frontier.with_lock(fn ->
-             Drain.run(plan, ReactiveDag.Job.drain_opts(args))
+             Drain.run(plan)
            end) do
         {:ok, {:ok, report}} ->
           :telemetry.execute(
