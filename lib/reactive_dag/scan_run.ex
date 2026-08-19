@@ -11,6 +11,9 @@ defmodule ReactiveDag.ScanRun do
   This is the pair, named. `ReactiveDag.ScanWorker` builds one per scan and puts
   it on `[:reactive_dag, :scan, :stop]`, so a broadcast, a durable row or a log
   line takes one value instead of reassembling it.
+  `ReactiveDag.Insights.record/1` retains it whole for the same reason — a host
+  unwrapping to `run.report` throws away the poll, which is most of what the
+  scan did and all of what it could not reach.
 
   ## It does not merge the phases
 

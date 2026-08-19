@@ -18,25 +18,71 @@ defmodule ReactiveDag.Insights do
   layer. `reactive_dag_dashboard` renders this; a host with no web layer at all
   can still call `summary/1` from a mix task or a health check.
 
-  ## Retaining reports
+  ## Retaining runs
 
-  `Drain.run/2` returns a `%Report{}` and most callers discard it — the drain
-  deliberately does not persist anything (see `ReactiveDag.Drain.Report`: the
-  library reports, the host records). For a rolling window without a host
-  writing its own storage, `record/1` keeps the last N in memory:
+  `record/1` keeps the last N runs in a rolling in-memory window, so a host gets
+  a processing log without writing storage of its own. It takes what the engine
+  hands back, in either of the two shapes the engine produces:
 
+      # a scan — the poll and the drain it triggered
+      :telemetry.attach("scans", [:reactive_dag, :scan, :stop], fn _e, _m, meta, _ ->
+        ReactiveDag.Insights.record(meta.run)
+      end, nil)
+
+      # a drain someone triggered directly, with no poll in front of it
       {:ok, report} = ReactiveDag.Drain.run(plan, opts)
       ReactiveDag.Insights.record(report)
 
-  `recent/1` then reads them back, newest first. This is an opt-in observer, not
-  a durable log: the buffer is per-node, in-memory, and lost on restart. A host
-  that needs history stores the report where its runs already live.
+  The buffer holds `%ReactiveDag.ScanRun{}` either way. A bare `%Report{}` is a
+  drain with no poll around it, so it is wrapped in a run at the boundary rather
+  than stored as a second shape — `recent/1` returns ONE shape, and a consumer
+  reads `run.report` for the drain and `run.duration_us`, `run.changed`,
+  `run.unreachable`, `run.detail` for the poll without testing which kind of
+  entry it got.
+
+  ## Why the whole run, and not just the drain
+
+  The buffer used to hold `%Report{}` alone, so a host with a `%ScanRun{}`
+  unwrapped it and threw the envelope away. That discarded everything the POLL
+  did: its wall time (usually most of a scan's — the drain is the cheap half),
+  the keys it found changed, what it cost, and its `unreachable` list. A
+  two-minute scan of an upstream it could not reach logged as `0 cells · 0
+  changed · 6.1ms`, identical to a scan that looked at everything and found
+  nothing. That is precisely the honest-gap failure `ReactiveDag.Source` warns
+  about, reintroduced by the observer.
+
+  `recent/1`'s entries therefore carry the run, and `polled?` says whether there
+  was a poll at all, so "this drain reported no changes" and "this scan could
+  not look" stay different sentences.
+
+  This is an opt-in observer, not a durable log: the buffer is per-BEAM-node,
+  in-memory, and lost on restart. A host that needs history stores the run where
+  its runs already live.
   """
 
-  alias ReactiveDag.{Drain.Report, Frontier, Node.Rows, Plan}
+  alias ReactiveDag.{Drain.Report, Frontier, Node.Rows, Plan, ScanRun}
 
   @default_keep 20
   @failing_sample 10
+
+  @typedoc """
+  One retained run, as `recent/1` returns it.
+
+    * `run` — the `%ReactiveDag.ScanRun{}`. Always present, always this struct,
+      whichever shape was recorded.
+    * `at` — when `record/1` was called (wall clock, for ordering a log).
+    * `polled?` — was there a poll? `true` for a scan, `false` for a bare drain
+      recorded on its own. The one field that tells the two apart, so nothing
+      has to infer it from a nil `cell` or an empty `changed`.
+
+  The drain is `run.report` — `nil` when a scan never drained (see
+  `ReactiveDag.ScanRun.drained?/1`), so a consumer reading it must handle nil.
+  """
+  @type entry :: %{
+          run: ScanRun.t(),
+          at: DateTime.t(),
+          polled?: boolean()
+        }
 
   @typedoc "A cell's observable state."
   @type cell_status :: %{
@@ -191,27 +237,88 @@ defmodule ReactiveDag.Insights do
     )
   end
 
-  # ── drain reports ───────────────────────────────────────────────────────────
+  # ── retained runs ───────────────────────────────────────────────────────────
 
   @doc """
-  Keep `report` in the rolling in-memory window (default #{@default_keep},
+  Keep a run in the rolling in-memory window (default #{@default_keep},
   configurable with `config :reactive_dag, insights_keep: n`).
 
-  Opt-in: the drain persists nothing on its own. Returns the report, so it
-  drops into a pipeline:
+  Takes either shape the engine produces:
+
+    * a `%ReactiveDag.ScanRun{}` — a scan, kept whole. The poll's duration,
+      changed keys, cost `detail` and `unreachable` list are the point: they are
+      most of what a scan did, and unwrapping to the report throws them away.
+    * a bare `%ReactiveDag.Drain.Report{}` — a drain someone triggered directly,
+      with no poll in front of it. Wrapped in a `%ScanRun{}` here so `recent/1`
+      returns one shape; `polled?` on the entry is `false`.
+
+  Opt-in: neither the scan nor the drain persists anything on its own. Returns
+  its argument unchanged, so it drops into a pipeline either way:
 
       plan |> ReactiveDag.Drain.run(opts) |> then(fn {:ok, r} -> Insights.record(r) end)
   """
+  @spec record(ScanRun.t()) :: ScanRun.t()
   @spec record(Report.t()) :: Report.t()
+  def record(%ScanRun{} = run) do
+    put(run, true)
+    run
+  end
+
   def record(%Report{} = report) do
-    ensure_table()
-    :ets.insert(table(), {counter(), stamp(report)})
-    trim()
+    # A drain with no poll around it. `changed`/`unreachable`/`detail` stay at
+    # their empty defaults, which is honest — there was no poll to report them —
+    # and `duration_us` is the drain's own, so a log line's duration column means
+    # the same thing on both kinds of row.
+    put(%ScanRun{report: report, duration_us: report.duration_us}, false)
     report
   end
 
-  @doc "The most recent reports, newest first (default all retained)."
-  @spec recent(pos_integer() | :all) :: [%{report: Report.t(), at: DateTime.t()}]
+  defp put(run, polled?) do
+    ensure_table()
+    :ets.insert(table(), {counter(), stamp(run, polled?)})
+    trim()
+    :ok
+  end
+
+  @doc """
+  The most recent runs, newest first (default all retained).
+
+  Each entry is a `t:entry/0`: the `%ReactiveDag.ScanRun{}`, when it was
+  recorded, and whether a poll produced it.
+
+      for %{run: run, at: at, polled?: polled?} <- Insights.recent(20) do
+        %{
+          at: at,
+          kind: if(polled?, do: :scan, else: :drain),
+          # the whole run's wall time: a scan's poll AND its drain
+          duration_us: run.duration_us,
+          # the POLL. `cell` is what was scanned; the rest is what it found, what
+          # it could not reach, and what it cost. All at their empty defaults on
+          # a bare drain, where there was no poll to report them.
+          scanned: run.cell,
+          changed: length(run.changed),
+          unreachable: run.unreachable,
+          detail: run.detail,
+          # the DRAIN — `report` is nil when a scan never drained, so guard it
+          passes: run.report && run.report.passes,
+          steps: (run.report && run.report.steps) || [],
+          # …and either phase's cost, or both summed
+          tokens_in: ReactiveDag.ScanRun.total(run, :tokens_in)
+        }
+      end
+
+  `run.duration_us` is the WHOLE run — for a scan, the poll plus its drain. The
+  drain's own share is `run.report.duration_us`, and the gap between the two is
+  the poll, which is usually the larger number by orders of magnitude. Showing
+  the drain's figure as the run's is what made a two-minute scan render as
+  `6.1ms`.
+
+  `run.unreachable` is `[{upstream, reason}]` — non-empty means the poll could
+  NOT see everything it meant to (`ReactiveDag.ScanRun.complete?/1`), and a
+  consumer that renders it the same as an empty one is reporting a gap as a
+  clean run.
+  """
+  @spec recent(pos_integer() | :all) :: [entry()]
   def recent(limit \\ :all) do
     ensure_table()
 
@@ -227,13 +334,13 @@ defmodule ReactiveDag.Insights do
     end
   end
 
-  @doc "The most recent report, or `nil` if none has been recorded."
-  @spec last_report() :: %{report: Report.t(), at: DateTime.t()} | nil
-  def last_report, do: recent(1) |> List.first()
+  @doc "The most recent run, or `nil` if none has been recorded."
+  @spec last_run() :: entry() | nil
+  def last_run, do: recent(1) |> List.first()
 
-  @doc "Forget every retained report."
-  @spec forget_reports() :: :ok
-  def forget_reports do
+  @doc "Forget every retained run."
+  @spec forget_runs() :: :ok
+  def forget_runs do
     ensure_table()
     :ets.delete_all_objects(table())
     :ok
@@ -241,10 +348,10 @@ defmodule ReactiveDag.Insights do
 
   # ── internals ───────────────────────────────────────────────────────────────
 
-  @table :reactive_dag_insights_reports
+  @table :reactive_dag_insights_runs
   defp table, do: @table
 
-  defp stamp(report), do: %{report: report, at: DateTime.utc_now()}
+  defp stamp(run, polled?), do: %{run: run, at: DateTime.utc_now(), polled?: polled?}
 
   # `get_env` with an explicitly-stored nil returns nil, not the default (a test
   # or a release config that clears the key does exactly that), so fall back on

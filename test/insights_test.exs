@@ -10,7 +10,7 @@ defmodule ReactiveDag.InsightsTest do
   """
   use ExUnit.Case, async: false
 
-  alias ReactiveDag.{Drain, Frontier, Insights}
+  alias ReactiveDag.{Drain, Frontier, Insights, ScanRun}
 
   defmodule Domain do
     use Ash.Domain, validate_config_inclusion?: false
@@ -219,11 +219,11 @@ defmodule ReactiveDag.InsightsTest do
     start_supervised!(%{id: FakeRepo, start: {FakeRepo, :start_link, []}})
     prev_repo = Application.get_env(:reactive_dag, :repo)
     Application.put_env(:reactive_dag, :repo, FakeRepo)
-    Insights.forget_reports()
+    Insights.forget_runs()
 
     on_exit(fn ->
       Application.put_env(:reactive_dag, :repo, prev_repo)
-      Insights.forget_reports()
+      Insights.forget_runs()
     end)
 
     for {k, cat, amt} <- [{"e1", "travel", 100.0}, {"e2", "meals", 40.0}] do
@@ -378,9 +378,9 @@ defmodule ReactiveDag.InsightsTest do
     end
   end
 
-  describe "drain reports" do
-    test "record/1 retains reports; recent/1 reads them newest-first" do
-      assert Insights.last_report() == nil
+  describe "retained runs" do
+    test "record/1 retains runs; recent/1 reads them newest-first" do
+      assert Insights.last_run() == nil
 
       p = plan()
       Frontier.mark_dirty("expenses", ["*"], "seed")
@@ -398,13 +398,13 @@ defmodule ReactiveDag.InsightsTest do
       Insights.record(second)
 
       assert [newest, older] = Insights.recent()
-      assert newest.report == second
-      assert older.report == first
-      assert Insights.last_report().report == second
+      assert newest.run.report == second
+      assert older.run.report == first
+      assert Insights.last_run().run.report == second
       assert %DateTime{} = newest.at
     end
 
-    test "the window is bounded — oldest reports fall off" do
+    test "the window is bounded — oldest runs fall off" do
       prev = Application.get_env(:reactive_dag, :insights_keep)
       Application.put_env(:reactive_dag, :insights_keep, 3)
       on_exit(fn -> Application.put_env(:reactive_dag, :insights_keep, prev) end)
@@ -413,13 +413,25 @@ defmodule ReactiveDag.InsightsTest do
         Insights.record(%Drain.Report{passes: i, duration_us: i, steps: []})
       end
 
-      retained = Insights.recent() |> Enum.map(& &1.report.passes)
+      retained = Insights.recent() |> Enum.map(& &1.run.report.passes)
       assert retained == [6, 5, 4]
+    end
+
+    test "the window trims SCAN runs too — one buffer, one bound" do
+      prev = Application.get_env(:reactive_dag, :insights_keep)
+      Application.put_env(:reactive_dag, :insights_keep, 2)
+      on_exit(fn -> Application.put_env(:reactive_dag, :insights_keep, prev) end)
+
+      for i <- 1..5 do
+        Insights.record(%ScanRun{cell: "docs", duration_us: i})
+      end
+
+      assert Insights.recent() |> Enum.map(& &1.run.duration_us) == [5, 4]
     end
 
     test "recent/1 takes a limit" do
       for i <- 1..4, do: Insights.record(%Drain.Report{passes: i, steps: []})
-      assert Insights.recent(2) |> Enum.map(& &1.report.passes) == [4, 3]
+      assert Insights.recent(2) |> Enum.map(& &1.run.report.passes) == [4, 3]
     end
 
     test "the retained report IS the causal trace — what ran, and why" do
@@ -430,12 +442,131 @@ defmodule ReactiveDag.InsightsTest do
         Drain.run(p, recompute: ReactiveDag.Node.Recompute, key_rule: ReactiveDag.Node.KeyRule)
 
       Insights.record(report)
-      %{report: r} = Insights.last_report()
+      %{run: run} = Insights.last_run()
+      r = run.report
 
       # the question a dashboard exists to answer: why did this recompute?
       assert Drain.Report.causes(r)["category_totals"] == "expenses"
       assert Drain.Report.causes(r)["category_health"] == "category_totals"
       assert "category_totals" in Drain.Report.cells(r)
+    end
+  end
+
+  describe "a scan is retained WHOLE" do
+    # The bug this shape exists for: a two-minute scan logged as
+    # `0 cells · 0 changed · 6.1ms` because the host unwrapped the run to its
+    # report, and the report only knows about the drain. Everything the POLL did
+    # — its wall time, what it found, what it cost, what it could NOT reach —
+    # has to survive the round trip through the buffer.
+    setup do
+      run = %ScanRun{
+        cell: "meeting_docs",
+        changed: ["d1", "d2"],
+        unreachable: [{"calendar", :timeout}, {"drive", :econnrefused}],
+        detail: %{tokens_in: 4200, llm_calls: 7, cache_hits: 31},
+        duration_us: 134_000_000,
+        report: %Drain.Report{passes: 1, duration_us: 6_100, steps: []}
+      }
+
+      Insights.record(run)
+      %{recorded: Insights.last_run()}
+    end
+
+    test "the POLL's duration survives — not the drain's", %{recorded: entry} do
+      # the whole point: 134s is the number the dashboard was missing, and the
+      # drain's own 6.1ms is what it was showing instead.
+      assert entry.run.duration_us == 134_000_000
+      assert entry.run.report.duration_us == 6_100
+    end
+
+    test "the poll's changed keys survive", %{recorded: entry} do
+      assert entry.run.changed == ["d1", "d2"]
+    end
+
+    test "unreachable survives — a scan that could not look says so", %{recorded: entry} do
+      assert entry.run.unreachable == [{"calendar", :timeout}, {"drive", :econnrefused}]
+      refute ScanRun.complete?(entry.run)
+    end
+
+    test "the poll's cost detail survives", %{recorded: entry} do
+      assert entry.run.detail == %{tokens_in: 4200, llm_calls: 7, cache_hits: 31}
+    end
+
+    test "and cost still totals across BOTH phases from the retained run", %{recorded: entry} do
+      # `ScanRun.total/2` reaches the poll's detail AND the drain's steps. Under
+      # the old shape the poll's spend was simply not in the buffer.
+      assert ScanRun.total(entry.run, :tokens_in) == 4200
+    end
+  end
+
+  describe "a scan and a bare drain are told apart" do
+    test "polled? distinguishes them, without inspecting the run's insides" do
+      Insights.record(%ScanRun{
+        cell: "meeting_docs",
+        unreachable: [{"drive", :timeout}],
+        duration_us: 134_000_000,
+        report: %Drain.Report{passes: 1, duration_us: 6_100, steps: []}
+      })
+
+      Insights.record(%Drain.Report{passes: 2, duration_us: 900, steps: []})
+
+      assert [bare, scan] = Insights.recent()
+
+      refute bare.polled?
+      assert scan.polled?
+    end
+
+    test "a bare report is normalised into a run — recent/1 returns ONE shape" do
+      Insights.record(%ScanRun{cell: "docs", duration_us: 5})
+      Insights.record(%Drain.Report{passes: 2, duration_us: 900, steps: []})
+
+      # A consumer pattern-matching two shapes gets it wrong, so there is only
+      # one: every entry carries a %ScanRun{}, whichever way it was recorded.
+      for entry <- Insights.recent() do
+        assert %ScanRun{} = entry.run
+      end
+    end
+
+    test "a bare drain's duration is the DRAIN's — the two rows mean the same thing" do
+      Insights.record(%Drain.Report{passes: 2, duration_us: 900, steps: []})
+
+      entry = Insights.last_run()
+
+      # A log's duration column has to mean one thing across both kinds of row,
+      # so a bare drain reports the drain's wall time rather than a zero the
+      # `%ScanRun{}` default would have given it.
+      assert entry.run.duration_us == 900
+    end
+
+    test "a bare drain claims no poll findings it never made" do
+      Insights.record(%Drain.Report{passes: 2, duration_us: 900, steps: []})
+
+      run = Insights.last_run().run
+
+      assert run.cell == nil
+      assert run.changed == []
+      assert run.unreachable == []
+      assert run.detail == %{}
+      # …and empty `unreachable` here is honest rather than a claim of
+      # completeness: there was no poll to be incomplete.
+      assert ScanRun.drained?(run)
+    end
+
+    test "a scan that never drained is retained, and says so" do
+      # An unscannable source is a COMPLETED scan that found nothing. The row is
+      # still worth having, and "0 passes" must not be rendered for a drain that
+      # never happened.
+      Insights.record(%ScanRun{
+        cell: "quickbooks",
+        not_scannable: {:not_scannable, :no_credential},
+        duration_us: 1_200
+      })
+
+      run = Insights.last_run().run
+
+      assert run.report == nil
+      refute ScanRun.drained?(run)
+      assert Insights.last_run().polled?
     end
   end
 end
