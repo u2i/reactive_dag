@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.17.0-rc.40](https://github.com/u2i/reactive_dag/compare/v0.17.0-rc.39...v0.17.0-rc.40) (2026-08-19)
+
+
+### ⚠ BREAKING CHANGES
+
+* `recent/1` returns `%{run:, at:, polled?:}` where it returned `%{report:, at:}`. `last_report/0` → `last_run/0`, `forget_reports/0` → `forget_runs/0`. A host recording a scan should now pass the whole `%ScanRun{}` rather than unwrapping it — which also fixes the unscannable case, where `run.report` is nil and the old guard recorded nothing at all.
+
+### Features
+
+* `Insights` keeps whole runs, not just the drain inside them ([#181](https://github.com/u2i/reactive_dag/issues/181)) ([a18fb16](https://github.com/u2i/reactive_dag/commit/a18fb16cc6239532a327a45f6fc94a58947bcc92))
+
 ## [0.17.0-rc.39](https://github.com/u2i/reactive_dag/compare/v0.17.0-rc.38...v0.17.0-rc.39) (2026-08-18)
 
 
