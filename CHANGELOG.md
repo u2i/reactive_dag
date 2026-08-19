@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.17.0-rc.41](https://github.com/u2i/reactive_dag/compare/v0.17.0-rc.40...v0.17.0-rc.41) (2026-08-19)
+
+
+### Features
+
+* a two-node join — `left_over:`/`right_over:` ([#183](https://github.com/u2i/reactive_dag/issues/183)) ([8c9225f](https://github.com/u2i/reactive_dag/commit/8c9225fc8568433a135f480991a16e1a6512d602))
+
 ## [0.17.0-rc.40](https://github.com/u2i/reactive_dag/compare/v0.17.0-rc.39...v0.17.0-rc.40) (2026-08-19)
 
 
