@@ -95,18 +95,23 @@ Only read when a node declares `dirties_on … schedule_drain: true`.
 
 ### `:insights_keep`
 
-How many `%ReactiveDag.Drain.Report{}`s `ReactiveDag.Insights.record/1` retains
-in its rolling in-memory window.
+How many runs `ReactiveDag.Insights.record/1` retains in its rolling in-memory
+window.
 
 ```elixir
 config :reactive_dag, insights_keep: 50
 ```
 
-Only relevant if you call `Insights.record/1` (the drain persists nothing on its
-own — the library reports, the host records). The buffer is per-node, in
-memory, and lost on restart; it exists so a dashboard has something to show
-without the host building storage. A host wanting history stores the report
-where its runs already live.
+Only relevant if you call `Insights.record/1` (neither the scan nor the drain
+persists anything on its own — the library reports, the host records). It takes
+a `%ReactiveDag.ScanRun{}` (a scan: the poll AND the drain it triggered) or a
+bare `%ReactiveDag.Drain.Report{}` (a drain triggered directly), and retains a
+run either way — so a log line can show the poll's duration, changed keys, cost
+and `unreachable` list rather than only the drain's much smaller share.
+
+The buffer is per-BEAM-node, in memory, and lost on restart; it exists so a
+dashboard has something to show without the host building storage. A host
+wanting history stores the run where its runs already live.
 
 ## Validating at boot
 
