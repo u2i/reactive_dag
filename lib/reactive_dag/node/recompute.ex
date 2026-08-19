@@ -100,16 +100,18 @@ defmodule ReactiveDag.Node.Recompute do
   # reconcile shape, where an undeclared right-side member is a finding.
   # `read` may be arity-2 for dirty-key scoping (see `reduce` above).
   def recompute(%Cell{meta: %{join: %{} = j}} = cell, keys) do
-    items =
-      Read.items(cell.meta[:over_source], j.over, j.query, scope(keys), auto_scope(cell, keys))
+    {left_items, right_items} = join_items(cell, j, keys)
 
-    left = index(items, Declarative.side_fn(j.left))
-    right = index(items, Declarative.side_fn(j.right))
+    left = index(left_items, Declarative.side_fn(j.left))
+    right = index(right_items, Declarative.side_fn(j.right))
     key_fn = Declarative.key_fn(j.key, j.key_prefix)
     keyer = row_keyer(cell, j, key_fn)
 
     into = Declarative.join_into_fn(j.into)
-    emit = fn jk, l, r -> into_pair(into.(jk, l, r), keyer, jk) end
+
+    emit = fn jk, l, r ->
+      jk |> into.(l, r) |> into_pair(keyer, jk)
+    end
 
     left_pairs =
       Enum.flat_map(left, fn {jk, litem} -> emit.(jk, litem, Map.get(right, jk)) end)
@@ -123,7 +125,13 @@ defmodule ReactiveDag.Node.Recompute do
         []
       end
 
-    {:ok, materialize(cell, left_pairs ++ right_only_pairs, scope(keys))}
+    pairs = left_pairs ++ right_only_pairs
+
+    # RETIREMENT is scoped to what this pass could SEE. A two-input pass that
+    # read one side must not reconcile the other side's keys out of existence:
+    # they were not produced because they were not read, which is the honest-gap
+    # distinction the library draws everywhere else (`Rows.observed: :partial`).
+    {:ok, materialize(cell, pairs, retire_scope(keys))}
   end
 
   # a PER-KEY map — for each claimed input row, call a generic action with that
@@ -506,4 +514,66 @@ defmodule ReactiveDag.Node.Recompute do
   defp index(items, key_fn) do
     for item <- items, jk = key_fn.(item), not is_nil(jk), into: %{}, do: {jk, item}
   end
+
+  # The two sides' items, and WHICH sides this pass actually read.
+  #
+  # One input: both sides come from one read, so both are always "read".
+  #
+  # Two inputs: each side is read with ITS OWN source and ITS OWN scope. The
+  # reverted implementation computed one `claimed`/`auto` pair and passed it to
+  # both sides, so a left-side claim filtered the right table by keys that index
+  # nothing in it, read empty, and the join wrote nils over good data. A side is
+  # read only when the claim concerns it — whole-cell reads both.
+  defp join_items(%Cell{meta: %{side_sources: %{} = sides}}, j, keys) do
+    claimed = scope(keys)
+
+    read = fn side, over, spec ->
+      Read.items(sides[side], over, j.query, claimed, side_scope(spec, claimed))
+    end
+
+    {read.(:left, j.left_over, j.left), read.(:right, j.right_over, j.right)}
+  end
+
+  defp join_items(cell, j, keys) do
+    items =
+      Read.items(cell.meta[:over_source], j.over, j.query, scope(keys), auto_scope(cell, keys))
+
+    {items, items}
+  end
+
+  # A side's own read scope.
+  #
+  # The claimed keys are JOIN keys, not the side's payload keys — those are
+  # different columns and usually different values. Scoping `Budgets` by its
+  # `payload_key` (`:key`, e.g. `"b1"`) with a claim of `"5000"` (an
+  # `account_code`) matches nothing, so the side reads empty: the same
+  # read-nothing failure the reverted version had, arrived at from the other
+  # direction. A side filters the column it is INDEXED BY.
+  #
+  # Only a plain-attribute side (`left: :account_code`) or the `[key: …]` form
+  # names a filterable column. A fn side computes its join key in the BEAM, so
+  # there is nothing to push into the query and the side reads whole — correct,
+  # and no worse than the one-input form, which also reads whole for a fn side.
+  @doc false
+  # public for tests: the read scope a side derives from a claim set.
+  def side_scope_for_test(spec, claimed), do: side_scope(spec, claimed)
+
+  defp side_scope(_spec, nil), do: nil
+
+  defp side_scope(spec, claimed) do
+    case join_key_attr(spec) do
+      nil -> nil
+      attr -> {:attr, attr, claimed}
+    end
+  end
+
+  defp join_key_attr(attr) when is_atom(attr) and not is_nil(attr), do: attr
+  defp join_key_attr(spec) when is_list(spec), do: Keyword.get(spec, :key)
+  defp join_key_attr(_fn_or_nil), do: nil
+
+  # What this pass may reconcile: its claim, both forms alike. A two-input pass
+  # reads BOTH sides for every claim — each scoped to its own join-key column —
+  # so every claimed key was genuinely looked for and a key that produced no row
+  # really has no row.
+  defp retire_scope(keys), do: scope(keys)
 end

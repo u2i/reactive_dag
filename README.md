@@ -184,7 +184,7 @@ only the changed keys.
 |---|---|
 | `aggregate` | the datastore can do it — one GROUP BY, no rows in the BEAM |
 | `reduce` | a fold over a group |
-| `join` | correlate two sides of one input |
+| `join` | correlate two sides — of one input, or of two nodes |
 | `union` | roll many nodes' rows into one queryable table |
 | `per_key` | one call per row — an LLM, an embedding, a fetch |
 | `run :action` | a generic Ash action on this resource |
@@ -210,7 +210,9 @@ Escapes, each independent: `query:` shapes the read without leaving Ash
 (`fn q, dirty -> … end`); a fn `group_by`/`key`/`into` for computed shapes;
 `expand:` when one group produces many rows.
 
-**`join`** — a left join over ONE input. Sides are attributes (`left: :acct`) or
+**`join`** — a left join. `over:` reads ONE input and splits it into sides;
+`left_over:`/`right_over:` correlate TWO different nodes, each read and scoped by
+its own join-key column. Sides are attributes (`left: :acct`) or
 `[key: :acct, where: [kind: "budget"]]` discriminator splits. An absent side
 yields nils, because the declared-vs-observed gap is usually information.
 

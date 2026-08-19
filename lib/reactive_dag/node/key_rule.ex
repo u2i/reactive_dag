@@ -38,6 +38,10 @@ defmodule ReactiveDag.Node.KeyRule do
   # reading the changed rows (one scoped query per propagation). A changed key
   # the lookup can't find — a deleted row — degrades the propagation to :all:
   # vanish must reprice everything it might have left.
+  def rule(%Cell{meta: %{key_rule: :group, side_sources: %{} = sides} = meta}, child, changed) do
+    two_node_join_claims(meta[:join], sides, child, changed)
+  end
+
   def rule(%Cell{meta: %{key_rule: :group} = meta}, _child, changed) do
     group_claims(meta[:reduce] || meta[:join], meta[:over_source], changed)
   end
@@ -146,6 +150,76 @@ defmodule ReactiveDag.Node.KeyRule do
 
   defp calendar_label(kind, %Date{} = date), do: ReactiveDag.Calendar.label(kind, date)
   defp calendar_label(_kind, _raw), do: :error
+
+  # A TWO-INPUT join: the changed keys belong to ONE side, so translate them
+  # through THAT side only. Which side is the `child` that propagated — the same
+  # edge the claim will be scoped by, so the translation and the read agree.
+  #
+  # Reading the other side's rows here would be wrong twice: its key column is a
+  # different column, and its rows did not change.
+  defp two_node_join_claims(nil, _sides, _child, _changed), do: :all
+
+  defp two_node_join_claims(j, sides, child, changed) do
+    case side_of(j, child) do
+      nil ->
+        :all
+
+      side ->
+        spec = if side == :left, do: j.left, else: j.right
+        source = sides[side]
+
+        if is_nil(source) or is_nil(source[:payload_key]) do
+          :all
+        else
+          side_join_keys(spec, source, j, changed)
+        end
+    end
+  end
+
+  # Which side propagated. `nil` for a child that is NEITHER side — the caller
+  # degrades to `:all` rather than guessing, since translating through the wrong
+  # side would claim keys the change has nothing to do with.
+  defp side_of(%{left_over: l, right_over: r}, child) when not is_nil(child) do
+    c = to_string(child)
+
+    cond do
+      not is_nil(l) and to_string(l) == c -> :left
+      not is_nil(r) and to_string(r) == c -> :right
+      true -> nil
+    end
+  end
+
+  defp side_of(_j, _child), do: nil
+
+  # Read the changed rows of ONE side and map each to its join key. A key the
+  # lookup cannot find is a DELETED row, and a vanished row must reprice
+  # everything it might have left — the same `:all` degradation `group_claims/3`
+  # makes, for the same reason.
+  defp side_join_keys(spec, source, j, changed) do
+    alias ReactiveDag.Node.Recompute.Declarative
+
+    rows =
+      source.resource
+      |> Ash.Query.do_filter([{source.payload_key, [in: changed]}])
+      |> load_calcs(Map.get(source, :load, []))
+      |> Ash.read!()
+
+    if length(rows) < length(changed) do
+      :all
+    else
+      key_fn = Declarative.key_fn(Map.get(j, :key), Map.get(j, :key_prefix))
+      side_fn = Declarative.side_fn(spec)
+
+      keys =
+        rows
+        |> Enum.map(side_fn)
+        |> Enum.reject(&(&1 in [nil, false]))
+        |> Enum.map(key_fn)
+        |> Enum.uniq()
+
+      {:keys, keys}
+    end
+  end
 
   defp group_claims(nil, _source, _changed), do: :all
   defp group_claims(_spec, nil, _changed), do: :all
