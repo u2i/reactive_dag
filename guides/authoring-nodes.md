@@ -332,6 +332,47 @@ member is a finding). The fn escapes: `left: fn item -> ... end` for computed
 side keys, `into: fn jk, l, r -> ... end` for computed columns
 (variance = budget − actual). `query:` shapes the read exactly as on `reduce`.
 
+### `join` — two inputs, two nodes
+
+```elixir
+join left_over:  :budgets,          # one node
+     right_over: :actuals,          # ...and a different one
+     left:  :account_code,          # each side's JOIN KEY column
+     right: :acct,
+     outer: true,                   # a right-only key is a row too
+     into:  [left: [amount: :budget], right: [amount: :actual]]
+```
+
+Two nodes correlated into one row per join key. `left:`/`right:`/`into:`/`outer:`
+mean exactly what they do in the one-input form; what changes is that each side
+is a **separate node**, read and scoped independently, and each contributes its
+own input edge — so a change on either propagates through it. No `depends_on` is
+needed: naming the two sides names the two edges.
+
+The claim rule defaults to `:group` rather than `:identity`, because an input's
+changed keys are **its own** keys. An `Actuals` row keyed `"a1"` joins on
+`acct: "5000"`, so `"a1"` names no join key; the rule translates a changed row to
+the join key it belongs to, through the side that propagated.
+
+That translation is the whole reason this shape works, and getting it wrong is
+what reverted the first attempt: it scoped each side by the side's own
+`payload_key` while the claim carried join keys — different columns, different
+values — so the scoped read matched nothing, the side came back empty, and the
+join emitted `nil` for its columns. The payload upsert then wrote those nils over
+good data. Each side is now scoped by the column it is **indexed by**.
+
+> #### A fn side reads whole {: .info}
+>
+> `left: fn row -> ... end` computes its join key in the BEAM, so there is no
+> column to push a filter into and that side reads whole. Correct, and no worse
+> than the one-input form, which also reads whole for a fn side — but it means a
+> named-attribute or `[key: …]` side is the one that scopes.
+
+An absent side yields `nil` columns, as with one input: nil means "no row on that
+side", which is information rather than an error. A node that needs to
+distinguish "no row" from "that source has not reported yet" wants a column of
+its own recording which sides have been seen.
+
 ### `union` — the graph-wide roll-up as a node
 
 ```elixir
@@ -363,17 +404,24 @@ row updates. The composite primary key makes it identity-keyed, so cell keys are
 Source fields available to `into:` are `:cell` (which input the row came from),
 `:key`, `:status` and `:observed_at`.
 
-#### Why N inputs are safe here
+#### Union vs a two-input join
 
-This is the only N-input combinator, and deliberately so. A cross-node **join**
-was built and reverted: a join has to *correlate* its inputs — match a budget row
-to an actual row — so a claim naming one side leaves the other unread, and the
-fold writes nulls over good data. That is not a scoping bug; it is what
-correlating independently-claimed inputs means.
+A union does not **correlate**: each input contributes rows independently, one
+row per `(input cell, key)`, so a scoped claim reads only the input that moved.
+That is why the shapes differ — a union *stacks* rows, a join *matches* them.
 
-A union does not correlate. Each input contributes rows independently, so a
-scoped claim reads **only the input that moved** and nothing else. The
-provenance in the key is exactly the translation a join could not do.
+A cross-node join was built and reverted once, on the reasoning that "a claim
+naming one side leaves the other unread, and the fold writes nulls over good
+data". The failure was real. The diagnosis was one level too shallow: the unread
+side was a **mis-scoped read**, not an inherent consequence of correlating. See
+[`join` with two inputs](#join-two-inputs-two-nodes) — each side is scoped by
+its own join-key column, and both sides read the rows the claim is about.
+
+Reach for a union when the inputs produce **comparable rows** and stacking them
+is meaningful on its own — `fiscal_line` is a line item you can read. Reach for a
+two-input join when two sources describe the **same entity** and one contributes
+columns to it; unioning those keyed by provenance makes two half-rows per entity
+purely so a one-input join can put them back together.
 
 ### `per_key` — one action call per row
 

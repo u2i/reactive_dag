@@ -59,6 +59,7 @@ defmodule ReactiveDag.Node do
   | fold, with the recompute UNIT declared | `recompute_by` + `reduce` | the scoped slice | the unit + the field it comes from + an `into:` fold |
   | fold one input's rows into per-group summaries | `reduce` | the scoped slice of `over` | `group_by:` attrs + an `into:` fold |
   | reconcile one input's two sides by key | `join` | the scoped slice of `over` | side attrs/`[key:, where:]` + picks |
+  | correlate TWO nodes by a shared key | `join left_over:/right_over:` | each side's own scoped slice | a node + join-key column per side + picks |
   | a slot the attributes can't express | the slot's escape | same | `query:` (shape the Ash read), fn group/key/into, `expand:`, `status:` |
   | arbitrary recompute, kept Ash-native | `run :action` | up to the action | a generic action on THIS resource |
   | recompute beyond Ash (LLM, fetch, bespoke) | `compute Mod` | up to the module | a `ReactiveDag.Op` |
@@ -468,9 +469,47 @@ defmodule ReactiveDag.Node do
     keys also emit (`into.(jk, nil, right_item)`), for reconciles where an
     unexpected right-side member is itself a finding (a rogue repo the baseline
     never declared) rather than something to silently drop.
+
+    ## Two inputs
+
+    `left_over:`/`right_over:` read TWO DIFFERENT nodes, each scoped by its own
+    keys. That needs `left_owns:`/`right_owns:` — the payload columns each side
+    writes — because a claim names one side's keys and leaves the other side
+    unread.
+
+    `left_over:`/`right_over:` read TWO DIFFERENT nodes. An earlier attempt at
+    this shape was reverted for writing nils over good data — a budget claim
+    destroyed the actual and vice versa — and the revert concluded that was "the
+    shape's natural failure mode, not an oversight". The failure was real; the
+    diagnosis was one level too shallow.
+
+    A claim key is a JOIN key. The reverted version scoped both sides by the one
+    claim's keys against each side's own payload key — two different columns,
+    usually different values (an `Actuals` row keyed `"a1"` joins on
+    `acct: "5000"`). So the scoped read matched nothing, the side came back
+    empty, and `into` emitted `nil` for its columns.
+
+    Each side is therefore scoped by the column it is INDEXED BY — its own
+    join-key attribute. Both sides then read the rows the claim is actually
+    about, `into` sees real values on both, and no nil is ever emitted to be
+    written. Nothing about per-column writes is needed; the read was the bug.
+
+    Two consequences worth knowing:
+
+      * A `fn` side computes its join key in the BEAM, so there is no column to
+        push a filter into and that side reads WHOLE. Correct, and no worse than
+        the one-input form, which also reads whole for a fn side.
+      * The claim rule defaults to `:group`, not `:identity`: an input's changed
+        keys are its own, so they are translated to join keys through the side
+        that propagated — the same edge the read is scoped by.
+
+    So left/right/inner/outer stay ordinary options; `outer: true` is a full
+    outer join here exactly as it is with one input.
     """
     defstruct [
       :over,
+      :left_over,
+      :right_over,
       :read,
       :query,
       :left,
@@ -495,15 +534,33 @@ defmodule ReactiveDag.Node do
     schema: [
       over: [
         type: :atom,
-        required: true,
-        doc: "the input node id whose payload is read + indexed"
+        required: false,
+        doc:
+          "ONE-INPUT form: the input node id whose payload is read + indexed, then split " <>
+            "into sides by `left:`/`right:`. Mutually exclusive with `left_over:`/`right_over:`."
+      ],
+      left_over: [
+        type: :atom,
+        required: false,
+        doc:
+          "TWO-INPUT form: the node id feeding the LEFT side, read and scoped INDEPENDENTLY " <>
+            "of the right — each by its OWN join-key column, which is what makes two inputs " <>
+            "safe here. Requires `right_over:`. Each side is its own input edge, so a change " <>
+            "on either propagates through it, and the claim rule translates a changed row to " <>
+            "the join key it belongs to."
+      ],
+      right_over: [
+        type: :atom,
+        required: false,
+        doc: "TWO-INPUT form: the node id feeding the RIGHT side. Requires `left_over:`."
       ],
       read: [
         type: :atom,
         required: false,
         doc:
           "OMIT for the default (the over node's primary read, dirty-key scoped); an " <>
-            "atom names a different `:read` action on it. Always an Ash read — see `query:`."
+            "atom names a different `:read` action on it. Always an Ash read — see `query:`. " <>
+            "ONE-INPUT form only."
       ],
       query: [
         type: {:fun, 2},
@@ -1557,6 +1614,20 @@ defmodule ReactiveDag.Node do
     %{cell | meta: Map.put(cell.meta, :union_sources, sources)}
   end
 
+  # a TWO-INPUT join reads two different nodes, so it needs a source PER SIDE —
+  # each with its own resource and payload key, because each is scoped by its own
+  # claim keys. The one-input clause below stamps a single `over_source`; sharing
+  # that between two sides is exactly the defect that got this shape reverted.
+  defp resolve_read_cell(%{meta: %{join: %{left_over: l, right_over: r} = j}} = cell, by_id)
+       when not is_nil(l) and not is_nil(r) do
+    sides =
+      Map.new([left: l, right: r], fn {side, input} ->
+        {side, join_side_source!(cell, side, input, j, by_id)}
+      end)
+
+    %{cell | meta: Map.put(cell.meta, :side_sources, sides)}
+  end
+
   defp resolve_read_cell(cell, by_id) do
     spec = cell.meta[:reduce] || cell.meta[:join] || per_key_read_spec(cell)
 
@@ -1611,6 +1682,48 @@ defmodule ReactiveDag.Node do
         cell
     end
   end
+
+  # One side of a two-input join, resolved against the graph. Mirrors the
+  # one-input checks (cell exists, has a resource, the resource has attributes)
+  # because a side that reads nothing would silently contribute no columns —
+  # and with per-side ownership that reads as "my side saw nothing", which is a
+  # much quieter wrong answer than a raise.
+  defp join_side_source!(cell, side, input, j, by_id) do
+    over_id = to_string(input)
+    over = by_id[over_id]
+    resource = over && over.meta[:resource]
+
+    cond do
+      is_nil(resource) ->
+        raise ArgumentError,
+              "reactive_dag: #{cell.id} joins #{side}_over: #{inspect(input)}, " <>
+                "but that cell has no backing resource to read" <>
+                if(is_nil(over), do: " (no such cell in this graph)", else: "") <>
+                " — each side of a two-input join is an Ash read of that node's resource."
+
+      Ash.Resource.Info.attributes(resource) == [] ->
+        raise ArgumentError,
+              "reactive_dag: #{cell.id} joins #{side}_over: #{inspect(input)}, whose " <>
+                "resource #{inspect(resource)} declares no attributes — nothing to read."
+
+      true ->
+        :ok
+    end
+
+    %{
+      resource: resource,
+      payload_key: over.meta[:payload_key],
+      read_action: nil,
+      # ONLY this side's attrs, against THIS side's resource. The one-input
+      # clause validates `left ++ right` against a single resource, which is
+      # right when both sides come from one table and wrong here: the left's key
+      # column need not exist on the right's resource.
+      load: declarative_loads!(cell, %{j | left: side_spec(j, side), right: nil}, resource)
+    }
+  end
+
+  defp side_spec(%{left: l}, :left), do: l
+  defp side_spec(%{right: r}, :right), do: r
 
   # a `per_key` node reads its input exactly as a combinator does — it just has
   # no `read:`/`query:` of its own, so it borrows the shape resolve_read_cell/2
@@ -1795,6 +1908,12 @@ defmodule ReactiveDag.Node do
         %Union{from: from} ->
           Enum.map(from, &%Ref{to: &1})
 
+        # a TWO-INPUT join implies TWO edges — one per side, so a change on
+        # either propagates through its own. This is why each side can be scoped
+        # by its own keys: the claim arrives via the edge that moved.
+        %Join{left_over: l, right_over: r} when not is_nil(l) and not is_nil(r) ->
+          [%Ref{to: l}, %Ref{to: r}]
+
         c ->
           case Map.get(c, :over) || (recompute_by(resource) || %{to: nil}).to do
             nil ->
@@ -1825,6 +1944,15 @@ defmodule ReactiveDag.Node do
 
       match?(%{key_rule: kr} when not is_nil(kr), combinator(resource)) ->
         combinator(resource).key_rule
+
+      # A TWO-INPUT join's claim keys are JOIN keys, and an input's changed keys
+      # are its OWN payload keys — different columns, usually different values
+      # (an `Actuals` row `"a1"` joins on `acct: "5000"`). `:identity` would pass
+      # `"a1"` through as a claim, which names no join key at all: the sides read
+      # nothing and the row is reconciled away. So the claim rule is `:group` —
+      # translate a changed row to the join key it belongs to.
+      match?(%Join{left_over: l, right_over: r} when not is_nil(l) and not is_nil(r), combinator(resource)) ->
+        :group
 
       true ->
         Ext.get_opt(resource, [:reactive], :key_rule, :identity)
@@ -1890,7 +2018,6 @@ defmodule ReactiveDag.Node do
   end
 
   defp edge!(%RecomputeBy{to: to}, %{over: over}, _resource), do: to || over
-
 
   # the unit as the claim rule it replaces.
   defp unit_key_rule(%RecomputeBy{unit: :cell}), do: :all

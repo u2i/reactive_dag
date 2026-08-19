@@ -9,6 +9,7 @@ defmodule ReactiveDag.Node.Verifiers.VerifyReactive do
   use Spark.Dsl.Verifier
 
   alias ReactiveDag.Node.Recompute.Declarative
+
   alias ReactiveDag.Node.{
     Compose,
     Compute,
@@ -21,6 +22,7 @@ defmodule ReactiveDag.Node.Verifiers.VerifyReactive do
     Run,
     Union
   }
+
   alias Spark.Dsl.Verifier
 
   @impl true
@@ -301,6 +303,7 @@ defmodule ReactiveDag.Node.Verifiers.VerifyReactive do
   defp verify_entity(dsl, %Join{} = j) do
     with :ok <- verify_key_rule_home(dsl, j.key_rule),
          :ok <- verify_key_prefix(dsl, j.key, j.key_prefix),
+         :ok <- verify_join_inputs(dsl, j),
          :ok <- verify_side(dsl, :left, j.left),
          :ok <- verify_side(dsl, :right, j.right),
          :ok <- verify_result_slots(dsl, :join, into: j.into),
@@ -308,7 +311,6 @@ defmodule ReactiveDag.Node.Verifiers.VerifyReactive do
       :ok
     end
   end
-
 
   defp verify_entity(dsl, %Run{action: action}),
     do: verify_generic_action(dsl, action, "run")
@@ -344,6 +346,52 @@ defmodule ReactiveDag.Node.Verifiers.VerifyReactive do
   end
 
   defp verify_entity(_dsl, _other), do: :ok
+
+  # ONE input or TWO, never a mix — and a two-input join must say which columns
+  # each side owns.
+  #
+  # The ownership declaration is not bookkeeping: a claim names one side's keys,
+  # so the write must omit the other side's columns to preserve them. Without
+  # `owns:` the library cannot know which columns to omit, and the shape degrades
+  # to exactly the nil-over-good-data bug that got it reverted once. So it is
+  # REQUIRED rather than defaulted — there is no safe default, and a silent one
+  # would read as coverage.
+  defp verify_join_inputs(dsl, %Join{left_over: nil, right_over: nil} = j) do
+    if j.over do
+      :ok
+    else
+      error(
+        dsl,
+        "declares a `join` with no input: name `over:` (ONE input, split into sides by " <>
+          "`left:`/`right:`) or `left_over:` + `right_over:` (TWO inputs, each read and " <>
+          "scoped independently)."
+      )
+    end
+  end
+
+  defp verify_join_inputs(dsl, %Join{} = j) do
+    cond do
+      j.over ->
+        error(
+          dsl,
+          "declares both `over:` and `left_over:`/`right_over:` on one `join`. Those are " <>
+            "the one-input and two-input forms — pick one. `over:` reads a single node " <>
+            "and splits it by `left:`/`right:`; `left_over:`/`right_over:` read two nodes."
+        )
+
+      is_nil(j.left_over) or is_nil(j.right_over) ->
+        missing = if is_nil(j.left_over), do: "left_over:", else: "right_over:"
+
+        error(
+          dsl,
+          "declares only one half of a two-input `join` — #{missing} is missing. A join " <>
+            "correlates two sides; with one node use `over:` and split it by `left:`/`right:`."
+        )
+
+      true ->
+        :ok
+    end
+  end
 
   defp verify_generic_action(dsl, action, label) do
     case Ash.Resource.Info.action(dsl, action) do
@@ -716,7 +764,6 @@ defmodule ReactiveDag.Node.Verifiers.VerifyReactive do
     end
   end
 
-
   defp declarative_group?(g) do
     is_atom(g) or
       (is_list(g) and
@@ -733,8 +780,7 @@ defmodule ReactiveDag.Node.Verifiers.VerifyReactive do
         {:cont, :ok}
 
       {:count, bad}, :ok ->
-        {:halt,
-         error(dsl, "`count:` takes the destination attribute (an atom), got #{inspect(bad)}")}
+        {:halt, error(dsl, "`count:` takes the destination attribute (an atom), got #{inspect(bad)}")}
 
       {kind, spec}, :ok ->
         cond do
