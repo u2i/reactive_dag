@@ -47,7 +47,8 @@ defmodule ReactiveDag.MixProject do
         "guides/sources.md",
         "guides/seams.md",
         "README.md",
-        "docs/adr-001-reactive-dag-library.md"
+        "docs/adr-001-reactive-dag-library.md",
+        "docs/adr-002-scoped-drains-and-dependent-slices.md"
       ],
       groups_for_extras: [
         Guides: ~r/guides\/.*/,
