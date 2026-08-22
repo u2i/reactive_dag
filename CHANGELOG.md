@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.17.0-rc.42](https://github.com/u2i/reactive_dag/compare/v0.17.0-rc.41...v0.17.0-rc.42) (2026-08-22)
+
+
+### Features
+
+* `graph(resources, tenant: t)` — one tenant's plan ([#190](https://github.com/u2i/reactive_dag/issues/190)) ([dd62b19](https://github.com/u2i/reactive_dag/commit/dd62b19943d1480f6c15f335a7c0039c996d6b50))
+* the frontier carries a tenant ([#187](https://github.com/u2i/reactive_dag/issues/187)) ([9798b20](https://github.com/u2i/reactive_dag/commit/9798b20c7a2a08b50af75dceb708b690c64ef3d5))
+
+
+### Bug Fixes
+
+* drop the abandoned frontier-partition test ([#192](https://github.com/u2i/reactive_dag/issues/192)) ([51e232f](https://github.com/u2i/reactive_dag/commit/51e232fb2bc521924148439cebe5879ca1080a52))
+
 ## [0.17.0-rc.41](https://github.com/u2i/reactive_dag/compare/v0.17.0-rc.40...v0.17.0-rc.41) (2026-08-19)
 
 
