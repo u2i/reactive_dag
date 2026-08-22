@@ -226,7 +226,7 @@ defmodule ReactiveDag.Drain do
   end
 
   defp drain_pass(plan, opts, passes, cause, steps, t0, failed) do
-    case Frontier.next_cell(plan.depths, failed) do
+    case Frontier.next_cell(plan.depths, failed, Plan.frontier_opts(plan)) do
       nil ->
         {:ok,
          %Report{
@@ -277,7 +277,7 @@ defmodule ReactiveDag.Drain do
     # test `keys == ["*"]` to mean "recompute the whole cell", so a stray "*"
     # riding alongside real keys must collapse — otherwise the whole-cell branch
     # is missed and the specific keys are processed as if "*" were a real key.
-    entries = Frontier.claim_with_priors(cell_id)
+    entries = Frontier.claim_with_priors(cell_id, Plan.frontier_opts(plan))
     claimed = Enum.map(entries, &elem(&1, 0))
     keys = if "*" in claimed, do: ["*"], else: claimed
 
@@ -512,15 +512,23 @@ defmodule ReactiveDag.Drain do
   # :all — the cell was claimed whole; every parent recomputes whole too.
   defp propagate(plan, cell_id, :all, _opts, _priors) do
     parents = Map.get(plan.parents, cell_id, [])
-    Enum.each(parents, &Frontier.mark_dirty(&1, ["*"], "propagated (all) from #{cell_id}"))
+    opts = Plan.frontier_opts(plan)
+
+    Enum.each(
+      parents,
+      &Frontier.mark_dirty(&1, ["*"], "propagated (all) from #{cell_id}", opts)
+    )
+
     parents
   end
 
   defp propagate(plan, cell_id, changed, _opts, priors) do
     parents = Graph.dirty_parents(plan, cell_id, changed, ReactiveDag.Node.KeyRule, priors)
 
+    opts = Plan.frontier_opts(plan)
+
     Enum.each(parents, fn {parent_id, keys} ->
-      Frontier.mark_dirty(parent_id, keys, "propagated from #{cell_id}")
+      Frontier.mark_dirty(parent_id, keys, "propagated from #{cell_id}", opts)
     end)
 
     Enum.map(parents, fn {parent_id, _keys} -> parent_id end)
