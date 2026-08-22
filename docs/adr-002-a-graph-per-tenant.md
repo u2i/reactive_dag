@@ -218,11 +218,28 @@ What `tenant` then needs is much smaller:
   arriving from the other direction and now justified), or cell ids carry the
   tenant after all.
 
-That trade — tenant in the frontier vs tenant in the cell id — is the design
-question this change turns on, and it should be measured rather than guessed.
-Carrying it in the frontier keeps authored ids clean and every plan identical;
-carrying it in the id keeps the frontier untouched and makes a dirty row
-self-describing. Both are viable; they were conflated in earlier drafts.
+**Decided: the frontier carries the tenant.** Authored cell ids stay clean and
+every tenant's plan is identical, which is what makes "the same graph, N times"
+true rather than approximately true.
+
+A second finding settles it beyond preference. Attempting Change 0 on its own
+(filtering `next_cell/2` to the plan's cells) breaks a deliberate behaviour the
+suite pins: the drain claims an unknown cell, logs it and drops it
+(`drain.ex:292`), because *"claiming, not skipping, is what prevents the same row
+from being re-selected forever"*. Without the tenant, "not in this plan" and
+"owned by nobody" are the same observation, so any fix trades one failure for
+another:
+
+| | stale/orphaned rows | another plan's live work |
+|---|---|---|
+| today | self-clean (claimed and dropped) | **consumed by the wrong drain** |
+| filter `next_cell` | **stay dirty forever** | safe |
+
+A tenant column dissolves the trade, because the two cases become
+distinguishable: a row tagged for another tenant is FOREIGN — skip it, it has an
+owner. A row whose `cell_id` no plan declares is ORPHANED — claim, log, drop, as
+today. That is why this is not the first draft's `scope` column re-proposed on
+preference: it is the only shape in which both behaviours are correct at once.
 
 A node declaring both `tenant` and `for_each` is now unproblematic: `for_each`
 expands within whichever plan the node belongs to, and the two do not interact.
@@ -340,12 +357,7 @@ measurement.
    an earlier draft proposed is not needed for this.
 4. **Who lists the tenants for the dashboard switch?** Library (it knows member
    ids) or host (it knows names)?
-5. **Tenant in the frontier, or in the cell id?** The live question (see Change
-   1). The dirty table is shared across tenants and keyed by `(cell_id, key)`, so
-   one of the two must carry the tenant. A `tenant` column keeps authored ids
-   clean and every plan identical; a suffixed id keeps the frontier untouched and
-   makes a dirty row self-describing.
-6. **How does a resource say it is NOT per-tenant?** A global node is the
+5. **How does a resource say it is NOT per-tenant?** A global node is the
    exception rather than the default, so the declaration should probably be
    opt-out (`global? true`, as Ash spells it) — and a cell that should be
    per-tenant and is not becomes a shared cell every tenant writes to. Worth a
