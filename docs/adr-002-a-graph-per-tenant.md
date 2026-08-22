@@ -18,6 +18,8 @@ The requirement, stated as a decision rather than a preference:
   preclude one, but nothing here depends on supporting it.
 - **A dashboard switches tenant at the top level**, before the existing funnel
   (question → cell → view).
+- **One tenant dimension**, not several. Decided; a second structural dimension
+  is not in scope.
 
 ### Why a tenant column is not enough
 
@@ -183,26 +185,47 @@ tenancy is a single named dimension rather than an arbitrary population.
   from it would repeat that: it asserts query-layer behaviour the DAG does not
   want. Ash's own tenancy stays a read-path convenience, adopted separately.
 
-#### `tenant` and `for_each` are orthogonal
+#### `tenant` is NOT `for_each` — separate graphs, not more cells
 
-They answer different questions and both should exist:
+**Decided.** These are different mechanisms, and the difference is the whole
+point:
 
 | | question | effect |
 |---|---|---|
-| `tenant` | which GRAPH does this cell belong to? | partitions into separate plans, drained concurrently |
-| `for_each` | how many cells does this node expand to WITHIN a graph? | fans out inside one plan, under a shared upstream |
+| `tenant` | which GRAPH does this cell belong to? | N separate plans, drained concurrently |
+| `for_each` | how many cells within ONE graph? | more cells in one plan, one drain |
 
-`for_each` is the within-tenant case: many cells over one population, sharing an
-upstream, all drained by the same single-threaded drain. `tenant` is the
-across-graph case. A node may want both — per-tenant, and within that per member
-of some population — which means the two dimensions compose and cell ids would
-need to carry both (`<base>.<tenant>.<member>`, or a distinct axis).
+`for_each` expands a node into several cells inside a single plan, sharing an
+upstream and drained by one single-threaded drain — the within-tenant case.
+`tenant` does not expand anything: it says which plan a node's cell belongs to.
 
-Worth stating as a limit: `for_each` takes ONE population per node
-(`node.ex:1417`), and its member id is what composes into the cell id. So
-composing the two is a real design step, not a free consequence — and the
-simplest first version may forbid declaring both on one node until a case needs
-it.
+**This simplifies Change 1 considerably.** If a tenant is a separate plan, then
+within that plan there is only one `shell` and one `docs` — so the cell id needs
+no tenant suffix at all, and `shell` reads `docs` exactly as it does today. No
+instance-local edge rewriting, no `<base>.<tenant>` ids, and the `for_each`
+composition problem disappears because the two features never touch the same
+mechanism.
+
+What `tenant` then needs is much smaller:
+
+- **`graph/2` builds one plan per tenant.** The host asks for a tenant's plan;
+  the library lowers the tenanted resources for that tenant and the global ones
+  alongside them. Cell ids stay as authored.
+- **Cell ids must be unique per FRONTIER, not per plan.** This is the one real
+  constraint. The dirty table is keyed by `(cell_id, key)` and is shared across
+  tenants, so two tenants' `shell` cells would collide there. Either the frontier
+  gains the tenant (a `tenant` column, which is the first draft's `scope` idea
+  arriving from the other direction and now justified), or cell ids carry the
+  tenant after all.
+
+That trade — tenant in the frontier vs tenant in the cell id — is the design
+question this change turns on, and it should be measured rather than guessed.
+Carrying it in the frontier keeps authored ids clean and every plan identical;
+carrying it in the id keeps the frontier untouched and makes a dirty row
+self-describing. Both are viable; they were conflated in earlier drafts.
+
+A node declaring both `tenant` and `for_each` is now unproblematic: `for_each`
+expands within whichever plan the node belongs to, and the two do not interact.
 
 ### Change 2 — a scanner on a generator node is per-instance
 
@@ -317,15 +340,12 @@ measurement.
    an earlier draft proposed is not needed for this.
 4. **Who lists the tenants for the dashboard switch?** Library (it knows member
    ids) or host (it knows names)?
-5. **One tenant dimension, or several?** Ash has one tenant, which is simpler and
-   matches the requirement here. If a second STRUCTURAL dimension is ever likely
-   — each combination its own graph — that changes the design and is cheaper to
-   decide now.
-6. **May one node declare both `tenant` and `for_each`?** They compose in
-   principle (per-tenant, and per-population within it) but cell ids would have
-   to carry both. Forbidding it until a case needs it is a defensible first
-   version.
-7. **How does a resource say it is NOT per-tenant?** A global node is the
+5. **Tenant in the frontier, or in the cell id?** The live question (see Change
+   1). The dirty table is shared across tenants and keyed by `(cell_id, key)`, so
+   one of the two must carry the tenant. A `tenant` column keeps authored ids
+   clean and every plan identical; a suffixed id keeps the frontier untouched and
+   makes a dirty row self-describing.
+6. **How does a resource say it is NOT per-tenant?** A global node is the
    exception rather than the default, so the declaration should probably be
    opt-out (`global? true`, as Ash spells it) — and a cell that should be
    per-tenant and is not becomes a shared cell every tenant writes to. Worth a
