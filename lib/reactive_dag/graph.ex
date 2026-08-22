@@ -16,7 +16,17 @@ defmodule ReactiveDag.Graph do
     by_id = Map.new(cells, &{&1.id, &1})
     validate_inputs!(cells, by_id)
 
-    %Plan{cells: by_id, parents: build_parents(cells), depths: build_depths(by_id)}
+    # `tenant` explicitly, though it equals the struct default. Omitting it makes
+    # the INFERRED type of this expression narrower than `%Plan{}` — Elixir's
+    # type checker reports the omitted field as absent rather than defaulted — so
+    # a host with `def f(plan \\ build(...))` and a `%Plan{}` spec got an
+    # "incompatible types" warning it could do nothing about.
+    %Plan{
+      cells: by_id,
+      parents: build_parents(cells),
+      depths: build_depths(by_id),
+      tenant: "*"
+    }
   end
 
   @doc """
