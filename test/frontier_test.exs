@@ -14,8 +14,8 @@ defmodule ReactiveDag.FrontierTest do
 
     def query!("INSERT INTO " <> _, params) do
       params
-      |> Enum.chunk_every(5)
-      |> Enum.each(fn [cell, key, _reason, _at, _prior] ->
+      |> Enum.chunk_every(6)
+      |> Enum.each(fn [cell, _tenant, key, _reason, _at, _prior] ->
         Agent.update(__MODULE__, &MapSet.put(&1, {cell, key}))
       end)
 
@@ -27,7 +27,7 @@ defmodule ReactiveDag.FrontierTest do
       %{rows: Enum.map(ids, &[&1])}
     end
 
-    def query!("DELETE FROM " <> _, [cell]) do
+    def query!("DELETE FROM " <> _, [cell | _tenant]) do
       keys =
         Agent.get_and_update(__MODULE__, fn set ->
           {mine, rest} = Enum.split_with(set, fn {c, _k} -> c == cell end)

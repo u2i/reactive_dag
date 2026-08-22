@@ -42,30 +42,55 @@ defmodule ReactiveDag.Frontier do
   deliberate: if a row is written twice before a drain, the oldest prior state
   is the one that names the unit it started in.
   """
-  @spec mark_dirty(String.t(), [key() | {key(), map() | nil}], String.t() | nil) :: :ok
-  def mark_dirty(_cell, [], _reason), do: :ok
+  @spec mark_dirty(String.t(), [key() | {key(), map() | nil}], String.t() | nil, keyword()) :: :ok
+  def mark_dirty(cell, keys, reason, opts \\ [])
 
-  def mark_dirty(cell, keys, reason) do
+  def mark_dirty(_cell, [], _reason, _opts), do: :ok
+
+  def mark_dirty(cell, keys, reason, opts) do
     entries = keys |> Enum.map(&normalize_entry/1) |> Enum.uniq_by(&elem(&1, 0))
     now = DateTime.utc_now()
+    tenant = tenant(opts)
 
     placeholders =
       entries
       |> Enum.with_index()
       |> Enum.map_join(", ", fn {_e, i} ->
-        b = i * 5
-        "($#{b + 1}, $#{b + 2}, $#{b + 3}, $#{b + 4}, $#{b + 5})"
+        b = i * 6
+        "($#{b + 1}, $#{b + 2}, $#{b + 3}, $#{b + 4}, $#{b + 5}, $#{b + 6})"
       end)
 
-    params = Enum.flat_map(entries, fn {k, prior} -> [cell, k, reason, now, prior] end)
+    params =
+      Enum.flat_map(entries, fn {k, prior} -> [cell, tenant, k, reason, now, prior] end)
 
     query!(
-      "INSERT INTO #{dirty()} (cell_id, key, reason, enqueued_at, prior) " <>
-        "VALUES #{placeholders} ON CONFLICT (cell_id, key) DO NOTHING",
+      "INSERT INTO #{dirty()} (cell_id, tenant, key, reason, enqueued_at, prior) " <>
+        "VALUES #{placeholders} ON CONFLICT (tenant, cell_id, key) DO NOTHING",
       params
     )
 
     :ok
+  end
+
+  @doc """
+  The tenant a call is about: `opts[:tenant]`, else `"*"` (untenanted).
+
+  `"*"` rather than `nil` because the coalescing unique index backs
+  `mark_dirty`'s ON CONFLICT and Postgres treats NULLs as DISTINCT in a unique
+  index — a nullable column would stop untenanted marks coalescing and grow a
+  queue row per mark. `"*"` is also already this library's spelling for "the
+  whole thing" in claim sets, so the vocabulary is not new.
+
+  Normalised in ONE place so a caller passing `nil`, omitting the option, or
+  passing an atom all mean the same row.
+  """
+  @spec tenant(keyword()) :: String.t()
+  def tenant(opts) do
+    case Keyword.get(opts, :tenant) do
+      nil -> "*"
+      t when is_binary(t) -> t
+      t -> to_string(t)
+    end
   end
 
   defp normalize_entry({key, prior}) when is_map(prior) or is_nil(prior), do: {key, prior}
@@ -77,31 +102,53 @@ defmodule ReactiveDag.Frontier do
   A READ: unlike `claim/1` it consumes nothing, so it is safe to call for
   reporting (`ReactiveDag.Insights.pending/1`) while a drain is running.
   """
-  @spec dirty_cells() :: [String.t()]
-  def dirty_cells do
-    %{rows: rows} = query!("SELECT DISTINCT cell_id FROM #{dirty()}", [])
+  @spec dirty_cells(keyword()) :: [String.t()]
+  def dirty_cells(opts \\ []) do
+    %{rows: rows} =
+      query!("SELECT DISTINCT cell_id FROM #{dirty()} WHERE tenant = $1", [tenant(opts)])
+
     Enum.map(rows, fn [id] -> id end)
   end
 
   @doc """
-  The dirty cell with the smallest depth, or nil if the frontier is empty.
+  The dirty cell with the smallest depth **of the cells in `depths`**, or nil.
 
   `except` skips cells a caller has already tried this run. The drain uses it
   for a cell whose recompute FAILED: the failure rolled back, so its keys are
   still dirty and `next_cell` would hand back the same cell forever. Excluding
   it lets the rest of the cascade drain and leaves the retry to the next run.
+
+  ## Tenant, and the cell this plan does not know
+
+  Reads only this tenant's rows (`tenant:`, default `"*"`). One frontier serves
+  every plan in the application, and that is what makes the tenant load-bearing
+  rather than bookkeeping: without it, "a cell this plan does not know" and "a
+  cell nobody owns" are the same observation, and they need OPPOSITE handling.
+
+    * **Foreign** — a row belonging to another tenant. Never returned, never
+      touched. It has an owner; the frontier is a set, so it is still there for
+      the drain that can recompute it.
+    * **Orphaned** — a row in THIS tenant whose `cell_id` the plan does not
+      declare: a renamed or removed cell, a source writing an old leaf id. Still
+      returned, so the drain can claim it, log it and drop it (`ReactiveDag.Drain`
+      does exactly that). Claiming rather than skipping is what stops the row
+      being re-selected on every pass forever.
+
+  So the tenant filter is in SQL and the plan filter is not: an unknown cell of
+  ours is work to clear, and another tenant's cell is not ours to look at.
   """
-  @spec next_cell(%{String.t() => non_neg_integer()}, [String.t()]) :: String.t() | nil
-  def next_cell(depths, except \\ []) do
-    case Enum.reject(dirty_cells(), &(&1 in except)) do
+  @spec next_cell(%{String.t() => non_neg_integer()}, [String.t()], keyword()) ::
+          String.t() | nil
+  def next_cell(depths, except \\ [], opts \\ []) do
+    case Enum.reject(dirty_cells(opts), &(&1 in except)) do
       [] -> nil
       ids -> Enum.min_by(ids, &Map.get(depths, &1, 1_000_000))
     end
   end
 
   @doc "Atomically claim (delete-returning) all dirty keys for `cell`."
-  @spec claim(String.t()) :: [key()]
-  def claim(cell), do: claim_with_priors(cell) |> Enum.map(&elem(&1, 0))
+  @spec claim(String.t(), keyword()) :: [key()]
+  def claim(cell, opts \\ []), do: claim_with_priors(cell, opts) |> Enum.map(&elem(&1, 0))
 
   @doc """
   `claim/1`, but returning `{key, prior}` pairs — the snapshot each key was
@@ -111,17 +158,26 @@ defmodule ReactiveDag.Frontier do
   which is the only thing that survives a delete.
   """
   @spec claim_with_priors(String.t()) :: [{key(), map() | nil}]
-  def claim_with_priors(cell) do
+  def claim_with_priors(cell, opts \\ []) do
+    # Scoped to ONE tenant: an unscoped claim would consume every tenant's keys
+    # for this cell and recompute them under this tenant's plan. That is the
+    # failure the tenant column exists to prevent, and it is silent — the other
+    # tenants' work is simply gone, and their next drain finds nothing to do.
     %{rows: rows} =
-      query!("DELETE FROM #{dirty()} WHERE cell_id = $1 RETURNING key, prior", [cell])
+      query!(
+        "DELETE FROM #{dirty()} WHERE cell_id = $1 AND tenant = $2 RETURNING key, prior",
+        [cell, tenant(opts)]
+      )
 
     Enum.map(rows, fn [k, prior] -> {k, prior} end)
   end
 
   @doc "True when nothing is dirty."
-  @spec empty?() :: boolean()
-  def empty? do
-    %{rows: [[n]]} = query!("SELECT COUNT(*) FROM #{dirty()}", [])
+  @spec empty?(keyword()) :: boolean()
+  def empty?(opts \\ []) do
+    %{rows: [[n]]} =
+      query!("SELECT COUNT(*) FROM #{dirty()} WHERE tenant = $1", [tenant(opts)])
+
     n == 0
   end
 

@@ -65,16 +65,37 @@ def change do
   # pending recompute work, claimed-as-deleted by the drain
   create table(:my_dirty, primary_key: false) do
     add :cell_id, :string, null: false
+    # which GRAPH this work belongs to; "*" when you run one. NOT NULL with a
+    # sentinel rather than nullable — see below.
+    add :tenant, :string, null: false, default: "*"
     add :key, :string, null: false
     add :reason, :string
     add :enqueued_at, :utc_datetime_usec
     add :prior, :map
   end
 
-  # UNIQUE is load-bearing: mark_dirty coalesces via ON CONFLICT (cell_id, key).
-  create unique_index(:my_dirty, [:cell_id, :key])
+  # UNIQUE is load-bearing: mark_dirty coalesces via
+  # ON CONFLICT (tenant, cell_id, key). `tenant` leads because every read is
+  # tenant-first. And it is why the column cannot be nullable: Postgres treats
+  # NULLs as DISTINCT in a unique index, so a NULL tenant would stop marks
+  # coalescing and grow a row per mark.
+  create unique_index(:my_dirty, [:tenant, :cell_id, :key])
 end
 ```
+
+### Already running an older version?
+
+`up/1` is `create_if_not_exists`, so re-running it will not add the `tenant`
+column to a table that already exists. There is a migration for that:
+
+```elixir
+def up, do: ReactiveDag.Migration.add_tenant()
+def down, do: ReactiveDag.Migration.remove_tenant()
+```
+
+Existing rows become `"*"`, which is what they already were. Nothing else
+changes: every function takes `tenant:` as an option and defaults to `"*"`, so a
+host running one graph carries on unchanged.
 
 **Everything else is your own resources.** A node's results live in the node's
 resource, with that resource's migration — there is no second table shadowing
