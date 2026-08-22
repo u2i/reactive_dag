@@ -67,9 +67,40 @@ defmodule ReactiveDag.Op do
 
   ## Failure
 
-  Raise. Do not return `{:error, reason}`: the drain has already claimed these
-  keys, and a swallowed failure marks them clean over work that did not happen.
+  Two channels, and they mean different things.
+
+  **Raise** for "something is wrong with the graph" — a missing module, a
+  malformed declaration, a bug. The drain has already claimed these keys, so a
+  SWALLOWED failure would mark them clean over work that did not happen.
+
+  **Return `{:error, reason}`** for a contained failure: this cell could not
+  recompute, the rest of the cascade should carry on, and the next drain retries.
+  The savepoint rolls the claim back, so the keys stay dirty. This must be a
+  RETURNED value rather than an exception — an exception inside a nested
+  transaction aborts the outer one, so only this shape can be isolated.
+
+  ## The tenant
+
+  A host running the same graph for several tenants implements `recompute/3`
+  instead, and receives the plan's tenant in `opts[:tenant]`:
+
+      @impl true
+      def recompute(cell, keys, opts) do
+        # ... write rows with `tenant: opts[:tenant]`, or pass `opts` to
+        # `ReactiveDag.Node.Payload.upsert_row/5`, which handles it.
+      end
+
+  Both arities are optional and the library calls whichever the module exports,
+  preferring `/3`. An op writing its own rows CANNOT get the tenant any other
+  way: the library has no changeset of its own to set it on, which is the whole
+  reason this arity exists. An op implementing only `/2` keeps working untouched
+  and is correct for any host with one graph.
   """
   @callback recompute(cell :: Cell.t(), keys :: [key()]) ::
-              {:ok, [key()]} | {:ok, [key()], meta()}
+              {:ok, [key()]} | {:ok, [key()], meta()} | {:error, term()}
+
+  @callback recompute(cell :: Cell.t(), keys :: [key()], opts :: keyword()) ::
+              {:ok, [key()]} | {:ok, [key()], meta()} | {:error, term()}
+
+  @optional_callbacks recompute: 2, recompute: 3
 end
