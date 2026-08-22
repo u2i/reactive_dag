@@ -291,6 +291,213 @@ defmodule ReactiveDag.AshTenancyTest do
     end
   end
 
+  describe "per_key and aggregate — the two paths that were unthreaded" do
+    # Both delegate to submodules that write rows, and both were shipped with a
+    # TODO. `PerKey` has FOUR tenant points (the over-read, the existing-
+    # fingerprint read, the action write, and the payload upsert); `Aggregate`
+    # has two. A gap in any one writes a row into the wrong tenant or reads
+    # another tenant's fingerprints as this tenant's.
+    defmodule Summary do
+      use Ash.Resource,
+        domain: Domain,
+        data_layer: Ash.DataLayer.Ets,
+        extensions: [ReactiveDag.Node]
+
+      ets do
+        private?(true)
+      end
+
+      multitenancy do
+        strategy :attribute
+        attribute :municipality_id
+      end
+
+      attributes do
+        uuid_primary_key(:id)
+        attribute :key, :string, allow_nil?: false, public?: true
+        attribute :municipality_id, :string, public?: true
+        attribute :summary, :string, public?: true
+        attribute :fingerprint, :string, public?: true
+      end
+
+      identities do
+        identity :by_tenant_key, [:municipality_id, :key], pre_check_with: Domain
+      end
+
+      actions do
+        defaults [:read, :destroy]
+
+        create :upsert do
+          upsert?(true)
+          upsert_identity(:by_tenant_key)
+          accept([:key, :municipality_id, :summary, :fingerprint])
+        end
+
+        action :summarise, :map do
+          argument :text, :string
+          run(fn input, _ -> {:ok, %{"summary" => "sum:" <> (input.arguments.text || "")}} end)
+        end
+      end
+
+      reactive do
+        id(:summary)
+        op(:map)
+        payload_key(:key)
+
+        recompute_by(:key, to: :meeting, from: :key)
+
+        per_key(:summarise,
+          args: [text: :title],
+          fingerprint: [:title],
+          into: [summary: :summary]
+        )
+      end
+    end
+
+    # An `aggregate` node: the datastore groups over a has_many, and the library
+    # writes each parent's aggregate values. Both the read and the write need the
+    # tenant — the read so it does not fold another tenant's children in, the
+    # write so the row lands in the right tenant.
+    defmodule Reading do
+      use Ash.Resource,
+        domain: Domain,
+        data_layer: Ash.DataLayer.Ets,
+        extensions: [ReactiveDag.Node]
+
+      ets do
+        private?(true)
+      end
+
+      multitenancy do
+        strategy :attribute
+        attribute :municipality_id
+      end
+
+      attributes do
+        uuid_primary_key(:id)
+        attribute :key, :string, allow_nil?: false, public?: true
+        attribute :municipality_id, :string, public?: true
+        attribute :plant_key, :string, public?: true
+        attribute :flow, :integer, public?: true
+      end
+
+      actions do
+        defaults [:read, :destroy]
+
+        create :create do
+          accept([:key, :municipality_id, :plant_key, :flow])
+        end
+      end
+
+      reactive do
+        id(:readings)
+        op(:source)
+        leaf?(true)
+      end
+    end
+
+    defmodule Plant do
+      use Ash.Resource,
+        domain: Domain,
+        data_layer: Ash.DataLayer.Ets,
+        extensions: [ReactiveDag.Node]
+
+      ets do
+        private?(true)
+      end
+
+      multitenancy do
+        strategy :attribute
+        attribute :municipality_id
+      end
+
+      attributes do
+        uuid_primary_key(:id)
+        attribute :key, :string, allow_nil?: false, public?: true
+        attribute :municipality_id, :string, public?: true
+        attribute :total, :integer, public?: true
+      end
+
+      identities do
+        identity :by_tenant_key, [:municipality_id, :key], pre_check_with: Domain
+      end
+
+      relationships do
+        has_many :readings, ReactiveDag.AshTenancyTest.Reading do
+          source_attribute :key
+          destination_attribute :plant_key
+        end
+      end
+
+      actions do
+        defaults [:read, :destroy]
+
+        create :upsert do
+          upsert?(true)
+          upsert_identity(:by_tenant_key)
+          accept([:key, :municipality_id, :total])
+        end
+      end
+
+      reactive do
+        id(:plants)
+        op(:fold)
+        payload_key(:key)
+        aggregate(over: :readings, sum: [flow: :total])
+      end
+    end
+
+    test "`aggregate` folds only its own tenant's children" do
+      # Same parent key in both tenants, different children. If the read is
+      # unscoped the fold sums BOTH tenants' readings into one total — a wrong
+      # number rather than an error, which is the worst kind.
+      for {t, flow} <- [{"a", 10}, {"b", 99}] do
+        Plant
+        |> Ash.Changeset.for_create(:upsert, %{key: "p1", total: 0}, tenant: t)
+        |> Ash.create!()
+
+        Reading
+        |> Ash.Changeset.for_create(:create, %{key: "r-" <> t, plant_key: "p1", flow: flow}, tenant: t)
+        |> Ash.create!()
+      end
+
+      cell = ReactiveDag.Node.graph([Reading, Plant]).cells["plants"]
+      {:ok, _changed} = ReactiveDag.Node.Recompute.recompute(cell, ["*"], tenant: "a")
+
+      assert [%{total: 10}] = Ash.read!(Plant, tenant: "a"),
+             "A's total is A's reading alone, not 109"
+
+      assert [%{total: 0}] = Ash.read!(Plant, tenant: "b"), "B was not recomputed at all"
+    end
+
+    test "`per_key` writes into the plan's tenant, and skips per tenant" do
+      Payload.upsert(Meeting, :key, "m1", %{title: "a-title"}, :upsert, tenant: "a")
+      Payload.upsert(Meeting, :key, "m1", %{title: "b-title"}, :upsert, tenant: "b")
+
+      cell = ReactiveDag.Node.graph([Meeting, Summary]).cells["summary"]
+
+      {:ok, changed, meta} = ReactiveDag.Node.Recompute.recompute(cell, ["*"], tenant: "a")
+      assert changed == ["m1"]
+      assert meta.called == 1
+
+      assert [%{summary: "sum:a-title", municipality_id: "a"}] =
+               Ash.read!(Summary, tenant: "a")
+
+      assert Ash.read!(Summary, tenant: "b") == [], "nothing landed in B"
+
+      # B's own pass must CALL, not skip: A's fingerprint is not B's. An
+      # unscoped fingerprint read would find A's and skip the work.
+      {:ok, _changed, meta_b} = ReactiveDag.Node.Recompute.recompute(cell, ["*"], tenant: "b")
+
+      assert meta_b.called == 1, "B's row is unseen work, not a cache hit"
+      assert [%{summary: "sum:b-title"}] = Ash.read!(Summary, tenant: "b")
+
+      # ...and A re-running now SKIPS, because its own fingerprint matches.
+      {:ok, _c, meta_a2} = ReactiveDag.Node.Recompute.recompute(cell, ["*"], tenant: "a")
+      assert meta_a2.skipped == 1
+    end
+  end
+
   describe "an untenanted resource is untouched" do
     test "writes and reads work with no tenant at all" do
       assert Payload.upsert(Shared, :key, "s1", %{title: "x"}, :upsert) == :created
