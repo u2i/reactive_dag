@@ -118,6 +118,84 @@ Step 3 is the cost — a second query where a label needed one. Accepted for
 uniformity: one kind of key, no grammar, nothing to parse, no `"|"` convention
 for a host to collide with.
 
+### How a cell key maps to a row: a declared ladder
+
+A cell key names a unit of work. Writing that unit's row means answering "which
+row is this?" — and today the library ANSWERS BY INFERENCE, which is what breaks
+under a UUID primary key:
+
+  * `payload_key` names a column, and the key is written into it;
+  * a composite primary key means the row IS its identity, so the key is the
+    identity serialised in primary-key order;
+  * otherwise `derived_payload_key/1` returns the single-attribute primary key —
+    which under a UUID PK is `:id`, so the library writes cell keys into the
+    UUID column. Silently.
+
+Two fixes were considered and both are worse than declaring the mapping.
+*Refuse a UUID PK without an explicit `payload_key`* only guards the ambiguity:
+change detection would still look up `WHERE key = …` while the insert conflicts
+on `(tenant, key)` — two definitions of "the same row" in one function, which is
+exactly the bug that made a second tenant's first write report `:changed` rather
+than `:created`. *Read `upsert_identity` off the action* removes that drift but
+is still inference: it has nothing to say when an action declares no identity,
+or when several exist.
+
+So the mapping becomes a declaration, on the same ladder shape the library uses
+for computation — declarative rungs first, an escape hatch last:
+
+| the key is… | rung | the author writes |
+|---|---|---|
+| the row's own id (often an upstream UUID passed through) | **uuid** | the key maps straight to the PK |
+| the values of some columns, looked up | **simple** | the columns that identify the row |
+| a judgement about whether two observations are the same thing | **function** | a resolver, one per entity |
+
+**Rung 1 (uuid)** is the pass-through case. Upstream hands us a UUID, or the
+node mints one; the key IS the id and no lookup is needed.
+
+**Rung 2 (simple)** is the common case and what the working fixture already
+does by hand: `identity :by_tenant_key, [:municipality_id, :key]` plus
+`upsert_identity` on the action. Declaring it here means change detection and
+the insert use the same fields BY CONSTRUCTION rather than by the author keeping
+two places in step.
+
+**Rung 3 (function)** exists because the hard case is real, not hypothetical. A
+host's meeting table already holds two rows sharing `(date, board)`, so that
+tuple does not identify a meeting — it needs a time, or a dedup rule, and
+"is this the same meeting?" is a judgement. Under rungs 1–2 that logic lives in
+each op and drifts. As a named resolver it is one place per entity, and it is
+where the source-reference story pays off: a new upstream id for something we
+already hold is precisely what the resolver adjudicates.
+
+This retires `payload_key` as the mechanism. Rung 1 says what
+`payload_key`-plus-single-attribute-PK said; rung 2 says what a composite PK
+said. Keeping the key in a column becomes a separate, optional question
+("store the unit name for debugging?") rather than the means of finding the row.
+
+#### Open: the resolver's contract
+
+Rungs 1 and 2 are pure — `(cell_key, attrs) -> identity_map` — and need nothing
+from the database. Rung 3 may not be: deciding "do I already have a meeting for
+this board on this date, within an hour of this time?" means CONSULTING the
+stored rows, so the honest return is a row or nil rather than a map.
+
+Those are different contracts, and picking one shapes the feature:
+
+  * `(cell_key, attrs) -> identity_map` keeps all three rungs uniform and pure,
+    and cannot express the fuzzy case.
+  * `(cell_key, attrs) -> row | nil` expresses it, and makes rung 3 responsible
+    for its own query — which the library then cannot scope by tenant, so the
+    resolver must be handed the tenant and trusted with it.
+
+Unresolved. Worth deciding before the naming, since the second shape makes the
+rung an escape hatch in the `compute Mod` sense — the host takes over and the
+library stops checking.
+
+#### Open: the name
+
+`identity` is the obvious word and collides with Ash's own `identities` block,
+which this would often be read alongside. `row_key`, `key_maps_to`, `keyed_by`
+are candidates. It is authored on every resource, so it is worth getting right.
+
 ### What this deliberately does NOT do
 
 `"*"` stays. It is a sentinel compared by string equality
@@ -160,12 +238,15 @@ for a host to collide with.
 
 1. **Does the cell key still get stored on the row?** Useful for debugging
    ("which unit produced this row") even when identity does the lookup. A plain
-   non-identity column, or dropped?
-2. **What is a fold's row identity?** `budget_rollups`' unit is
+   non-identity column, or dropped? Under the declared ladder this is a separate
+   question from finding the row, which is the point.
+2. **The resolver's contract, and the declaration's name** — see the two
+   subsections above. Both block implementation.
+3. **What is a fold's row identity?** `budget_rollups`' unit is
    `(fund, fiscal_year, section, category)`, all already columns. `identity` over
    those with a UUID PK is the natural shape — worth confirming it is what we
    want for derived nodes and not only for leaves.
-3. **Sequencing.** UUID PKs and dropping group labels are separable: the first
+4. **Sequencing.** UUID PKs and dropping group labels are separable: the first
    unblocks tenancy, the second is uniformity. Ship together or in order?
 
 ## Rejected alternatives
@@ -178,5 +259,16 @@ for a host to collide with.
     refining what identifies a thing changes every id. Everything here writes
     through one repo, so a lookup is always available. Use synthetic ids only
     where something specifically needs a lookup-free id.
+  * **Refusing a UUID PK without an explicit `payload_key`.** Guards the
+    ambiguity without removing it: the insert would conflict on the identity
+    while change detection looked up a single column, so the two could disagree
+    — which is the bug that made a second tenant's first write report `:changed`.
+    Also ~40 per-resource edits in the adopting host.
+  * **Inferring the mapping from the action's `upsert_identity`.** Introspectable
+    (`Ash.Resource.Info.action/2` carries it, and `identity/2` resolves the
+    fields), so it needs no new DSL and was tempting. Rejected because it is
+    still inference: silent when an action declares no identity, ambiguous when
+    a resource declares several. This library's own history is against
+    inferring what an author can declare.
   * **Keeping group labels for folds.** The uniformity is worth one extra query,
     and the capability labels uniquely provide is unused.
