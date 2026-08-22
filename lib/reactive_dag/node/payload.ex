@@ -100,7 +100,7 @@ defmodule ReactiveDag.Node.Payload do
     # it (did the WATCHED fields move?), which the verdict cannot answer — a
     # recompute is `:changed` overall the moment any column moves, and the mark
     # must survive when the ones it was about sat still.
-    prior = existing(resource, key_attr, cell_key)
+    prior = existing(resource, key_attr, cell_key, opts)
 
     verdict =
       case prior do
@@ -110,7 +110,7 @@ defmodule ReactiveDag.Node.Payload do
 
     {:ok, _} =
       resource
-      |> Ash.Changeset.for_create(action, attrs)
+      |> Ash.Changeset.for_create(action, attrs, tenant_opts(opts))
       |> Ash.create()
 
     lapse(prior, attrs, resource, cell_key, opts)
@@ -130,7 +130,7 @@ defmodule ReactiveDag.Node.Payload do
   def upsert_identity(resource, identity_fields, row, action \\ :upsert, opts \\ []) do
     attrs = row |> Map.drop([:key]) |> stamp_fingerprint(row, resource, opts)
 
-    prior = existing_by(resource, Map.take(attrs, identity_fields))
+    prior = existing_by(resource, Map.take(attrs, identity_fields), opts)
 
     verdict =
       case prior do
@@ -140,7 +140,7 @@ defmodule ReactiveDag.Node.Payload do
 
     {:ok, _} =
       resource
-      |> Ash.Changeset.for_create(action, attrs)
+      |> Ash.Changeset.for_create(action, attrs, tenant_opts(opts))
       |> Ash.create()
 
     # An identity-keyed node has no key COLUMN — its cell key is the identity's
@@ -309,15 +309,21 @@ defmodule ReactiveDag.Node.Payload do
   Requires a destroy action (default `:destroy`); a resource without one raises
   with the fix, since silently keeping the row would defeat the reconcile.
   """
-  @spec retire(module(), atom() | nil, [atom()] | nil, [String.t()], atom()) :: [String.t()]
-  def retire(resource, key_attr, identity_fields, keys, action \\ :destroy)
-  def retire(_resource, _key_attr, _identity_fields, [], _action), do: []
+  @spec retire(module(), atom() | nil, [atom()] | nil, [String.t()], atom(), keyword()) ::
+          [String.t()]
+  def retire(resource, key_attr, identity_fields, keys, action \\ :destroy, opts \\ [])
+  def retire(_resource, _key_attr, _identity_fields, [], _action, _opts), do: []
 
-  def retire(resource, key_attr, identity_fields, keys, action) do
+  def retire(resource, key_attr, identity_fields, keys, action, opts) do
     ensure_destroy!(resource, action)
 
     Enum.filter(keys, fn key ->
-      case find_row(resource, key_attr, identity_fields, key) do
+      # The lookup is TENANT-SCOPED, and that is the whole safety of this
+      # function under tenancy: an unscoped find would hand back another
+      # tenant's row for the same key and destroy it. Reconciling a partial read
+      # against a total baseline is the shape that produced the two-node join
+      # bug; here it deletes rather than nils.
+      case find_row(resource, key_attr, identity_fields, key, opts) do
         nil ->
           false
 
@@ -328,17 +334,18 @@ defmodule ReactiveDag.Node.Payload do
     end)
   end
 
-  defp find_row(resource, _key_attr, fields, key) when is_list(fields) do
+  defp find_row(resource, _key_attr, fields, key, opts) when is_list(fields) do
     values = String.split(key, "|")
 
     if length(values) == length(fields) do
-      existing_by(resource, fields |> Enum.zip(values) |> Map.new())
+      existing_by(resource, fields |> Enum.zip(values) |> Map.new(), opts)
     else
       nil
     end
   end
 
-  defp find_row(resource, key_attr, _fields, key), do: existing(resource, key_attr, key)
+  defp find_row(resource, key_attr, _fields, key, opts),
+    do: existing(resource, key_attr, key, opts)
 
   defp ensure_destroy!(resource, action) do
     case Ash.Resource.Info.action(resource, action) do
@@ -354,9 +361,10 @@ defmodule ReactiveDag.Node.Payload do
     end
   end
 
-  defp existing_by(resource, identity_map) do
+  defp existing_by(resource, identity_map, opts) do
     resource
     |> Ash.Query.do_filter(Enum.to_list(identity_map))
+    |> scoped(opts)
     |> Ash.read_one()
     |> case do
       {:ok, record} -> record
@@ -364,9 +372,10 @@ defmodule ReactiveDag.Node.Payload do
     end
   end
 
-  defp existing(resource, key_attr, cell_key) do
+  defp existing(resource, key_attr, cell_key, opts) do
     resource
     |> Ash.Query.do_filter([{key_attr, cell_key}])
+    |> scoped(opts)
     |> Ash.read_one()
     |> case do
       {:ok, record} -> record
@@ -425,6 +434,34 @@ defmodule ReactiveDag.Node.Payload do
       _ ->
         attr = opts[:fingerprint_attribute] || Fingerprint.default_attribute()
         {attr, Map.get(attrs, attr)}
+    end
+  end
+
+  # THE tenant seam. `opts[:tenant]` is the PLAN's tenant; everything below hands
+  # it to Ash and lets Ash decide what it means.
+  #
+  # Ash's own `handle_attribute_multitenancy/1` (create.ex, read.ex) reads the
+  # resource's `multitenancy` block, applies its `parse_attribute` MFA and forces
+  # the column — so this library never learns the attribute name. That matters:
+  # naming the column here would break any host whose `parse_attribute` is not
+  # the identity function, and would be a second copy of a fact the resource
+  # already declares.
+  #
+  # A resource declaring no multitenancy ignores the tenant entirely (Ash guards
+  # on `strategy == :attribute`), so passing it is always safe.
+  defp tenant_opts(opts) do
+    case Keyword.get(opts, :tenant) do
+      nil -> []
+      "*" -> []
+      tenant -> [tenant: tenant]
+    end
+  end
+
+  defp scoped(query, opts) do
+    case Keyword.get(opts, :tenant) do
+      nil -> query
+      "*" -> query
+      tenant -> Ash.Query.set_tenant(query, tenant)
     end
   end
 

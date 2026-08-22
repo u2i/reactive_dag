@@ -48,7 +48,8 @@ defmodule ReactiveDag.MixProject do
         "guides/seams.md",
         "README.md",
         "docs/adr-001-reactive-dag-library.md",
-        "docs/adr-002-a-graph-per-tenant.md"
+        "docs/adr-002-a-graph-per-tenant.md",
+        "docs/adr-003-uuid-identity-and-uniform-keys.md"
       ],
       groups_for_extras: [
         Guides: ~r/guides\/.*/,
