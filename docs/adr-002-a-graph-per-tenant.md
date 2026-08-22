@@ -6,17 +6,28 @@ before the library is touched.
 
 ## Context
 
-Cascade covers one municipality. It is about to cover three — Red Hook Village,
-Town of Red Hook, Village of Tivoli. The requirement, stated as a decision
-rather than a preference:
+A host runs one graph. It needs to run the same graph for several **tenants** —
+independent populations that share a topology and share no data.
 
-- **The entire graph is per municipality.** Not one shared graph whose rows carry
-  a municipality column, but three instances of the same topology.
-- **No cell is cross-municipality.** Confirmed; there is no "compare all three"
-  roll-up in scope. Every cell belongs to exactly one municipality.
-- **The dashboard switches tenant at the top level**, before the existing funnel
-  (question → cell → view). You pick a municipality, then ask questions of that
-  municipality's graph.
+The requirement, stated as a decision rather than a preference:
+
+- **The entire graph is per tenant.** Not one shared graph whose rows carry a
+  tenant column, but N instances of the same topology.
+- **A tenant graph is single-threaded; tenants run concurrently.**
+- **No cell spans tenants** in the motivating case. The design should not
+  preclude one, but nothing here depends on supporting it.
+- **A dashboard switches tenant at the top level**, before the existing funnel
+  (question → cell → view).
+
+### Why a tenant column is not enough
+
+The motivating case has keys minted by the upstream a source polls — a vendor id
+from a third-party site, unique within that site and meaningless across sites.
+Two tenants will produce the same key for different things.
+
+That is not unusual; it is the normal situation whenever a leaf's keys come from
+outside. So tenant cannot be only a filter column on a row: it has to reach the
+**frontier**, where units of work are identified, not just the reads.
 
 ### The concurrency model, stated exactly
 
@@ -28,7 +39,7 @@ rather than a preference:
   the loser's work is still there for the winner.
 - **Across graphs: concurrent.** Three tenants, three locks, three drains in
   flight. The shape is
-  `with_lock(fn -> Drain.run(tenant_plan) end, scope: "tivoli")`.
+  `with_lock(fn -> Drain.run(tenant_plan) end, scope: tenant)`.
 
 Two existing properties make this composable rather than a rewrite: the
 transaction/savepoint is **per cell within one drain** (`drain.ex:238-259`), so it
@@ -49,16 +60,9 @@ that set. That is a good property for this design, because membership is
 `cell "x" references unknown input "y"` if a cell's edge points outside the plan.
 A per-tenant plan missing a cell fails at assembly, not silently at drain time.
 
-So "a graph per tenant" means: `plan(municipality)` returns the cells for that
-municipality and nothing else. The question is how each resource says which
-tenant its cells belong to — which is where the blocker below lives.
-
-### The fact that forces per-tenant identity
-
-`meeting_id` looks like `_07252024-459` and is assigned by **AgendaCenter's own
-routing** (`sources/agenda_center_crawler.ex:422` builds it as `"_" <> id` from
-the listing page). It is unique within one municipality's site and says nothing
-across sites. Two municipalities will collide.
+So "a graph per tenant" means: `plan(tenant)` returns the cells for that tenant
+and nothing else. The question is how each resource says which tenant its cells
+belong to — which is where the blocker below lives.
 
 ### Superseded framing
 
@@ -72,11 +76,11 @@ its failure modes are instructive.
 
 `for_each` looks like graph-per-member (`node.ex:1729-1737`):
 
-- A node declaring `for_each :municipalities` builds **no template cell**.
+- A node declaring `for_each :tenants` builds **no template cell**.
   Instead one instance per member, with ids `"<base>.<member.id>"` —
-  `meeting_docs.tivoli`, `meeting_docs.red-hook-village`.
+  `docs.tenant_a`, `docs.tenant_b`.
 - Each member's `meta` map is **stamped onto every cell** in that instance's
-  sub-tree, so an instance carries its own municipality id with no per-cell
+  sub-tree, so an instance carries its own tenant id with no per-cell
   declaration.
 
 And because **the dirty table is keyed by `cell_id`** (`migration.ex:60`),
@@ -84,24 +88,24 @@ distinct instance ids give real isolation for free:
 
 | concern | with instances |
 |---|---|
-| claim isolation | `claim/1`'s cell-wide `DELETE` is *correct* — claiming all of `docs.tivoli`'s keys is exactly right |
+| claim isolation | `claim/1`'s cell-wide `DELETE` is *correct* — claiming all of `docs.tenant_a`'s keys is exactly right |
 | retirement | already per-cell, so no cross-tenant `retire_vanished` risk exists |
 
 No `scope` column. No migration. No change to claim or retirement.
 
 **But `for_each` does not compose, and that is the blocker.** Probed: two
-per-municipality nodes, a leaf and a derived node reading it —
+per-tenant nodes, a leaf and a derived node reading it —
 
 ```elixir
-reactive do: (id :docs;  for_each :municipalities; leaf? true)
-reactive do: (id :shell; for_each :municipalities; depends_on [:docs])
+reactive do: (id :docs;  for_each :tenants; leaf? true)
+reactive do: (id :shell; for_each :tenants; depends_on [:docs])
 
 graph([Docs, Shell], for_each: fetch)
-#=> ** (ArgumentError) cell "shell.tivoli" references unknown input "docs"
+#=> ** (ArgumentError) cell "shell.tenant_a" references unknown input "docs"
 ```
 
 `for_each` rewrites the **cell id** but not the **input references** of a sibling
-instance. `shell.tivoli` still points at the bare `docs`, which no longer exists,
+instance. `shell.tenant_a` still points at the bare `docs`, which no longer exists,
 so `validate_inputs!` raises.
 
 That is not a bug in `for_each` — it is what `for_each` was built for. Its
@@ -122,8 +126,8 @@ Probed: `next_cell/2` is
 
 | frontier state | tenant A's plan picks |
 |---|---|
-| both tenants dirty | `docs.tivoli` — its own, wins on depth |
-| **only tenant B dirty** | **`docs.redhook`** — a foreign cell |
+| both tenants dirty | `docs.tenant_a` — its own, wins on depth |
+| **only tenant B dirty** | **`docs.tenant_b`** — a foreign cell |
 
 `empty?/0` is global too, so A's drain loop does not terminate while B has work.
 
@@ -135,26 +139,70 @@ Fix: filter candidates to the cells in this plan (`Map.keys(depths)`), and give
 `empty?/0` the same filter. No schema change, no scope column. This is the
 prerequisite for everything else here.
 
-### Change 1 — instance-local edges
+### Change 1 — `tenant`, borrowed from Ash's shape
 
-When `X` declares `for_each :pop` and `depends_on [:y]`, and `Y` is **also** a
-generator over the same population, `x.member`'s edge must resolve to `y.member`.
+The problem is that `shell.tenant_a` must read `docs.tenant_a` rather than bare
+`docs`. The first instinct is to annotate the edge — `depends_on [{:docs, per:
+:tenants}]` — one chance to forget per node, on a mistake whose symptom is one
+tenant reading another tenant's data.
 
-The rule needs care, because both behaviours must survive:
+**Ash already solves this problem, and not by annotating edges.** A resource
+declares once that it is tenant-scoped; the tenant then travels in **context**,
+and every relationship traversal inherits it. A resource that is not tenant-
+scoped is global, and mixing the two is a declared property rather than something
+inferred per-edge.
 
-- `:y` is a generator over the same population → resolve to `y.<member>`
-  (instance-local: the per-tenant subgraph).
-- `:y` is not a generator → keep the bare `y` (shared upstream: the existing
-  fan-out shape, which the portal depends on).
-- `:y` is a generator over a *different* population → ambiguous, and should raise
-  rather than guess.
+Borrow that shape:
 
-That last case is why this wants to be explicit rather than inferred. An
-alternative worth weighing: an opt-in marker on the edge
-(`depends_on [{:docs, per: :municipalities}]`) so instance-locality is declared
-rather than derived from whether the target happens to be a generator. The
-library's own history favours the declared form — a silently-wrong edge here
-means a tenant reading another tenant's data, which nothing downstream detects.
+```elixir
+reactive do
+  id :shell
+  tenant :tenants            # this node's cells are per-tenant
+  depends_on [:docs]         # resolves to docs.<tenant> BECAUSE both are tenanted
+end
+```
+
+Edge resolution follows from the two nodes' own declarations:
+
+- target is tenanted → resolve to `<target>.<tenant>` (instance-local)
+- target is global → keep the bare id (a shared upstream)
+- neither node is tenanted → today's behaviour, untouched
+
+Declared once per node, and the ambiguous case that made per-edge inference
+dangerous — a generator over a *different* population — cannot arise, because
+tenancy is a single named dimension rather than an arbitrary population.
+
+**Borrow the shape, do not delegate to Ash.** Two reasons:
+
+- The frontier is raw SQL (`Frontier.query!/2`) and never sees Ash context, so
+  Ash tenancy cannot provide claim isolation. Change 0 is required either way.
+- The cross-node join revert (`b93c69e`) is explicit about the failure mode of
+  over-borrowing: "has_many was the wrong borrowing… it asserts cardinality,
+  loadability, writability and a public API surface; a DAG edge wants exactly one
+  fact from it." Reading an Ash `multitenancy` block and inferring DAG structure
+  from it would repeat that: it asserts query-layer behaviour the DAG does not
+  want. Ash's own tenancy stays a read-path convenience, adopted separately.
+
+#### `tenant` and `for_each` are orthogonal
+
+They answer different questions and both should exist:
+
+| | question | effect |
+|---|---|---|
+| `tenant` | which GRAPH does this cell belong to? | partitions into separate plans, drained concurrently |
+| `for_each` | how many cells does this node expand to WITHIN a graph? | fans out inside one plan, under a shared upstream |
+
+`for_each` is the within-tenant case: many cells over one population, sharing an
+upstream, all drained by the same single-threaded drain. `tenant` is the
+across-graph case. A node may want both — per-tenant, and within that per member
+of some population — which means the two dimensions compose and cell ids would
+need to carry both (`<base>.<tenant>.<member>`, or a distinct axis).
+
+Worth stating as a limit: `for_each` takes ONE population per node
+(`node.ex:1417`), and its member id is what composes into the cell id. So
+composing the two is a real design step, not a free consequence — and the
+simplest first version may forbid declaring both on one node until a case needs
+it.
 
 ### Change 2 — a scanner on a generator node is per-instance
 
@@ -162,26 +210,26 @@ means a tenant reading another tenant's data, which nothing downstream detects.
 scan module. Probed with a generator leaf declaring a scanner:
 
 ```
-reactive_dag: Crawler is declared by 2 nodes (docs.red-hook-village, docs.tivoli).
+reactive_dag: Crawler is declared by 2 nodes (docs.tenant_a, docs.tenant_b).
 ... so the upstream is polled 2 times.
 ```
 
 The check is right for the case it was written for — one crawl producing rows for
 several leaves, where N cells means N redundant polls of one upstream — and
-**inverted for this one**. Three municipalities have three AgendaCenter sites;
-polling three times is the requirement. It should group by `(module, generator)`
+**inverted for this one**. N tenants have N upstreams; polling N times is the
+requirement. It should group by `(module, generator)`
 so cells differing only by member are not a violation, while cells sharing a
 module *without* being instances of one generator still raise.
 
 ### Change 3 — the member stamp reaches `poll/1`
 
-An instance knows which municipality it is (its `meta` stamp), and the crawler
-needs that to crawl the right site. `scan_args` is currently declared statically
-in the DSL (`args: [recent: true, year: &…/0]`).
+An instance knows which tenant it is (its `meta` stamp), and a scanner needs that
+to poll the right upstream. `scan_args` is currently declared statically in the
+DSL (`args: [recent: true, …]`).
 
 An instance's poll options should be its declared `args` merged with its member
-stamp — so `Source.refresh(plan, "meeting_docs.tivoli")` reaches
-`poll/1` with `municipality: "tivoli"` without the host wiring it per instance.
+stamp — so `Source.refresh(plan, "docs.tenant_a")` reaches `poll/1` with the
+tenant named, without the host wiring it per instance.
 The precise merge key wants deciding (all of `meta`, or a declared subset) and is
 the main open design question below.
 
@@ -193,11 +241,10 @@ decision point: it defaults to **one entry per distinct cadence** — a sweep th
 runs every source sequentially inside one job, followed by one drain
 (`source.ex:631-636`) — and takes `per_cell: true` for one entry per cell.
 
-Under the default sweep, three municipalities crawl **sequentially in one job**
-and then drain once. That is the opposite of the requirement: the whole point is
-that Tivoli's slow crawl should not hold up Red Hook. So per-tenant scheduling
-means either `per_cell: true`, or a new per-tenant grouping — one sweep per
-municipality rather than one per cadence.
+Under the default sweep, N tenants poll **sequentially in one job** and then drain
+once. That is the opposite of the requirement: one tenant's slow upstream should
+not hold up the others. So per-tenant scheduling means either `per_cell: true`,
+or a new per-tenant grouping — one sweep per tenant rather than one per cadence.
 
 One sweep per tenant looks right: it keeps the "several sources then one drain"
 shape that makes a sweep worth having, while making the unit of serialization the
@@ -205,16 +252,15 @@ tenant. That is a genuine addition to `crontab/2`, not a flag it already has.
 
 ## Dashboard: the tenant switch
 
-Cascade has **33 cells** today (measured). Three municipalities is 99 cells with
-dotted ids in one flat list — the funnel's cell picker (`rdd-starts`) would be
-unusable, and `Tree.starting_points/2` would offer three copies of every source.
+A host graph of ~30 cells becomes ~90 dotted ids across three tenants in one flat
+list — the funnel's cell picker (`rdd-starts`) would be unusable, and
+`Tree.starting_points/2` would offer one copy of every source per tenant.
 
-The plan already arrives as an MFA — `plan_mfa: {MuniWatch.RedHook.Nodes, :plan, []}`
-in cascade's config, applied on every `load/1` (`dag_live.ex:47,478`). So a
+The plan already arrives as a host-configured MFA, applied on every `load/1`. So a
 tenant switch is a **different argument to the same MFA**, not new plumbing:
 
-- `plan/1` takes a municipality and returns that municipality's graph — one
-  tenant's instances only, so the dashboard's cell count stays ~33.
+- the host's `plan/1` takes a tenant and returns that tenant's graph — its
+  instances only, so the rendered cell count stays as it is today.
 - The switch renders **above** `rdd-ask`, outside the funnel. The page is already
   a narrowing sequence (question → cell → view) and tenant sits before all of
   it — the same reasoning that moved `runs` into the page header rather than
@@ -230,9 +276,9 @@ names are the host's.
 ## Consequences
 
 **Wanted.** Three tenants drain concurrently, each with its own lock, claim set
-and `%Drain.Report{}`. A slow Tivoli crawl does not block Red Hook. Cell ids
-carry the tenant, so `meeting_id` collisions are structurally impossible. The
-dashboard shows one tenant at a time at its current scale.
+and `%Drain.Report{}`. One tenant's slow upstream does not block another's. Cell
+ids carry the tenant, so upstream-minted key collisions are structurally
+impossible. A dashboard shows one tenant at a time at its current scale.
 
 **Costs, stated plainly.**
 
@@ -246,64 +292,66 @@ dashboard shows one tenant at a time at its current scale.
   third-party sites. Intended, but a real increase in outbound load — and the
   default sweep would serialize them, so this needs the scheduling decision in
   Change 4 rather than falling out for free.
-- Every cascade resource that should be per-municipality needs `for_each` — a
-  broad, mechanical change across ~33 cells, and one that is easy to apply
+- Every host resource that should be per-tenant must declare it — a broad,
+  mechanical change across the whole graph, and one that is easy to apply
   incompletely. A cell that *should* be per-tenant and isn't becomes a shared
   cell three tenants write to, which is the collision this design exists to
   prevent. Worth a check that enumerates cells lacking `for_each`.
 
-**Out of scope.** Whether cascade's row keys also become composite. Instance ids
-isolate the *cells*; whether `meeting_docs.tivoli`'s rows live in one table with
-a `municipality_id` column or three tables is a cascade schema decision with its
-own measurement.
+**Out of scope.** Whether a host's ROW keys also become composite. Instance ids
+isolate the *cells*; whether `docs.tenant_a`'s rows live in one table with a
+tenant column or a table per tenant is a host schema decision with its own
+measurement.
 
 ## Open questions
 
 1. **How does the member stamp reach `poll/1`?** All of `meta`, or a declared
-   subset (`for_each :municipalities, poll_args: [:municipality]`)? Passing all
+   subset (`tenant :tenants, poll_args: [:tenant]`)? Passing all
    of `meta` is convenient and leaks internal stamps into a third-party API call.
-2. **Per-member cadence?** `every:` is declared once on the template. If all
-   three sites can be crawled on one schedule, nothing is needed.
-3. **Does `slice` still apply to municipality?** Under this design, no — you pick
-   a municipality by choosing which graph to look at, so only `fiscal_year`
-   remains a slice. The dependent-slice work from the earlier draft is therefore
-   **not needed for this**, and `Fiscal.meeting_years/0` becomes per-tenant by
-   virtue of reading a tenant's own instance rather than by taking an argument.
+2. **Per-tenant cadence?** `every:` is declared once on the template. If every
+   tenant can be polled on one schedule, nothing is needed.
+3. **Does `slice` still apply to the tenant dimension?** Under this design, no —
+   you pick a tenant by choosing which graph to look at, so a tenant is not a
+   slice. Any remaining slice becomes per-tenant by virtue of reading a tenant's
+   own instance rather than by taking an argument, so the DEPENDENT-slice feature
+   an earlier draft proposed is not needed for this.
 4. **Who lists the tenants for the dashboard switch?** Library (it knows member
    ids) or host (it knows names)?
-5. **Is instance-locality declared or inferred?** (Change 1.) Inferring it from
-   "the target is a generator over the same population" needs no new syntax and
-   silently does the wrong thing in the ambiguous case; declaring it
-   (`depends_on [{:docs, per: :municipalities}]`) is more typing on ~33 cells.
-   A wrong answer here means one tenant reading another's data, which nothing
-   downstream detects — so this is the decision most worth getting right.
-6. **How does a resource say it is NOT per-tenant?** With no cross-municipality
-   cells in scope, the answer today is "every resource declares `for_each`". That
-   is ~33 mechanical edits and easy to apply incompletely, and a cell that should
-   be per-tenant and is not becomes a shared cell three tenants write to. Worth a
-   check that enumerates non-generator cells in a tenant plan rather than trusting
-   the sweep.
+5. **One tenant dimension, or several?** Ash has one tenant, which is simpler and
+   matches the requirement here. If a second STRUCTURAL dimension is ever likely
+   — each combination its own graph — that changes the design and is cheaper to
+   decide now.
+6. **May one node declare both `tenant` and `for_each`?** They compose in
+   principle (per-tenant, and per-population within it) but cell ids would have
+   to carry both. Forbidding it until a case needs it is a defensible first
+   version.
+7. **How does a resource say it is NOT per-tenant?** A global node is the
+   exception rather than the default, so the declaration should probably be
+   opt-out (`global? true`, as Ash spells it) — and a cell that should be
+   per-tenant and is not becomes a shared cell every tenant writes to. Worth a
+   check that enumerates non-tenanted cells in a tenant plan rather than trusting
+   a mechanical sweep.
 
 ## Rejected alternatives
 
 - **Scope-per-key in one shared graph** (this ADR's first draft). A `scope`
   column on the dirty table, scoped `claim/1`, scoped retirement. Rejected: it
-  does not match "the entire graph is per municipality", and it is strictly more
-  work than instances. Two failure modes it would have had are worth recording,
+  does not match "the entire graph is per tenant", and it is strictly more work
+  than instances. Two failure modes it would have had are worth recording,
   because both are absent under instances: a scoped whole-cell pass reconciling
   against `Rows.all/1` — an unscoped `Ash.read!()` — would have **retired every
   other tenant's rows** (the partial-read-vs-total-baseline shape of the two-node
   join bug in #183, except destroying rows rather than nil-ing columns); and a
   nullable `scope` would have broken `mark_dirty`'s `ON CONFLICT` coalescing,
   since Postgres treats nulls as distinct in a unique index.
-- **A dirty table per municipality.** `dirty_table` is already runtime-configurable
+- **A dirty table per tenant.** `dirty_table` is already runtime-configurable
   (`frontier.ex:268`), so this works today with no library change. Rejected: the
   table name is global application config, so it cannot vary per concurrent
   drain — two tenants draining at once would need two application environments.
 - **Ash `context` multitenancy (schema per tenant).** Rejected: it makes every
-  cross-tenant question N queries with no joins. With no cross-municipality cells
-  in scope this costs little *today*, which is exactly why it is a trap — the
-  first comparison feature would require unwinding it.
+  cross-tenant question N queries with no joins. With no cross-tenant cells in
+  scope this costs little *today*, which is exactly why it is a trap — the first
+  cross-tenant feature would require unwinding it.
 - **Ash `attribute` multitenancy.** Not rejected, but not load-bearing: it is a
   convenience on the read path. Ash tenancy lives in query context and the
   frontier is raw SQL through `query!/2` that never sees it, so it cannot provide
