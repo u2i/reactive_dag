@@ -21,18 +21,31 @@ defmodule ReactiveDag.Node.Recompute.Read do
   grain-changing rule's parent-grain keys must not filter the child-grain
   read; the host scopes at its own grain through `query:`).
   """
-  @spec items(map() | nil, atom(), (Ash.Query.t(), [String.t()] | nil -> Ash.Query.t()) | nil, [String.t()] | nil, [String.t()] | nil) ::
+  @spec items(
+          map() | nil,
+          atom(),
+          (Ash.Query.t(), [String.t()] | nil -> Ash.Query.t()) | nil,
+          [String.t()] | nil,
+          [String.t()] | nil
+        ) ::
           [term()]
-  def items(source, over, query_fn, claimed, auto_scope)
+  def items(source, over, query_fn, claimed, auto_scope, opts \\ [])
 
-  def items(nil, over, _query_fn, _claimed, _auto_scope) do
+  def items(nil, over, _query_fn, _claimed, _auto_scope, _opts) do
     raise ArgumentError,
           "reactive_dag: the read over #{inspect(over)} is resolved at graph assembly — " <>
             "build the plan with ReactiveDag.Node.graph/2 (a to_cell/1-only cell cannot " <>
             "know the over node's resource)"
   end
 
-  def items(%{resource: resource, payload_key: pk, read_action: action} = source, _over, query_fn, claimed, auto_scope) do
+  def items(
+        %{resource: resource, payload_key: pk, read_action: action} = source,
+        _over,
+        query_fn,
+        claimed,
+        auto_scope,
+        opts
+      ) do
     base =
       case action do
         nil -> Ash.Query.new(resource)
@@ -43,7 +56,20 @@ defmodule ReactiveDag.Node.Recompute.Read do
     |> load_calcs(Map.get(source, :load, []))
     |> apply_query(query_fn, claimed)
     |> scope_query(pk, auto_scope)
+    |> tenant_scoped(opts)
     |> Ash.read!()
+  end
+
+  # The over node's read is scoped to the PLAN's tenant. Reading a tenanted
+  # upstream without one raises ("Queries against … require a tenant"), and
+  # reading it under `global?` would fold another tenant's rows into this one's
+  # result — the wrong answer rather than an error.
+  defp tenant_scoped(query, opts) do
+    case Keyword.get(opts, :tenant) do
+      nil -> query
+      "*" -> query
+      tenant -> Ash.Query.set_tenant(query, tenant)
+    end
   end
 
   defp load_calcs(query, []), do: query

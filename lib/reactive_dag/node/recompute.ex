@@ -57,7 +57,10 @@ defmodule ReactiveDag.Node.Recompute do
   a nested transaction aborts the outer one, so only a value can be isolated by a
   savepoint.
   """
-  def recompute(%Cell{leaf?: true}, keys), do: {:ok, keys}
+  # 2-arity kept for direct callers (tests, a host driving recompute itself).
+  def recompute(cell, keys), do: recompute(cell, keys, [])
+
+  def recompute(%Cell{leaf?: true}, keys, _opts), do: {:ok, keys}
 
   # a declarative REDUCE combinator — read `over` → group_by → into each group.
   # `into` returns ONE row (a fold) or a LIST of rows (a group → many "expand").
@@ -68,7 +71,7 @@ defmodule ReactiveDag.Node.Recompute do
   # (`over, dirty_keys -> items`) so a host can scope the datastore read to the
   # claimed keys — e.g. `read: fn :fiscal_lines, keys -> FiscalDoc |> filter(keys) end`.
   # `keys` is the claimed dirty set, or `nil` for a whole-cell recompute (`"*"`).
-  def recompute(%Cell{meta: %{reduce: %{} = r}} = cell, keys) do
+  def recompute(%Cell{meta: %{reduce: %{} = r}} = cell, keys, opts) do
     group_by = Declarative.group_fn(r.group_by)
     key_fn = Declarative.key_fn(r.key, r.key_prefix)
     keyer = row_keyer(cell, r, key_fn)
@@ -86,11 +89,11 @@ defmodule ReactiveDag.Node.Recompute do
       end
 
     pairs =
-      Read.items(cell.meta[:over_source], r.over, r.query, scope(keys), auto_scope(cell, keys))
+      Read.items(cell.meta[:over_source], r.over, r.query, scope(keys), auto_scope(cell, keys), opts)
       |> Enum.group_by(group_by)
       |> Enum.flat_map(fn {group, items} -> emit.(group, items) end)
 
-    {:ok, materialize(cell, pairs, scope(keys))}
+    {:ok, materialize(cell, pairs, scope(keys), opts)}
   end
 
   # a declarative JOIN combinator — read `over` into a LEFT and RIGHT index
@@ -99,8 +102,8 @@ defmodule ReactiveDag.Node.Recompute do
   # right-only keys ALSO emit (`into.(jk, nil, right)`) — the full-outer
   # reconcile shape, where an undeclared right-side member is a finding.
   # `read` may be arity-2 for dirty-key scoping (see `reduce` above).
-  def recompute(%Cell{meta: %{join: %{} = j}} = cell, keys) do
-    {left_items, right_items} = join_items(cell, j, keys)
+  def recompute(%Cell{meta: %{join: %{} = j}} = cell, keys, opts) do
+    {left_items, right_items} = join_items(cell, j, keys, opts)
 
     left = index(left_items, Declarative.side_fn(j.left))
     right = index(right_items, Declarative.side_fn(j.right))
@@ -131,7 +134,7 @@ defmodule ReactiveDag.Node.Recompute do
     # read one side must not reconcile the other side's keys out of existence:
     # they were not produced because they were not read, which is the honest-gap
     # distinction the library draws everywhere else (`Rows.observed: :partial`).
-    {:ok, materialize(cell, pairs, retire_scope(keys))}
+    {:ok, materialize(cell, pairs, retire_scope(keys), opts)}
   end
 
   # a PER-KEY map — for each claimed input row, call a generic action with that
@@ -139,7 +142,9 @@ defmodule ReactiveDag.Node.Recompute do
   # is what lets it FINGERPRINT the inputs and skip the call when nothing the
   # result depends on has moved (a `run` action is opaque, so nothing outside it
   # could). Reports `%{called:, skipped:}` so the saving is visible.
-  def recompute(%Cell{meta: %{per_key: %{} = spec}} = cell, keys) do
+  # TODO(tenancy): `PerKey.recompute/3` writes rows through the payload loop, so
+  # it needs the tenant. Not threaded yet — ADR-003.
+  def recompute(%Cell{meta: %{per_key: %{} = spec}} = cell, keys, _opts) do
     {changed, meta} =
       ReactiveDag.Node.Recompute.PerKey.recompute(cell, spec, scope(keys))
 
@@ -150,13 +155,13 @@ defmodule ReactiveDag.Node.Recompute do
   # its provenance ("<input>|<key>"), so a scoped pass reads only the input that
   # moved; nothing correlates across inputs, which is what makes N of them safe
   # here where a cross-node join was not.
-  def recompute(%Cell{meta: %{union: %{} = spec}} = cell, keys) do
+  def recompute(%Cell{meta: %{union: %{} = spec}} = cell, keys, opts) do
     claimed = scope(keys)
 
     {pairs, meta} =
       ReactiveDag.Node.Recompute.Union.pairs(spec, cell.meta[:union_sources] || %{}, claimed)
 
-    {:ok, materialize(cell, pairs, claimed), meta}
+    {:ok, materialize(cell, pairs, claimed, opts), meta}
   end
 
   # a PURE-ASH-QUERY aggregate — the datastore groups + aggregates the `over`
@@ -165,7 +170,8 @@ defmodule ReactiveDag.Node.Recompute do
   # GROUP BY), and each parent row's aggregate values become its payload. This is a
   # WHOLE-CELL recompute (a GROUP BY reprices every group; there's no per-dirty-key
   # scoping), so the changed set is every group whose aggregate value moved.
-  def recompute(%Cell{meta: %{aggregate: %{} = agg, resource: resource}} = cell, _keys)
+  # TODO(tenancy): `Aggregate.recompute/3` writes rows too — same gap.
+  def recompute(%Cell{meta: %{aggregate: %{} = agg, resource: resource}} = cell, _keys, _opts)
       when not is_nil(resource) do
     {:ok, ReactiveDag.Node.Recompute.Aggregate.recompute(cell, resource, agg)}
   end
@@ -174,7 +180,7 @@ defmodule ReactiveDag.Node.Recompute do
   # (`run :recompute_keys`). The action does its own DOMAIN writes and returns
   # the changed keys, which are what propagates. MUST precede the compute-nil
   # clause: a run node's meta carries compute: nil too.
-  def recompute(%Cell{meta: %{run: action, resource: resource}} = cell, keys)
+  def recompute(%Cell{meta: %{run: action, resource: resource}} = cell, keys, _opts)
       when is_atom(action) and not is_nil(action) and not is_nil(resource) do
     params =
       %{keys: scope(keys), cell_id: cell.id}
@@ -199,7 +205,7 @@ defmodule ReactiveDag.Node.Recompute do
   # builds `%Cell{}` structs itself has no verifier, so the pass-through stays,
   # loudly, rather than becoming a crash in the one place the substrate is
   # deliberately unopinionated.
-  def recompute(%Cell{meta: %{compute: nil}, id: id}, keys) do
+  def recompute(%Cell{meta: %{compute: nil}, id: id}, keys, _opts) do
     Logger.warning(
       "reactive_dag: node #{inspect(id)} declares no computation; passing its keys " <>
         "through unchanged, so anything downstream recomputes against inputs that never " <>
@@ -210,13 +216,16 @@ defmodule ReactiveDag.Node.Recompute do
     {:ok, keys}
   end
 
-  def recompute(%Cell{meta: %{compute: op}} = cell, keys) when is_atom(op) and not is_nil(op) do
+  # `compute Mod` and `run` are escape hatches: the op does its own writes, so the
+  # tenant is the host's to handle — the library has no changeset to set it on.
+  def recompute(%Cell{meta: %{compute: op}} = cell, keys, _opts)
+      when is_atom(op) and not is_nil(op) do
     op.recompute(cell, keys)
   end
 
   # a cell whose meta carries no :compute key at all (e.g. a non-Node plan) —
   # treat like a leaf: pass through.
-  def recompute(%Cell{}, keys), do: {:ok, keys}
+  def recompute(%Cell{}, keys, _opts), do: {:ok, keys}
 
   # the arguments a `run` action declares — the library passes only these.
   defp declared_args(resource, action) do
@@ -386,8 +395,8 @@ defmodule ReactiveDag.Node.Recompute do
   # join. ONE write mode: the library closes the loop into the node's own resource
   # (`meta.resource`). A host `upsert:` override used to take precedence; it is
   # gone, because a node owns its rows.
-  defp materialize(cell, pairs, claimed) do
-    write = writer_fn(cell)
+  defp materialize(cell, pairs, claimed, opts) do
+    write = writer_fn(cell, opts)
 
     {declined, pairs} = Enum.split_with(pairs, &match?({_key, :skip}, &1))
 
@@ -401,7 +410,7 @@ defmodule ReactiveDag.Node.Recompute do
     kept = Enum.map(declined, &elem(&1, 0))
     produced = Enum.map(pairs, &elem(&1, 0))
 
-    changed ++ retire_vanished(cell, produced ++ kept, claimed)
+    changed ++ retire_vanished(cell, produced ++ kept, claimed, opts)
   end
 
   # RECONCILE, not just upsert. A fold writes the units it produced; a unit whose
@@ -420,10 +429,10 @@ defmodule ReactiveDag.Node.Recompute do
   # reconciled was also the one whose rows the library could not see, and its stale
   # units lingered forever: exactly the failure the paragraph above describes,
   # exempted from the fix. Removing the shape removes the exemption.
-  defp retire_vanished(%Cell{meta: meta} = cell, want, claimed) do
+  defp retire_vanished(%Cell{meta: meta} = cell, want, claimed, opts) do
     want_set = MapSet.new(want)
 
-    case vanished_baseline(cell, claimed) do
+    case vanished_baseline(cell, claimed, opts) do
       nil ->
         []
 
@@ -439,7 +448,8 @@ defmodule ReactiveDag.Node.Recompute do
                 meta[:payload_key] || :key,
                 meta[:identity_fields],
                 vanished,
-                meta[:payload_destroy] || :destroy
+                meta[:payload_destroy] || :destroy,
+                Keyword.take(opts, [:tenant])
               )
             end
 
@@ -451,9 +461,9 @@ defmodule ReactiveDag.Node.Recompute do
   # what a pass is entitled to retire: the claimed units for a scoped pass, and
   # everything the node currently HOLDS for a whole-cell one. `nil` = don't
   # reconcile (a node whose current key set we cannot enumerate).
-  defp vanished_baseline(cell, nil), do: current_keys(cell)
-  defp vanished_baseline(cell, ["*"]), do: current_keys(cell)
-  defp vanished_baseline(_cell, claimed) when is_list(claimed), do: claimed
+  defp vanished_baseline(cell, nil, opts), do: current_keys(cell, opts)
+  defp vanished_baseline(cell, ["*"], opts), do: current_keys(cell, opts)
+  defp vanished_baseline(_cell, claimed, _opts) when is_list(claimed), do: claimed
 
   # a node's OWN ROWS are the truth about which units it currently holds.
   #
@@ -462,8 +472,12 @@ defmodule ReactiveDag.Node.Recompute do
   # Every derived node has rows of its own — the verifier refuses one that does
   # not — so the rescue is the guard that matters: an unreadable resource must not
   # be read as an empty one.
-  defp current_keys(%Cell{meta: meta, id: id}) do
-    %Cell{id: id, meta: meta} |> ReactiveDag.Node.Rows.all() |> Enum.map(& &1.key)
+  # TENANT-SCOPED, and this is the destructive path: the baseline is what gets
+  # subtracted from, so an unscoped read retires every OTHER tenant's keys.
+  defp current_keys(%Cell{meta: meta, id: id}, opts) do
+    %Cell{id: id, meta: meta}
+    |> ReactiveDag.Node.Rows.all(opts)
+    |> Enum.map(& &1.key)
   rescue
     _ -> nil
   end
@@ -473,7 +487,7 @@ defmodule ReactiveDag.Node.Recompute do
   # somewhere else, and a raise here for the node that declared neither; both are
   # gone, and `VerifyReactive.verify_owns_rows/2` refuses at COMPILE time what this
   # raised at drain time.
-  defp writer_fn(%Cell{meta: meta, id: id}) do
+  defp writer_fn(%Cell{meta: meta, id: id}, tenant_opts) do
     case meta[:resource] do
       nil ->
         # A hand-assembled `%Cell{}` bypasses the verifier, so this stays as the
@@ -489,7 +503,11 @@ defmodule ReactiveDag.Node.Recompute do
         # what a recompute CLEARS: the human marks whose watched fields this
         # write moves. Nil when the node declares no `lapse`, and the payload
         # path then behaves exactly as before — survival, for free.
-        opts = [lapse: meta[:lapse], compare: meta[:compare]]
+        opts =
+          Keyword.merge(
+            [lapse: meta[:lapse], compare: meta[:compare]],
+            Keyword.take(tenant_opts, [:tenant])
+          )
 
         case meta[:identity_fields] do
           fields when is_list(fields) ->
@@ -524,19 +542,19 @@ defmodule ReactiveDag.Node.Recompute do
   # both sides, so a left-side claim filtered the right table by keys that index
   # nothing in it, read empty, and the join wrote nils over good data. A side is
   # read only when the claim concerns it — whole-cell reads both.
-  defp join_items(%Cell{meta: %{side_sources: %{} = sides}}, j, keys) do
+  defp join_items(%Cell{meta: %{side_sources: %{} = sides}}, j, keys, opts) do
     claimed = scope(keys)
 
     read = fn side, over, spec ->
-      Read.items(sides[side], over, j.query, claimed, side_scope(spec, claimed))
+      Read.items(sides[side], over, j.query, claimed, side_scope(spec, claimed), opts)
     end
 
     {read.(:left, j.left_over, j.left), read.(:right, j.right_over, j.right)}
   end
 
-  defp join_items(cell, j, keys) do
+  defp join_items(cell, j, keys, opts) do
     items =
-      Read.items(cell.meta[:over_source], j.over, j.query, scope(keys), auto_scope(cell, keys))
+      Read.items(cell.meta[:over_source], j.over, j.query, scope(keys), auto_scope(cell, keys), opts)
 
     {items, items}
   end

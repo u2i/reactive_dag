@@ -63,15 +63,30 @@ defmodule ReactiveDag.Node.Rows do
   path wants the failure.
   """
   @spec all(Cell.t() | source()) :: [row()]
-  def all(%Cell{meta: meta}), do: all(meta)
+  def all(source, opts \\ [])
+  def all(%Cell{meta: meta}, opts), do: all(meta, opts)
 
-  def all(%{} = source) do
+  def all(%{} = source, opts) do
     resource = source[:resource]
 
     if is_nil(resource) or Ash.Resource.Info.attributes(resource) == [] do
       []
     else
-      resource |> Ash.read!() |> Enum.map(&to_row(&1, keyer(source)))
+      resource
+      |> tenant_scoped(opts)
+      |> Ash.read!()
+      |> Enum.map(&to_row(&1, keyer(source)))
+    end
+  end
+
+  # A read scoped to the plan's tenant, when there is one. Ash applies the filter
+  # itself from the resource's own `multitenancy` block, so this never names the
+  # column — a resource declaring no tenancy ignores it.
+  defp tenant_scoped(queryable, opts) do
+    case Keyword.get(opts, :tenant) do
+      nil -> queryable
+      "*" -> queryable
+      tenant -> Ash.Query.set_tenant(queryable, tenant)
     end
   end
 
@@ -86,12 +101,13 @@ defmodule ReactiveDag.Node.Rows do
   Returns 0 for a node that keeps no rows here.
   """
   @spec key_count(Cell.t() | source()) :: non_neg_integer()
-  def key_count(%Cell{meta: meta}), do: key_count(meta)
+  def key_count(source, opts \\ [])
+  def key_count(%Cell{meta: meta}, opts), do: key_count(meta, opts)
 
-  def key_count(%{} = source) do
+  def key_count(%{} = source, opts) do
     case queryable(source) do
       nil -> 0
-      resource -> Ash.count!(resource)
+      resource -> resource |> tenant_scoped(opts) |> Ash.count!()
     end
   end
 
@@ -517,8 +533,7 @@ defmodule ReactiveDag.Node.Rows do
     created = for {key, {:created, _}} <- observed, do: key
     updated = for {key, {:changed, _}} <- observed, do: key
 
-    {created ++ updated ++ revived ++ retired,
-     %{created: created, updated: updated, revived: revived, retired: retired}}
+    {created ++ updated ++ revived ++ retired, %{created: created, updated: updated, revived: revived, retired: retired}}
   end
 
   # COMING BACK is a change, even when the bytes did not move.

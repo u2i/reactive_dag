@@ -306,7 +306,12 @@ defmodule ReactiveDag.Drain do
 
       true ->
         cell = Map.fetch!(plan.cells, cell_id)
-        {outcome, us} = timed(fn -> recompute(cell, keys, opts) end)
+
+        # The plan's tenant rides with the recompute. It is the PLAN's, not the
+        # cell's — every tenant's plan holds identical cells — so it can only
+        # enter here, where both are in scope.
+        {outcome, us} =
+          timed(fn -> recompute(cell, keys, Keyword.merge(opts, Plan.frontier_opts(plan))) end)
 
         case outcome do
           {:failed, reason} ->
@@ -461,8 +466,8 @@ defmodule ReactiveDag.Drain do
 
   defp recompute(%Cell{leaf?: true}, keys, _opts), do: {keys, %{}}
 
-  defp recompute(cell, keys, _opts) do
-    case ReactiveDag.Node.Recompute.recompute(cell, keys) do
+  defp recompute(cell, keys, opts) do
+    case ReactiveDag.Node.Recompute.recompute(cell, keys, opts) do
       {:ok, changed} when is_list(changed) ->
         {changed, %{}}
 
