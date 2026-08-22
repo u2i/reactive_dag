@@ -1477,6 +1477,25 @@ defmodule ReactiveDag.Node do
   member's `meta` merged onto every instance cell (the host's per-member stamp,
   e.g. a probe filter). A member is any map with an `:id` (+ optional `:meta`).
   Without a fetcher, a generator node is skipped (and logged by the caller).
+
+  Pass `:tenant` to build this plan as ONE TENANT'S graph. A host running the
+  same topology for several independent tenants calls this once per tenant, from
+  the same resource list:
+
+      for t <- ["tenant_a", "tenant_b"], do: graph(resources, tenant: t)
+
+  Cell ids are as authored in every tenant's plan — there is one `lines`, not
+  `lines.tenant_a` — because the tenant lives on the PLAN and reaches the
+  frontier from there (`ReactiveDag.Plan.frontier_opts/1`). So a resource is
+  authored once, nothing about the DSL changes, and every tenant's plan is
+  literally the same topology.
+
+  Distinct from `:for_each`, which expands a node into several cells WITHIN one
+  plan sharing an upstream. `:tenant` expands nothing; it says which graph a
+  plan is. They compose: a generator node in a tenant plan is that tenant's
+  instances.
+
+  Defaults to `"*"` — one graph, exactly as before.
   """
   @spec graph([module()], keyword()) :: ReactiveDag.Plan.t()
   def graph(resources, opts \\ []) do
@@ -1486,7 +1505,19 @@ defmodule ReactiveDag.Node do
     |> Enum.flat_map(&cells(&1, fetch))
     |> resolve_reads()
     |> ReactiveDag.Graph.build()
+    |> with_tenant(opts)
     |> verify_scans!()
+  end
+
+  # `tenant:` stamps the PLAN, not its cells. A host running the same topology
+  # for several tenants builds one plan per tenant from the same resources; the
+  # drain reads it off the plan when talking to the frontier, so cell ids stay as
+  # authored and every tenant's plan is identical.
+  defp with_tenant(%ReactiveDag.Plan{} = plan, opts) do
+    case Keyword.get(opts, :tenant) do
+      nil -> plan
+      tenant -> %{plan | tenant: ReactiveDag.Frontier.tenant(tenant: tenant)}
+    end
   end
 
   # `poll Mod` makes a node a SOURCE. Two things are worth failing at assembly;
