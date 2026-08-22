@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.17.0-rc.46](https://github.com/u2i/reactive_dag/compare/v0.17.0-rc.45...v0.17.0-rc.46) (2026-08-22)
+
+
+### Features
+
+* optional `Op.recompute/3` — a compute op can get the plan's tenant ([#201](https://github.com/u2i/reactive_dag/issues/201)) ([ea652fa](https://github.com/u2i/reactive_dag/commit/ea652fa59094c9ee2883f3377f650c52fb88e677))
+
 ## [0.17.0-rc.45](https://github.com/u2i/reactive_dag/compare/v0.17.0-rc.44...v0.17.0-rc.45) (2026-08-22)
 
 
