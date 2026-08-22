@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.17.0-rc.44](https://github.com/u2i/reactive_dag/compare/v0.17.0-rc.43...v0.17.0-rc.44) (2026-08-22)
+
+
+### Features
+
+* honour a resource's Ash multitenancy declaration ([137c0a6](https://github.com/u2i/reactive_dag/commit/137c0a6b31b6e14d2bcc983fb61518a73d9a9d45))
+
 ## [0.17.0-rc.43](https://github.com/u2i/reactive_dag/compare/v0.17.0-rc.42...v0.17.0-rc.43) (2026-08-22)
 
 
