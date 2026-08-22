@@ -142,11 +142,9 @@ defmodule ReactiveDag.Node.Recompute do
   # is what lets it FINGERPRINT the inputs and skip the call when nothing the
   # result depends on has moved (a `run` action is opaque, so nothing outside it
   # could). Reports `%{called:, skipped:}` so the saving is visible.
-  # TODO(tenancy): `PerKey.recompute/3` writes rows through the payload loop, so
-  # it needs the tenant. Not threaded yet — ADR-003.
-  def recompute(%Cell{meta: %{per_key: %{} = spec}} = cell, keys, _opts) do
+  def recompute(%Cell{meta: %{per_key: %{} = spec}} = cell, keys, opts) do
     {changed, meta} =
-      ReactiveDag.Node.Recompute.PerKey.recompute(cell, spec, scope(keys))
+      ReactiveDag.Node.Recompute.PerKey.recompute(cell, spec, scope(keys), opts)
 
     {:ok, changed, meta}
   end
@@ -170,10 +168,9 @@ defmodule ReactiveDag.Node.Recompute do
   # GROUP BY), and each parent row's aggregate values become its payload. This is a
   # WHOLE-CELL recompute (a GROUP BY reprices every group; there's no per-dirty-key
   # scoping), so the changed set is every group whose aggregate value moved.
-  # TODO(tenancy): `Aggregate.recompute/3` writes rows too — same gap.
-  def recompute(%Cell{meta: %{aggregate: %{} = agg, resource: resource}} = cell, _keys, _opts)
+  def recompute(%Cell{meta: %{aggregate: %{} = agg, resource: resource}} = cell, _keys, opts)
       when not is_nil(resource) do
-    {:ok, ReactiveDag.Node.Recompute.Aggregate.recompute(cell, resource, agg)}
+    {:ok, ReactiveDag.Node.Recompute.Aggregate.recompute(cell, resource, agg, opts)}
   end
 
   # the ASH-NATIVE escape hatch: a GENERIC action on the node's own resource
