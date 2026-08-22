@@ -275,6 +275,29 @@ omit them; a shape that varies is every caller's problem.
 `per_key` populates it for you: `%{called: n, skipped: n}`, so the saving from
 `fingerprint:` is visible rather than assumed.
 
+### The tenant, if you have one
+
+That is about the RETURN shape. The ARGUMENT count is a separate axis, and both
+arities are optional:
+
+```elixir
+def recompute(cell, keys)          # one graph — what almost every op wants
+def recompute(cell, keys, opts)    # opts[:tenant] is the plan's tenant
+```
+
+The library calls whichever your module exports, preferring `/3`. An op with only
+`/2` keeps working untouched.
+
+Take `/3` when the op writes its own rows and the host runs the same graph for
+several tenants. This is the one place the library cannot help implicitly: a
+`compute` op does its own writes, so there is no changeset of the library's to
+set a tenant on. Pass `opts` through to
+`ReactiveDag.Node.Payload.upsert_row/5` and it handles the rest.
+
+Found by migrating a real node rather than by design: a host's OSC-actuals node
+is a `compute` node whose key is `"osc:" <> fiscal_year` — the same string for
+every municipality — and it had no way to learn which one it was writing for.
+
 For **live** cost — a budget alarm, a dashboard, a per-run log — the same numbers
 arrive as telemetry while the drain is still running, rather than only in the
 report at the end:

@@ -213,11 +213,21 @@ defmodule ReactiveDag.Node.Recompute do
     {:ok, keys}
   end
 
-  # `compute Mod` and `run` are escape hatches: the op does its own writes, so the
-  # tenant is the host's to handle — the library has no changeset to set it on.
-  def recompute(%Cell{meta: %{compute: op}} = cell, keys, _opts)
+  # `compute Mod` — the op does its own writes, so the library has no changeset
+  # to set a tenant on. An op that needs one implements `recompute/3` and gets it
+  # here; `/2` is what almost every op wants and is untouched.
+  #
+  # Exports check rather than a declared arity: an op cannot say which it
+  # implements, and guessing wrong is a FunctionClauseError at drain time.
+  def recompute(%Cell{meta: %{compute: op}} = cell, keys, opts)
       when is_atom(op) and not is_nil(op) do
-    op.recompute(cell, keys)
+    Code.ensure_loaded?(op)
+
+    if function_exported?(op, :recompute, 3) do
+      op.recompute(cell, keys, opts)
+    else
+      op.recompute(cell, keys)
+    end
   end
 
   # a cell whose meta carries no :compute key at all (e.g. a non-Node plan) —
