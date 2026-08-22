@@ -1,8 +1,42 @@
 # ADR-002 — A graph per tenant
 
-**Status:** proposed — no code written. This document exists to be argued with
-before the library is touched.
-**Date:** 2026-08-21
+**Status:** accepted & implemented. Frontier tenant (#187), per-tenant plans
+(#190), scanning (#191). The dashboard tenant switch is outstanding and lives in
+the dashboard repo.
+**Date:** 2026-08-21 (proposed); implemented same cycle.
+
+> This ADR keeps its decision-time framing. Two of its predictions were wrong and
+> are annotated inline rather than rewritten — see **What shipped** below, which
+> is the section to read first if you want the outcome rather than the reasoning.
+
+## What shipped
+
+| planned | actual |
+|---|---|
+| Change 0 — partition the frontier | a `tenant` column, `null: false default "*"`; claim/`next_cell`/`empty?` scoped |
+| Change 1 — a `tenant` DSL declaration + instance-local edges | **no DSL change at all**: `graph(resources, tenant: t)`, tenant on the `%Plan{}` |
+| Change 2 — relax `verify_one_node_per_source!` | **nothing to do** — see below |
+| Change 3 — the member stamp reaches `poll/1` | the tenant reaches it via the plan; `crontab/2` emits it in job args |
+| Change 4 — per-tenant scheduling | the sweep lock is tenant-scoped; a host `flat_map`s `crontab/2` over its tenants |
+
+Two corrections worth stating plainly, because both were confident and wrong:
+
+**Change 1 needed no DSL.** Once tenants are separate PLANS, each plan holds one
+`shell` and one `docs`, so cell ids need no tenant suffix and edges resolve as
+authored. The tenant is a property of the RUN, so it lives on the plan. That
+deleted this ADR's largest predicted cost — every resource declaring `for_each`,
+a broad mechanical change that was easy to apply incompletely.
+
+**Change 2 was not a blocker.** `verify_one_node_per_source!` counts cells naming
+one scanner WITHIN a plan, and a per-tenant plan has exactly one. It never fires.
+The "the upstream is polled N times" reasoning quoted below is real, but it
+applies to the `for_each` shape this ADR abandoned — not to per-tenant plans.
+
+One thing the ADR did not predict at all, found while wiring the sweep lock:
+`with_lock/2` resolved its scope with `Keyword.get(opts, :scope, dirty())`, whose
+default only applies when the key is ABSENT. An explicit `scope: nil` — which any
+caller threading the option through passes — hashed nil and silently moved the
+advisory lock for every untenanted host.
 
 ## Context
 
@@ -143,6 +177,11 @@ prerequisite for everything else here.
 
 ### Change 1 — `tenant`, borrowed from Ash's shape
 
+> **Shipped smaller.** No DSL declaration and no edge rewriting: `graph(resources,
+> tenant: t)` stamps the `%Plan{}`, and cell ids stay as authored. Ash's SHAPE
+> still informed it — the tenant travels with the run rather than being annotated
+> per edge — but nothing was borrowed from Ash itself.
+
 The problem is that `shell.tenant_a` must read `docs.tenant_a` rather than bare
 `docs`. The first instinct is to annotate the edge — `depends_on [{:docs, per:
 :tenants}]` — one chance to forget per node, on a mistake whose symptom is one
@@ -245,6 +284,11 @@ A node declaring both `tenant` and `for_each` is now unproblematic: `for_each`
 expands within whichever plan the node belongs to, and the two do not interact.
 
 ### Change 2 — a scanner on a generator node is per-instance
+
+> **Not needed.** This check counts cells naming one scanner within a PLAN, and a
+> per-tenant plan has exactly one. It never fires, so nothing was relaxed. The
+> reasoning below is sound for the `for_each` shape and irrelevant to the one
+> that shipped.
 
 `verify_one_node_per_source!` (`node.ex:1481`) raises when two cells name one
 scan module. Probed with a generator leaf declaring a scanner:
