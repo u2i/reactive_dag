@@ -22,12 +22,14 @@ defmodule ReactiveDag.Node.Recompute.PerKey do
 
   @doc "Recompute a per_key node; returns `{changed_keys, meta}`."
   @spec recompute(ReactiveDag.Cell.t(), map(), [String.t()] | nil) :: {[String.t()], map()}
-  def recompute(cell, spec, claimed) do
+  def recompute(cell, spec, claimed, opts \\ []) do
     source = cell.meta[:over_source]
-    rows = Read.items(source, source_over(cell), nil, claimed, keyed_scope(source, claimed))
+
+    rows =
+      Read.items(source, source_over(cell), nil, claimed, keyed_scope(source, claimed), opts)
 
     fp_attr = spec.fingerprint_attribute || Fingerprint.default_attribute()
-    existing = existing_fingerprints(cell, fp_attr, rows, source)
+    existing = existing_fingerprints(cell, fp_attr, rows, source, opts)
 
     # PARTITION FIRST, then call. Skips are decided before anything runs, so a
     # bounded stream spends its slots only on rows that genuinely need the
@@ -39,18 +41,18 @@ defmodule ReactiveDag.Node.Recompute.PerKey do
         want == nil or want != Map.get(existing, row_key(row, source))
       end)
 
-    changed = call_rows(cell, spec, to_call, source, fp_attr)
+    changed = call_rows(cell, spec, to_call, source, fp_attr, opts)
 
     {changed, %{called: length(to_call), skipped: length(skipped)}}
   end
 
   # one at a time (the default) — no process overhead, no supervision, and the
   # shape every node had before concurrency was an option.
-  defp call_rows(cell, %{max_concurrency: n} = spec, rows, source, fp_attr)
+  defp call_rows(cell, %{max_concurrency: n} = spec, rows, source, fp_attr, opts)
        when is_nil(n) or n == 1 do
     Enum.map(rows, fn row ->
       key = row_key(row, source)
-      write_row(cell, spec, key, row, Fingerprint.of(spec.fingerprint, row), fp_attr)
+      write_row(cell, spec, key, row, Fingerprint.of(spec.fingerprint, row), fp_attr, opts)
       key
     end)
   end
@@ -58,12 +60,12 @@ defmodule ReactiveDag.Node.Recompute.PerKey do
   # bounded concurrency. `ordered: true` (the default) is deliberate: results
   # are applied in ROW order, so the changed-key list is deterministic — which
   # matters for tests, diffs, and reading a Report.
-  defp call_rows(cell, spec, rows, source, fp_attr) do
+  defp call_rows(cell, spec, rows, source, fp_attr, opts) do
     rows
     |> Task.async_stream(
       fn row ->
         key = row_key(row, source)
-        write_row(cell, spec, key, row, Fingerprint.of(spec.fingerprint, row), fp_attr)
+        write_row(cell, spec, key, row, Fingerprint.of(spec.fingerprint, row), fp_attr, opts)
         key
       end,
       max_concurrency: spec.max_concurrency,
@@ -77,7 +79,7 @@ defmodule ReactiveDag.Node.Recompute.PerKey do
 
   # ── the call + write ────────────────────────────────────────────────────────
 
-  defp write_row(cell, spec, key, row, fingerprint, fp_attr) do
+  defp write_row(cell, spec, key, row, fingerprint, fp_attr, opts) do
     resource = cell.meta[:resource]
 
     result =
@@ -101,10 +103,33 @@ defmodule ReactiveDag.Node.Recompute.PerKey do
       |> Fingerprint.put(fp_attr, fingerprint, resource, "per_key … fingerprint:")
 
     resource
-    |> Ash.Changeset.for_create(cell.meta[:payload_action] || :upsert, attrs)
+    |> Ash.Changeset.for_create(
+      cell.meta[:payload_action] || :upsert,
+      attrs,
+      tenant_opts(opts)
+    )
     |> Ash.create!()
 
     :ok
+  end
+
+  # The plan's tenant, handed to Ash. Ash resolves the column from the
+  # resource's own `multitenancy` block, so this never names it; a resource
+  # declaring none ignores it.
+  defp tenant_opts(opts) do
+    case Keyword.get(opts, :tenant) do
+      nil -> []
+      "*" -> []
+      tenant -> [tenant: tenant]
+    end
+  end
+
+  defp scoped(query, opts) do
+    case Keyword.get(opts, :tenant) do
+      nil -> query
+      "*" -> query
+      tenant -> Ash.Query.set_tenant(query, tenant)
+    end
   end
 
   # the row's fields → the action's arguments. An explicit `args:` maps them
@@ -149,9 +174,9 @@ defmodule ReactiveDag.Node.Recompute.PerKey do
   defp fetch_result(_result, _name), do: nil
 
   # the stored fingerprint per key, for exactly the rows this pass will consider
-  defp existing_fingerprints(_cell, _attr, [], _source), do: %{}
+  defp existing_fingerprints(_cell, _attr, [], _source, _opts), do: %{}
 
-  defp existing_fingerprints(cell, attr, rows, source) do
+  defp existing_fingerprints(cell, attr, rows, source, opts) do
     resource = cell.meta[:resource]
 
     if Ash.Resource.Info.attribute(resource, attr) do
@@ -160,6 +185,7 @@ defmodule ReactiveDag.Node.Recompute.PerKey do
 
       resource
       |> Ash.Query.do_filter([{key_attr, [in: keys]}])
+      |> scoped(opts)
       |> Ash.read!()
       |> Map.new(&{&1 |> Map.fetch!(key_attr) |> to_string(), Map.get(&1, attr)})
     else

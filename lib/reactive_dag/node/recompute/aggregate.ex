@@ -21,19 +21,21 @@ defmodule ReactiveDag.Node.Recompute.Aggregate do
 
   @doc "Recompute an aggregate node; returns the changed keys."
   @spec recompute(ReactiveDag.Cell.t(), module(), map()) :: [String.t()]
-  def recompute(cell, resource, agg) do
-    loads = load_specs(agg)             # [{tmp_name, kind, over, src, dest}]
+  def recompute(cell, resource, agg, opts \\ []) do
+    # [{tmp_name, kind, over, src, dest}]
+    loads = load_specs(agg)
     action = cell.meta[:payload_action] || :upsert
     {key_attr, key_of} = keying(cell)
 
     resource
     |> load_aggregates(agg.over, loads)
+    |> scoped(opts)
     |> Ash.read!()
     |> Enum.flat_map(fn row ->
       cell_key = key_of.(row)
       payload = project(row, key_attr, identity_fields(cell), loads)
 
-      case write(resource, cell, key_attr, cell_key, payload, action) do
+      case write(resource, cell, key_attr, cell_key, payload, action, opts) do
         v when v in [:created, :changed] -> [cell_key]
         :unchanged -> []
       end
@@ -54,18 +56,55 @@ defmodule ReactiveDag.Node.Recompute.Aggregate do
     {key_attr, fn row -> row |> Map.fetch!(key_attr) |> to_string() end}
   end
 
-  defp write(resource, %{meta: %{identity_fields: fields}} = cell, _key_attr, _cell_key, payload, action)
+  defp write(
+         resource,
+         %{meta: %{identity_fields: fields}} = cell,
+         _key_attr,
+         _cell_key,
+         payload,
+         action,
+         opts
+       )
        when is_list(fields) do
-    ReactiveDag.Node.Payload.upsert_identity(resource, fields, payload, action, lapse_opts(cell))
+    ReactiveDag.Node.Payload.upsert_identity(
+      resource,
+      fields,
+      payload,
+      action,
+      payload_opts(cell, opts)
+    )
   end
 
-  defp write(resource, cell, key_attr, cell_key, payload, action) do
-    ReactiveDag.Node.Payload.upsert(resource, key_attr, cell_key, payload, action, lapse_opts(cell))
+  defp write(resource, cell, key_attr, cell_key, payload, action, opts) do
+    ReactiveDag.Node.Payload.upsert(
+      resource,
+      key_attr,
+      cell_key,
+      payload,
+      action,
+      payload_opts(cell, opts)
+    )
   end
 
   # what a recompute CLEARS — nil unless the node declares a `lapse`, so the
-  # aggregate path is untouched for every node that does not.
-  defp lapse_opts(%{meta: meta}), do: [lapse: meta[:lapse], compare: meta[:compare]]
+  # aggregate path is untouched for every node that does not — plus the plan's
+  # tenant, so the written row lands in the right one.
+  defp payload_opts(%{meta: meta}, opts) do
+    Keyword.merge(
+      [lapse: meta[:lapse], compare: meta[:compare]],
+      Keyword.take(opts, [:tenant])
+    )
+  end
+
+  # A GROUP BY reprices every group, so the read is whole — but still this
+  # tenant's. Ash resolves the column from the resource's own declaration.
+  defp scoped(query, opts) do
+    case Keyword.get(opts, :tenant) do
+      nil -> query
+      "*" -> query
+      tenant -> Ash.Query.set_tenant(query, tenant)
+    end
+  end
 
   # add each aggregate to the query under its temp name, then LOAD them so they're
   # computed + present on the result rows (aggregate/5 defines; load selects).
