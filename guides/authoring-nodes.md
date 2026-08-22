@@ -688,6 +688,49 @@ vocabulary of every edge** — `ref`, `depends_on`, `over:`, and the ids passed
 to `graph/2`. When an edge fails to resolve at assembly, it is almost always an
 id mismatch.
 
+## Which row is this key? — `row_key`
+
+A cell key names a unit of work. Writing that unit means deciding which ROW it
+is, and by default the library derives that from the primary key: a
+single-attribute PK is the key's column, a composite PK means the row is its own
+identity. `payload_key` overrides the column.
+
+That derivation has nothing to say about a UUID primary key — it would resolve
+to `:id` and write cell keys into it. So a node whose identity is not its primary
+key declares the mapping:
+
+```elixir
+row_key :uuid                        # the key IS the row's id
+row_key [:fund, :fiscal_year]        # the columns that identify the row
+row_key &MyApp.Meetings.resolve/3    # sameness is a judgement
+```
+
+**`:uuid`** — the pass-through case. An upstream hands us a UUID, or the node
+mints one; no lookup is needed.
+
+**A column list** — the row is found by those values, taken off the row being
+written. Change detection and the upsert then agree by construction, rather than
+by you keeping a `payload_key` and an `upsert_identity` in step. The cell key is
+not stored.
+
+**A resolver** — `(cell_key, attrs, opts) -> row | nil`. For when no tuple
+identifies the thing: a board that can meet twice in a day is not identified by
+`(board, date)`, and "is this the same meeting?" is a decision. The resolver
+makes its own read, so it receives `opts` and should scope by `opts[:tenant]` —
+the library cannot scope a query it does not make.
+
+> #### A resolver updates in place {: .info}
+>
+> Rungs 1 and 2 upsert, and the host's conflict target reaches the row. A
+> resolver may name a row the upsert would NOT reach — a meeting matched "within
+> an hour" has a different `starts_at` — so the matched row is revised with an
+> update action. That is `:update` by default; name another with
+> `payload_update:`. A resolver rung on a resource with no update action raises
+> at the write, saying so.
+
+Omit `row_key` and nothing changes: `payload_key` and the derived-primary-key
+path apply exactly as before.
+
 ## Key rules
 
 A combinator node declares its recompute unit with

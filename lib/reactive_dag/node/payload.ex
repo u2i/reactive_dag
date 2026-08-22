@@ -119,6 +119,150 @@ defmodule ReactiveDag.Node.Payload do
   end
 
   @doc """
+  Upsert a row, finding it by the node's declared `row_key`.
+
+  ONE entry point for all three rungs, so a caller never decides which lookup
+  applies — the node already declared it:
+
+    * `:uuid` — the cell key IS the row's id
+    * `[:col, :col]` — find by those columns' values, taken off the row
+    * `(cell_key, attrs, opts -> row | nil)` — the resolver decides
+
+  Falls back to `upsert/6` (the `payload_key` path) when the node declares no
+  `row_key`, so this is additive: an existing node behaves exactly as before.
+
+  `opts` carries `:tenant`, `:lapse` and `:compare` as `upsert/6` does, and is
+  passed to a resolver so it can scope its own read.
+  """
+  @spec upsert_row(module(), map(), String.t(), map(), keyword()) ::
+          :created | :changed | :unchanged
+  def upsert_row(resource, meta, cell_key, row, opts \\ []) do
+    action = meta[:payload_action] || :upsert
+
+    opts =
+      Keyword.merge(
+        [lapse: meta[:lapse], compare: meta[:compare], payload_update: meta[:payload_update]],
+        opts
+      )
+
+    case meta[:row_key] do
+      nil ->
+        upsert(resource, meta[:payload_key] || :key, cell_key, row, action, opts)
+
+      :uuid ->
+        # The key IS the id. It goes in as an attribute like any other, so the
+        # host's upsert conflicts on the primary key — which is what it already
+        # does by default.
+        write(
+          resource,
+          row |> Map.drop([:key]) |> Map.put(primary_key!(resource), cell_key),
+          fn attrs -> existing_by(resource, Map.take(attrs, [primary_key!(resource)]), opts) end,
+          action,
+          cell_key,
+          opts
+        )
+
+      fields when is_list(fields) ->
+        write(
+          resource,
+          Map.drop(row, [:key]),
+          fn attrs -> existing_by(resource, Map.take(attrs, fields), opts) end,
+          action,
+          cell_key,
+          opts
+        )
+
+      resolver when is_function(resolver, 3) ->
+        resolve_write(resource, Map.drop(row, [:key]), resolver, action, cell_key, opts)
+    end
+  end
+
+  # RUNG 3. The resolver names a row by judgement, and that row's identity need
+  # not match anything this `attrs` map would conflict on — a meeting matched
+  # "within an hour" has a DIFFERENT `starts_at`. So the matched row is updated
+  # in place rather than upserted and hoped about.
+  #
+  # The update action is the node's `payload_update` or Ash's `:update`. A
+  # resolver rung on a resource with no update action is a declaration that
+  # cannot work, and says so.
+  defp resolve_write(resource, attrs, resolver, action, cell_key, opts) do
+    attrs = stamp_fingerprint(attrs, attrs, resource, opts)
+    prior = resolver.(cell_key, attrs, opts)
+
+    case prior do
+      nil ->
+        {:ok, _} =
+          resource
+          |> Ash.Changeset.for_create(action, attrs, tenant_opts(opts))
+          |> Ash.create()
+
+        lapse(nil, attrs, resource, cell_key, opts)
+        :created
+
+      record ->
+        verdict = if moved?(record, attrs, opts), do: :changed, else: :unchanged
+
+        if verdict == :changed do
+          {:ok, _} =
+            record
+            |> Ash.Changeset.for_update(update_action!(resource, opts), attrs)
+            |> Ash.update()
+        end
+
+        lapse(record, attrs, resource, cell_key, opts)
+        verdict
+    end
+  end
+
+  defp update_action!(resource, opts) do
+    name = Keyword.get(opts, :payload_update) || :update
+
+    if Ash.Resource.Info.action(resource, name) do
+      name
+    else
+      raise ArgumentError,
+            "reactive_dag: a `row_key` RESOLVER matched an existing row, so " <>
+              "#{inspect(resource)} needs an update action to revise it — it has no " <>
+              "#{inspect(name)}. Add one, or name it with `payload_update:`."
+    end
+  end
+
+  # The shared tail: stamp, find the prior by whatever the rung says, decide the
+  # verdict, write, lapse. Only the FINDING differs between rungs, which is the
+  # whole point of declaring it.
+  defp write(resource, attrs, find_prior, action, cell_key, opts) do
+    attrs = stamp_fingerprint(attrs, attrs, resource, opts)
+    prior = find_prior.(attrs)
+
+    verdict =
+      case prior do
+        nil -> :created
+        record -> if moved?(record, attrs, opts), do: :changed, else: :unchanged
+      end
+
+    {:ok, _} =
+      resource
+      |> Ash.Changeset.for_create(action, attrs, tenant_opts(opts))
+      |> Ash.create()
+
+    lapse(prior, attrs, resource, cell_key, opts)
+
+    verdict
+  end
+
+  defp primary_key!(resource) do
+    case Ash.Resource.Info.primary_key(resource) do
+      [single] ->
+        single
+
+      other ->
+        raise ArgumentError,
+              "reactive_dag: `row_key :uuid` needs a single-attribute primary key to map " <>
+                "the cell key onto; #{inspect(resource)} has #{inspect(other)}."
+    end
+  end
+
+  @doc """
   Upsert an IDENTITY-KEYED row (a composite-primary-key node): the row carries
   its identity fields, the upsert conflicts on the primary key (Ash's default
   for `upsert? true`), and no key column exists — the cell key is the

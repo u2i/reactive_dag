@@ -1383,6 +1383,39 @@ defmodule ReactiveDag.Node do
             "narrow past. It bites when one aggregate is the result and another is not — a " <>
             "`count` that moves when a re-parse splits readings without shifting the `avg`."
       ],
+      row_key: [
+        type: {:or, [{:in, [:uuid]}, {:list, :atom}, {:fun, 3}]},
+        required: false,
+        doc:
+          "HOW A CELL KEY MAPS TO A ROW, declared rather than inferred. A cell key names " <>
+            "a unit of work; writing that unit means answering \"which row is this?\", and " <>
+            "the answer used to be guessed from the primary key — which under a UUID " <>
+            "primary key resolves to `:id`, so cell keys were written into the UUID column " <>
+            "silently.\n\nThree rungs, declarative first:\n\n" <>
+            "  * `:uuid` — the key IS the row's id. The pass-through case: an upstream " <>
+            "hands us a UUID, or the node mints one, and no lookup is needed.\n" <>
+            "  * `[:col, :col]` — the columns that identify the row. The row is found by " <>
+            "those values, so change detection and the upsert agree by construction " <>
+            "rather than by the author keeping two declarations in step. The cell key is " <>
+            "not stored.\n" <>
+            "  * `(cell_key, attrs, opts -> row | nil)` — the escape hatch, for when " <>
+            "sameness is a JUDGEMENT. `(municipality, board, date)` does not identify a " <>
+            "meeting if a board can meet twice in a day; the resolver decides, and returns " <>
+            "the row it matched or nil for none. It receives `opts` so it can scope its " <>
+            "own read by `:tenant` — the library cannot scope a query it does not make.\n\n" <>
+            "Omit it and nothing changes: `payload_key` and the derived-primary-key path " <>
+            "apply exactly as before."
+      ],
+      payload_update: [
+        type: :atom,
+        required: false,
+        doc:
+          "the update action a `row_key` RESOLVER revises a matched row with (default " <>
+            "`:update`). Only the resolver rung updates: rungs 1 and 2 upsert, and the " <>
+            "host's conflict target reaches the row. A resolver may name a row the upsert " <>
+            "would NOT reach — a meeting matched \"within an hour\" has a different " <>
+            "`starts_at` — so the matched row is revised in place."
+      ],
       payload_key: [
         type: :atom,
         doc:
@@ -2439,6 +2472,8 @@ defmodule ReactiveDag.Node do
       %{
         source: Ext.get_opt(resource, [:reactive], :source, nil),
         over: Ext.get_opt(resource, [:reactive], :over, nil),
+        row_key: Ext.get_opt(resource, [:reactive], :row_key, nil),
+        payload_update: Ext.get_opt(resource, [:reactive], :payload_update, nil),
         payload_key: Ext.get_opt(resource, [:reactive], :payload_key, nil) || derived_payload_key(resource),
         payload_action: Ext.get_opt(resource, [:reactive], :payload_action, nil),
         fingerprint: Ext.get_opt(resource, [:reactive], :fingerprint, nil),
