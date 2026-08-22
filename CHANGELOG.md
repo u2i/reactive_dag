@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.17.0-rc.45](https://github.com/u2i/reactive_dag/compare/v0.17.0-rc.44...v0.17.0-rc.45) (2026-08-22)
+
+
+### Features
+
+* `row_key` — declare how a cell key maps to a row ([#200](https://github.com/u2i/reactive_dag/issues/200)) ([5e352a6](https://github.com/u2i/reactive_dag/commit/5e352a6496ec58a6cc079413911aedb3d64241ed))
+* thread the tenant through `per_key` and `aggregate` ([#197](https://github.com/u2i/reactive_dag/issues/197)) ([62c8b96](https://github.com/u2i/reactive_dag/commit/62c8b964ca25d5986f4c6584cd00c377a73d1675))
+
 ## [0.17.0-rc.44](https://github.com/u2i/reactive_dag/compare/v0.17.0-rc.43...v0.17.0-rc.44) (2026-08-22)
 
 
