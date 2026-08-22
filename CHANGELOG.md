@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.17.0-rc.43](https://github.com/u2i/reactive_dag/compare/v0.17.0-rc.42...v0.17.0-rc.43) (2026-08-22)
+
+
+### Bug Fixes
+
+* Graph.build/1 sets `tenant` explicitly, so a plan's inferred type is %Plan{} ([5b1baf0](https://github.com/u2i/reactive_dag/commit/5b1baf09fb2b09eded74c84f8c84861d0fc4357a))
+
 ## [0.17.0-rc.42](https://github.com/u2i/reactive_dag/compare/v0.17.0-rc.41...v0.17.0-rc.42) (2026-08-22)
 
 
