@@ -461,19 +461,29 @@ defmodule ReactiveDag.Source do
   defp mark(graph, cell_id, result, reason, key_rule) do
     by_leaf = by_leaf(result, cell_id)
 
+    # A poll marks THIS graph's frontier. Without the tenant a tenanted scan
+    # would write its findings under `"*"`, where that tenant's drain never looks
+    # — the crawl would report rows found and nothing would ever recompute.
+    opts = frontier_opts(graph)
+
     for {leaf, keys} <- by_leaf, keys != [], into: %{} do
-      ReactiveDag.Frontier.mark_dirty(leaf, keys, reason)
+      ReactiveDag.Frontier.mark_dirty(leaf, keys, reason, opts)
 
       # `dirty_parents/5` COMPUTES each parent's claim; marking it is the
       # caller's. Dropping the return here would mark the leaf and strand the
       # change one level up — the cascade would stop before it started.
       for {parent, parent_keys} <- ReactiveDag.Graph.dirty_parents(graph, leaf, keys, key_rule) do
-        ReactiveDag.Frontier.mark_dirty(parent, parent_keys, reason)
+        ReactiveDag.Frontier.mark_dirty(parent, parent_keys, reason, opts)
       end
 
       {leaf, keys}
     end
   end
+
+  # `graph()` is a loose map in this module (a host may hand-assemble one), so
+  # this tolerates anything without a tenant rather than requiring a %Plan{}.
+  defp frontier_opts(%ReactiveDag.Plan{} = plan), do: ReactiveDag.Plan.frontier_opts(plan)
+  defp frontier_opts(_graph), do: []
 
   @doc """
   What a host needs to render a scan control for each cell that has one:
@@ -617,16 +627,47 @@ defmodule ReactiveDag.Source do
   worker rather than the crontab: mint the id in `perform/1`, then call
   `refresh/3` with `reason: "scan:\#{run_id}"` — `:reason` is a free string and
   rides through to the frontier rows, so the trace says which run dirtied a cell.
+
+  ## A tenanted plan
+
+  A plan built with `tenant:` emits entries carrying that tenant, so the job
+  Oban inserts knows which graph it is about:
+
+      Source.crontab(graph(resources, tenant: "tenant_a"))
+      #=> [{"0 12 * * *", ScanWorker, args: %{"sweep" => true, "tenant" => "tenant_a"}}]
+
+  Two consequences, both wanted. `ScanWorker`'s uniqueness is on `:args`, so two
+  tenants' entries are DISTINCT jobs rather than one collapsing into the other —
+  which is what makes them run concurrently instead of one being dropped as a
+  duplicate. And the tenant reaches the worker, which passes it to the frontier
+  and to the host's plan builder.
+
+  A host schedules every tenant by concatenating: `Enum.flat_map(tenants, &
+  crontab(plan_for(&1)))`. The library does not know the tenant list — that is
+  the host's, exactly as the plan is.
+
+  An untenanted plan emits no `"tenant"` key at all, so existing crontabs are
+  byte-identical.
   """
   @spec crontab(graph(), module(), keyword()) :: [{String.t(), module(), keyword()}]
   def crontab(graph, worker \\ ReactiveDag.ScanWorker, opts \\ []) do
-    extra = Keyword.get(opts, :args, %{})
+    extra = graph |> tenant_arg() |> Map.merge(Keyword.get(opts, :args, %{}))
 
     case Keyword.get(opts, :per_cell, false) do
       false -> sweep_entries(graph, worker, extra)
       true -> per_cell_entries(graph, worker, extra, Keyword.get(opts, :order))
     end
   end
+
+  # The tenant as a job argument, or nothing for an untenanted plan.
+  #
+  # Absent rather than `"*"` when untenanted: these args are Oban's uniqueness
+  # key, so adding a constant to every host's entries would change the key for
+  # hosts that have no tenants — and an in-flight job inserted before the upgrade
+  # would no longer dedupe against the one inserted after it.
+  defp tenant_arg(%ReactiveDag.Plan{tenant: "*"}), do: %{}
+  defp tenant_arg(%ReactiveDag.Plan{tenant: t}), do: %{"tenant" => t}
+  defp tenant_arg(_graph), do: %{}
 
   # ONE entry per distinct cadence, each a sweep. Sources run sequentially
   # inside the job, in graph order, followed by one drain.

@@ -634,6 +634,38 @@ supervision tree and your deploy story — and lets you filter, rewrite or ignor
 what it produces, which you could not do if it had already scheduled. Your
 worker receives `%{"source" => "doc_crawler"}` and polls that one scanner.
 
+### Scheduling several tenants
+
+A plan built with `tenant:` emits entries carrying it, so scheduling every
+tenant is a concatenation:
+
+```elixir
+crontab =
+  Enum.flat_map(MyApp.tenants(), fn t ->
+    ReactiveDag.Source.crontab(MyApp.Dag.plan(t))
+  end)
+
+#=> [{"0 12 * * *", ScanWorker, args: %{"sweep" => true, "tenant" => "a"}},
+#    {"0 12 * * *", ScanWorker, args: %{"sweep" => true, "tenant" => "b"}}]
+```
+
+Two entries at the same cadence, and they are DIFFERENT jobs — `ScanWorker`'s
+uniqueness is on `:args`, so without the tenant in there the second would be
+dropped as a duplicate of the first and one tenant would never crawl.
+
+The library does not know your tenant list, exactly as it does not know your
+plan. Pair the tenant with the plan builder in the job's own args so the worker
+rebuilds the right graph:
+
+```elixir
+args: %{"sweep" => true, "tenant" => t, "plan_mfa" => ["MyApp.Dag", "plan", [t]]}
+```
+
+`ReactiveDag.Job.plan/2` reads `"plan_mfa"` off the job, so each tenant's sweep
+polls its own upstreams, marks its own frontier and drains its own graph — and
+takes its own advisory lock, so tenants sweep concurrently rather than queueing
+behind one another.
+
 ## Seeing whether it worked
 
 A poll returns `%{changed: […], unreachable: […]}`, and both halves matter. An

@@ -208,7 +208,10 @@ defmodule ReactiveDag.Frontier do
   """
   @spec with_lock((-> result), keyword()) :: {:ok, result} | :busy when result: term()
   def with_lock(fun, opts \\ []) when is_function(fun, 0) do
-    key = :erlang.phash2(Keyword.get(opts, :scope, dirty()))
+    # `Keyword.get/3`'s default only applies when the key is ABSENT, so an
+    # explicit `scope: nil` would hash nil and silently move the lock for every
+    # caller that passes the option through. nil means "no scope" here.
+    key = :erlang.phash2(Keyword.get(opts, :scope) || dirty())
 
     case query!("SELECT pg_try_advisory_lock($1)", [key]) do
       %{rows: [[true]]} ->

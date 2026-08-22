@@ -175,7 +175,14 @@ if Code.ensure_loaded?(Oban.Worker) do
       # is the expensive half. Oban's uniqueness already stops the duplicate
       # ENQUEUE; this covers a host that triggers a sweep by hand, or one whose
       # jobs were inserted before the unique constraint existed.
-      case ReactiveDag.Frontier.with_lock(fn -> sweep(plan, opts, args) end) do
+      # SCOPED to the plan's tenant, so tenants sweep CONCURRENTLY. The lock
+      # exists to stop two nodes polling the same upstreams at the same minute;
+      # two different tenants polling their own upstreams is not that, and one
+      # global lock would make them queue behind each other — the opposite of
+      # why a graph is per tenant.
+      case ReactiveDag.Frontier.with_lock(fn -> sweep(plan, opts, args) end,
+             scope: lock_scope(plan)
+           ) do
         {:ok, result} ->
           result
 
@@ -349,6 +356,13 @@ if Code.ensure_loaded?(Oban.Worker) do
     # An outage is not a quiet success: the poll wrote nothing for the upstreams
     # it could not reach, so those keys are STALE rather than absent, and nothing
     # downstream will recompute to reveal it.
+    # The advisory-lock key: the dirty table for an untenanted plan (the previous
+    # behaviour, byte for byte), else that table AND the tenant — so tenants do
+    # not contend and two nodes on one tenant still do.
+    defp lock_scope(%ReactiveDag.Plan{tenant: "*"}), do: nil
+    defp lock_scope(%ReactiveDag.Plan{tenant: t}), do: {:tenant, t}
+    defp lock_scope(_plan), do: nil
+
     defp sweep(plan, opts, args) do
       t0 = System.monotonic_time(:microsecond)
 
