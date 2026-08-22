@@ -205,8 +205,8 @@ defmodule ReactiveDag.DirtiesOnTest do
     # stores the PRIOR too, so claim can return it — the whole point of #60
     def query!("INSERT INTO " <> _, params) do
       params
-      |> Enum.chunk_every(5)
-      |> Enum.each(fn [cell, key, _r, _t, prior] ->
+      |> Enum.chunk_every(6)
+      |> Enum.each(fn [cell, _tenant, key, _r, _t, prior] ->
         # ON CONFLICT DO NOTHING: the FIRST snapshot wins
         Agent.update(__MODULE__, fn m -> Map.put_new(m, {cell, key}, prior) end)
       end)
@@ -219,7 +219,7 @@ defmodule ReactiveDag.DirtiesOnTest do
       %{rows: Enum.map(ids, &[&1])}
     end
 
-    def query!("DELETE FROM " <> _, [cell]) do
+    def query!("DELETE FROM " <> _, [cell | _tenant]) do
       rows =
         Agent.get_and_update(__MODULE__, fn m ->
           {mine, rest} = Enum.split_with(m, fn {{c, _}, _} -> c == cell end)

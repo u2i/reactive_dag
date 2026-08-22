@@ -146,8 +146,8 @@ defmodule ReactiveDag.ScanWorkerTest do
 
     def query!("INSERT INTO " <> _, p) do
       p
-      |> Enum.chunk_every(5)
-      |> Enum.each(fn [c, k, r, _, _] -> Agent.update(__MODULE__, &MapSet.put(&1, {c, k, r})) end)
+      |> Enum.chunk_every(6)
+      |> Enum.each(fn [c, _tenant, k, r, _, _] -> Agent.update(__MODULE__, &MapSet.put(&1, {c, k, r})) end)
 
       %{rows: []}
     end
@@ -155,7 +155,7 @@ defmodule ReactiveDag.ScanWorkerTest do
     def query!("SELECT DISTINCT cell_id" <> _, _),
       do: %{rows: Agent.get(__MODULE__, & &1) |> Enum.map(&[elem(&1, 0)]) |> Enum.uniq()}
 
-    def query!("DELETE FROM " <> _, [cell]) do
+    def query!("DELETE FROM " <> _, [cell | _tenant]) do
       c =
         Agent.get_and_update(__MODULE__, fn s ->
           {m, r} = Enum.split_with(s, fn {x, _, _} -> x == cell end)
