@@ -429,6 +429,82 @@ defmodule ReactiveDag.InsightsTest do
       assert Insights.recent() |> Enum.map(& &1.run.duration_us) == [5, 4]
     end
 
+    test "an entry records WHICH GRAPH the run was" do
+      Insights.record(%Drain.Report{passes: 1, steps: []}, tenant: "village")
+
+      assert [%{tenant: "village"}] = Insights.recent()
+    end
+
+    test "a host with one graph records no tenant" do
+      Insights.record(%Drain.Report{passes: 1, steps: []})
+
+      assert [%{tenant: nil}] = Insights.recent()
+    end
+
+    test ~s|a plan's `"*"` is recorded as no tenant| do
+      # `"*"` is the FRONTIER's spelling for "untenanted" and belongs there. An
+      # entry says `nil`, which reads correctly in a log line — a host with one
+      # graph should not see `*` in a column headed "graph".
+      Insights.record(%Drain.Report{passes: 1, steps: []}, tenant: "*")
+
+      assert [%{tenant: nil}] = Insights.recent()
+    end
+
+    test "recent/2 returns ONE tenant's runs" do
+      Insights.record(%Drain.Report{passes: 1, steps: []}, tenant: "village")
+      Insights.record(%Drain.Report{passes: 2, steps: []}, tenant: "town")
+      Insights.record(%Drain.Report{passes: 3, steps: []}, tenant: "village")
+
+      assert Insights.recent(:all, tenant: "village")
+             |> Enum.map(& &1.run.report.passes) == [3, 1]
+
+      assert Insights.recent(:all, tenant: "town")
+             |> Enum.map(& &1.run.report.passes) == [2]
+    end
+
+    test "unfiltered still returns every tenant's — one operator, every graph" do
+      Insights.record(%Drain.Report{passes: 1, steps: []}, tenant: "village")
+      Insights.record(%Drain.Report{passes: 2, steps: []}, tenant: "town")
+
+      assert Insights.recent() |> length() == 2
+    end
+
+    test "the limit counts THIS tenant's runs, not everyone's" do
+      # The filter has to be applied BEFORE the limit. Taking twenty-five of
+      # everyone's and then filtering shows a log of two when the tenant has
+      # twenty-five — and looks like a quiet graph rather than a truncated list.
+      for i <- 1..5 do
+        Insights.record(%Drain.Report{passes: i, steps: []}, tenant: "town")
+        Insights.record(%Drain.Report{passes: i, steps: []}, tenant: "village")
+      end
+
+      assert Insights.recent(3, tenant: "village")
+             |> Enum.map(& &1.run.report.passes) == [5, 4, 3]
+    end
+
+    test "an untenanted entry is not claimed by a filtered read" do
+      # Recorded before its host declared tenants. Showing it as the village's
+      # asserts something the recording never said.
+      Insights.record(%Drain.Report{passes: 9, steps: []})
+
+      assert Insights.recent(:all, tenant: "village") == []
+      assert Insights.recent() |> length() == 1
+    end
+
+    test "last_run/1 is scoped too" do
+      Insights.record(%Drain.Report{passes: 1, steps: []}, tenant: "village")
+      Insights.record(%Drain.Report{passes: 2, steps: []}, tenant: "town")
+
+      assert Insights.last_run(tenant: "village").run.report.passes == 1
+      assert Insights.last_run().run.report.passes == 2
+    end
+
+    test "a SCAN run carries its tenant as well" do
+      Insights.record(%ScanRun{cell: "docs", duration_us: 7}, tenant: "village")
+
+      assert [%{tenant: "village", polled?: true}] = Insights.recent()
+    end
+
     test "recent/1 takes a limit" do
       for i <- 1..4, do: Insights.record(%Drain.Report{passes: i, steps: []})
       assert Insights.recent(2) |> Enum.map(& &1.run.report.passes) == [4, 3]

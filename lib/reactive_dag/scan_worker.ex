@@ -251,6 +251,10 @@ if Code.ensure_loaded?(Oban.Worker) do
               %{
                 cell: cell_id,
                 args: args,
+                # WHICH GRAPH this scan was. A handler recording the run needs it
+                # to pass to `Insights.record/2`, and the plan is the only thing
+                # that knows — a job argument cannot carry one.
+                tenant: plan.tenant,
                 unreachable: result.unreachable,
                 detail: result[:detail] || %{},
                 report: report,
@@ -396,6 +400,10 @@ if Code.ensure_loaded?(Oban.Worker) do
             %{
               cell: :sweep,
               args: args,
+              # WHICH GRAPH this sweep was — same reason as the single-cell scan
+              # above: a handler recording the run needs it for
+              # `Insights.record/2`, and only the plan knows.
+              tenant: plan.tenant,
               sources: Map.keys(results),
               results: results,
               report: report
