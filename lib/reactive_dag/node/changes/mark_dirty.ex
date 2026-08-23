@@ -32,7 +32,7 @@ defmodule ReactiveDag.Node.Changes.MarkDirty do
   @impl true
   def change(changeset, opts, _context) do
     Ash.Changeset.after_action(changeset, fn cs, result ->
-      mark(result, prior_of(cs, result), opts)
+      mark(result, prior_of(cs, result), opts, cs.tenant)
       maybe_schedule_drain(opts)
       {:ok, result}
     end)
@@ -101,18 +101,25 @@ defmodule ReactiveDag.Node.Changes.MarkDirty do
       fn -> ReactiveDag.DrainWorker.enqueue() end
   end
 
-  defp mark(record, prior, opts) do
+  defp mark(record, prior, opts, tenant) do
     cell = Keyword.fetch!(opts, :cell)
+
+    # The tenant off the CHANGESET, which is where a tenanted write already put
+    # it — there is no plan in scope here, and a `dirties_on` mark that omitted
+    # it would name work that tenant's drain never reads. A drain finding nothing
+    # reports success, so the write would look handled and nothing would
+    # recompute.
+    frontier = if tenant, do: [tenant: tenant], else: []
 
     case key_of(record, opts) do
       nil ->
         # A record with no derivable key cannot be named downstream. Escalating
         # to a whole-cell claim is the honest fallback: correct, and loud in the
         # Report rather than silently missing.
-        ReactiveDag.Frontier.mark_dirty(cell, ["*"], "written (no key)")
+        ReactiveDag.Frontier.mark_dirty(cell, ["*"], "written (no key)", frontier)
 
       key ->
-        ReactiveDag.Frontier.mark_dirty(cell, [{key, snapshot(prior)}], "written")
+        ReactiveDag.Frontier.mark_dirty(cell, [{key, snapshot(prior)}], "written", frontier)
     end
   end
 
