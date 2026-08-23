@@ -6,10 +6,13 @@ no upstream data contains. That mark has to live somewhere, survive the right
 recomputes, lapse on the wrong ones, and — the part hosts most often get wrong —
 **re-run the cascade**, because a human edit is an input change like any other.
 
-Two declarations cover it:
+Three declarations cover it, and the third points the other way:
 
 - `augmented_by` — which of this node's actions are human edits. They mark the
   node's key dirty; the library's own payload write does not.
+- `gated` — the inverse: a MACHINE change that waits for a person before it
+  propagates. `augmented_by` is a human's edit entering the graph; `gated` is the
+  graph's own claim held until someone signs it off.
 - `lapse` — what a machine recompute does to the human's mark: leave it,
   clear it, or clear it only when the fields the human was actually looking at
   move.
@@ -270,6 +273,67 @@ longer holds, but broad. `when_changed:` with a narrow field list is usually
 the better declaration here: a cosmetic edit to one line then leaves the
 sign-off standing, while a change to the figures clears it.
 
+## `gated` — a change waits for a person
+
+Everything above is about a human's mark surviving the machine. `gated` is the
+other direction: **the machine's change waiting for a human.**
+
+```elixir
+reactive do
+  id :agenda_items
+  gated human?: {MyApp.Auth, :person?, []}
+end
+```
+
+The row is still written. What waits is the CASCADE — the consumers do not
+recompute until someone approves. That distinction is the whole design: a host's
+derived tables are usually what it serves, so holding the write would put a
+review queue between a write and the page showing it. Holding the propagation
+leaves the table readable and the downstream figures unmoved.
+
+**The actor decides, not the cell alone.** `gated true` holds every change through
+the node. The `human?:` form holds only the MACHINE ones: the MFA is called with
+the write's actor, and a person's edit propagates immediately. Nobody should
+queue for approval of their own edit; an extractor claiming what a meeting
+decided is exactly what wants review.
+
+The library cannot tell a person from a service account — your LLM calls may well
+run as their own identity — so you say. A nil actor is a machine: nothing claimed
+to be a person.
+
+### Reviewing
+
+```elixir
+Frontier.awaiting("agenda_items")   #=> [{key, diff}] — what is held, and its diff
+Frontier.approve("agenda_items", ["_05132025-671"])
+Frontier.reject("agenda_items", :all)
+```
+
+A held change's diff IS the review: `%{field => %{"from" => old, "to" => new}}`,
+both sides, which is what a reviewer needs to see. `reject/3` discards the mark —
+the row stands and the consumers stay as they were, which is the honest meaning
+of "no" when the gate holds propagation rather than the write.
+
+A second change to a held key MERGES into it (`Frontier.merge_diffs/2`): earliest
+`from`, latest `to`. So a row edited three times before review shows one diff
+covering the whole state change, and never an intermediate value no settled state
+held.
+
+### Where a gate belongs
+
+On an extraction boundary — a node making claims about the world from something
+a machine read. Not on arithmetic over already-approved inputs: gating a sum adds
+a human step to addition.
+
+And count the cost before declaring one. A gate stalls **everything downstream**
+until someone acts, which on a real host meant eleven cells behind one node. That
+is the point — those eleven all rest on the same claim — but it is a person's
+attention standing between a document arriving and a figure updating.
+
+One thing to know going in: the reviewer approves the diff of the GATED cell, not
+of what the cascade will make of it. Approving an extraction is not previewing the
+summary that follows from it.
+
 ## What to reach for
 
 | you want | declare |
@@ -281,6 +345,8 @@ sign-off standing, while a change to the figures clears it.
 | ...about *particular* content | `lapse :attr, when_changed: [:fields]` |
 | several marks per key | `lapse MyApp.Child, when_changed: …` |
 | one mark over a set of keys | `+ over: :unit` (a `recompute_by` unit) |
+| a machine's change to wait for review | `gated human?: {M, :f, []}` |
+| ...every change to wait, whoever made it | `gated true` |
 
 ## See also
 

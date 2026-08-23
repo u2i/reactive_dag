@@ -418,6 +418,14 @@ the host can surface the gap.
 **Human edits** — a managed list or an approval writes a leaf like anything else:
 the host's normal write, then a dirty mark (or `dirties_on`).
 
+**Human review** — the inverse. `gated human?: {MyApp.Auth, :person?, []}` holds
+a MACHINE change's propagation until someone approves it: the row is written, but
+the consumers do not recompute. The row stays readable — which matters when the
+derived tables are what you serve — and a person's own edit passes straight
+through, because nobody should queue for approval of their own edit.
+`Frontier.awaiting/2` lists what is held, with the diff to review;
+`approve/3` and `reject/3` decide.
+
 **More:** [Sources and scanning](https://hexdocs.pm/reactive_dag/sources.html)
 covers the parts a real scanner runs into — why the poll/drain split is a design
 invariant rather than a convention, one crawl feeding several downstream nodes
@@ -603,6 +611,12 @@ the commands turned out to be straight CRUD drained inline, so nothing was ever
 queued; the database already provided the serialization, and its scope-freeze
 turned a failed edit into a wedged queue. A genuinely deferred, approval-gated
 write is the case that would justify bringing it back.
+
+`gated` (2026-08) is the review need met WITHOUT it: it holds a change's
+propagation rather than the write, so there is no deferred intent to serialize
+and nothing to wedge — the row is already in the database, and only the cascade
+waits. The command frontier would still be the answer if a host needed the write
+itself deferred.
 
 ## Status
 
