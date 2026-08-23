@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.17.0-rc.47](https://github.com/u2i/reactive_dag/compare/v0.17.0-rc.46...v0.17.0-rc.47) (2026-08-23)
+
+
+### Bug Fixes
+
+* the last two marking paths that dropped the tenant ([#203](https://github.com/u2i/reactive_dag/issues/203)) ([34c217b](https://github.com/u2i/reactive_dag/commit/34c217b77e0bcc44d9f25eeb9fbd62a93c2c9c85))
+
 ## [0.17.0-rc.46](https://github.com/u2i/reactive_dag/compare/v0.17.0-rc.45...v0.17.0-rc.46) (2026-08-22)
 
 
