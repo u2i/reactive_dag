@@ -406,10 +406,12 @@ defmodule ReactiveDag.Node do
         required: false,
         doc:
           "REQUIRED with `over:`; implied by a `recompute_by` that declares `from:`. " <>
-            "An attribute or CALCULATION on the over resource (`:fund`, or `:month` where " <>
-            "the over declares `calculate :month, :string, {ReactiveDag.Calendar, " <>
-            "bucket: :month, of: :date}` — derived grouping values are Ash calculations, " <>
-            "declared where the data lives; the library loads them). A list groups by " <>
+            "An attribute or CALCULATION on the over resource (`:fund`, or a `:month` a " <>
+            "calculation derives from a date — derived grouping values are Ash " <>
+            "calculations, declared where the data lives; the library loads them). " <>
+            "NOTE a calculation grain cannot be resolved from a change's diff, so its " <>
+            "propagation falls back to a whole-cell claim; an ATTRIBUTE grain claims " <>
+            "only the units a change actually touched. A list groups by " <>
             "the TUPLE of values; an entry may be the RELATIONAL-JOIN pair " <>
             "`parent_column: :child_field` (`[category: :expense_cat]` — group by the " <>
             "child's field, carry it as this node's column: Ash's source/destination " <>
@@ -1881,7 +1883,6 @@ defmodule ReactiveDag.Node do
   # the ONE cross-node fact behind every `:group` capability — an ordered plan
   # of what each group entry IS on the over resource:
   #   {:attr, name, string?}       — a plain attribute (string? gates equality scoping)
-  #   {:calendar, kind, of_attr}   — a ReactiveDag.Calendar calculation (pure
   #                                  key resolution + date-range scoping)
   #   {:calc, name}                — an opaque calculation (lookup-resolvable only)
   # Only for a reduce with a declarative group and DEFAULT key derivation —
@@ -1894,11 +1895,8 @@ defmodule ReactiveDag.Node do
         attr = Ash.Resource.Info.attribute(resource, name) ->
           {:attr, name, attr.type == Ash.Type.String}
 
-        calc = Ash.Resource.Info.calculation(resource, name) ->
-          case calc.calculation do
-            {ReactiveDag.Calendar, opts} -> {:calendar, opts[:bucket], opts[:of]}
-            _ -> {:calc, name}
-          end
+        Ash.Resource.Info.calculation(resource, name) ->
+          {:calc, name}
 
         true ->
           {:calc, name}
@@ -1922,7 +1920,7 @@ defmodule ReactiveDag.Node do
   # a declarative group_by / left / right entry names an ATTRIBUTE or a
   # CALCULATION on the over resource (derived grouping values — a calendar
   # bucket, a normalized code — are Ash calculations, declared where the data
-  # lives; see `ReactiveDag.Calendar`). Checkable only here, where the over
+  # lives). Checkable only here, where the over
   # resource is known. Returns the calculations to `Ash.Query.load` at read.
   defp declarative_loads!(cell, spec, resource) do
     names =

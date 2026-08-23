@@ -21,7 +21,7 @@ defmodule ReactiveDag.Node.Recompute.Declarative do
   values. An entry names an attribute OR a CALCULATION on the over resource —
   derived grouping values (a calendar bucket, a normalized code) are Ash
   calculations, declared where the data lives; the library loads them in the
-  read (`ReactiveDag.Calendar` ships the calendar ones). The RELATIONAL-JOIN
+  read. The RELATIONAL-JOIN
   spelling `{parent_field, child_field}` (`[category: :expense_cat]`) groups by
   the CHILD field while the row carries the PARENT column — Ash's
   source/destination-attribute pair, for the DAG edge.

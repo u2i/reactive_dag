@@ -246,9 +246,10 @@ defmodule ReactiveDag.Node.Recompute do
   #   :identity        → the claimed keys ARE the over's keys: filter payload_key.
   #   :group (any form) → the claimed keys are group labels: invert them through
   #                     assembly's group_key_plan — a plain string attribute
-  #                     filters by equality; a Calendar bucket by its date-range
-  #                     HULL (a superset read is still closed over groups —
-  #                     extra groups recompute and change-detect to nothing).
+  #                     filters by equality. A composite unit filters every
+  #                     column by the values seen, which is a HULL (a superset
+  #                     read is still closed over groups — extra groups recompute
+  #                     and change-detect to nothing).
   #   anything else    → no auto scope: a grain-changing host rule's claims must
   #                     not filter the child-grain read; `query:` still receives
   #                     them for host-grain scoping.
@@ -266,7 +267,7 @@ defmodule ReactiveDag.Node.Recompute do
 
   # `:group` claims are group labels; when assembly's group_key_plan proves a
   # SINGLE-entry group, the labels invert to a data predicate: a plain string
-  # attribute's values (`attr in claims`), or a Calendar bucket's date-range
+  # attribute's values (`attr in claims`)
   # HULL. Multi-entry groups and opaque calculations don't invert — the read
   # stays whole (or `query:`-scoped) rather than guessing wrong.
   defp group_scope(_meta, nil), do: nil
@@ -283,16 +284,6 @@ defmodule ReactiveDag.Node.Recompute do
     case meta[:over_source] do
       %{group_key_plan: [{:attr, attr, true}]} ->
         {:attr, attr, values}
-
-      %{group_key_plan: [{:calendar, kind, attr}]} ->
-        ranges = Enum.map(values, &ReactiveDag.Calendar.range(kind, &1))
-
-        if :error in ranges do
-          nil
-        else
-          {froms, tos} = Enum.unzip(ranges)
-          {:range, attr, Enum.min(froms, Date), Enum.max(tos, Date)}
-        end
 
       # a COMPOSITE unit: each claim is its columns joined with "|", so split
       # them back apart and scope each column by the values seen at its

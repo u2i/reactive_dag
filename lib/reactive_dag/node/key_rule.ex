@@ -23,12 +23,14 @@ defmodule ReactiveDag.Node.KeyRule do
 
   def rule(%Cell{meta: %{key_rule: :all}}, _child, _changed), do: :all
 
-  # `{:group, from: :key}` — pure resolution: the key's leading `|`-segments
-  # carry the group's INPUT fields in group_by order (a plain attribute's
-  # value; a Calendar calculation's raw date, relabeled through the calc's own
-  # bucket). No query, and deletion-safe: a vanished key still names the group
-  # it left. A key that violates the grammar degrades the propagation to :all
-  # — correctness over precision.
+  # `{:group, from: :key}` — pure resolution: the key's leading `|`-segments carry
+  # the group's INPUT fields in `group_by` order. No query, and deletion-safe: a
+  # vanished key still names the group it left. A key that violates the grammar
+  # degrades the propagation to `:all` — correctness over precision.
+  #
+  # The DIFF path answers the same question without a key grammar, and answers a
+  # move better (both units, not one), so this rung is the narrow case where a
+  # host wants resolution with no read at all.
   def rule(%Cell{meta: %{key_rule: {:group, _opts}} = meta}, _child, changed) do
     pure_group_claims(meta, changed)
   end
@@ -334,12 +336,6 @@ defmodule ReactiveDag.Node.KeyRule do
         |> Enum.map(fn
           {{:attr, _name, _string?}, seg} ->
             seg
-
-          {{:calendar, kind, _of}, seg} ->
-            case ReactiveDag.Calendar.parse(seg) do
-              {_child_kind, first} -> ReactiveDag.Calendar.label(kind, first)
-              :error -> :error
-            end
 
           {{:calc, _name}, _seg} ->
             # an opaque calculation can't be evaluated from a segment

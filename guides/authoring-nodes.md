@@ -141,7 +141,7 @@ Four answers to the one question:
 | *(omitted)* | key-for-key — a changed input key maps to the same output key |
 | `recompute_by :cat, from: :field` | per unit, resolved by **reading** the changed rows; a key the lookup can't find (a deleted row) degrades to whole-cell |
 | `recompute_by [fund: :fund_code, fy: :fy]` | a **composite** unit — the grain IS the grouping, so `group_by:` is not restated |
-| `recompute_by :month, from_key: true` | per unit, resolved **purely** from the changed key's `\|`-segments — no query, deletion-safe, at the price of the key-grammar contract |
+| `recompute_by :month, from_key: true` | per unit, resolved **purely** from the changed key's `\|`-segments — no query at all, at the price of the key-grammar contract. Rarely needed: a change's diff resolves the unit without either a query or a grammar |
 | `recompute_by :cell` | the whole cell — any change re-does everything |
 
 ### Composite grain
@@ -264,7 +264,7 @@ cell key.
 ```elixir
 # on the data's resource — usable by ANY Ash consumer, not just the DAG
 calculations do
-  calculate :month, :string, {ReactiveDag.Calendar, bucket: :month, of: :date}
+  calculate :month, :string, expr(fragment("to_char(?, 'YYYY-MM')", date))
 end
 
 # the rollup node: daily readings → monthly totals, keys like "2026-08"
@@ -273,11 +273,12 @@ reduce over: :readings,
        into: [sum: [value: :total], count: :n]
 ```
 
-`ReactiveDag.Calendar` ships `:day`/`:week`/`:month`/`:quarter`/`:year`
-buckets, computes in the BEAM (works on every data layer), and its labels sort
-chronologically. A Postgres host wanting pushdown declares an
-`expr(fragment("to_char(?, 'YYYY-MM')", date))` calculation instead — the
-rollup neither knows nor cares.
+**Prefer a plain ATTRIBUTE for the grain where you can.** A calculation groups
+correctly, but its propagation is coarser: a change's claim is derived from the
+change's own DIFF, and a diff holds attributes rather than evaluated
+expressions — so a calculation grain falls back to a whole-cell claim while an
+attribute grain claims only the units the change actually touched. Storing the
+bucket as a column on write costs one string and buys per-unit propagation.
 
 And the mid-granularity claims come from the same declaration — the unit:
 
@@ -292,27 +293,30 @@ can't find — a deleted row — degrades to whole-cell, since vanish must repri
 everything it might have left). When the unit is one plain string attribute,
 the library also scopes the read to the claimed units (`category in claims`).
 
-`from_key: true` trades that lookup for PURE resolution when keys carry the
-unit's input fields as leading `|`-segments (`"2026-08-11|r4"` — a plain
-attribute's value, or a Calendar calculation's raw date, relabeled through the
-same calculation `group_by` names): no query, and deletion-safe (a vanished key
-still names the unit it left). One declaration, two resolutions — there is no
-separate calendar rule, because the calendar already lives in exactly one
-place: the `group_by` calculation, which grouping, scoping, and claiming all
-read. Chained rollups (`readings → daily → monthly`) make every step a pure
-relabel of the child's key.
+Except that it usually is not read at all. A change carries its own DIFF — both
+sides of what moved — so the unit is derived from that, with no query and nothing
+to fail on a deleted row. The lookup above is the fallback for the cases a diff
+cannot answer: a calculation grain, a `%Join{}`, or a key that arrived without
+one (a source-fed leaf has no Ash row behind it).
+
+`from_key: true` trades the lookup for PURE resolution when keys carry the unit's
+input fields as leading `|`-segments (`"2026-08-11|r4"`): no query, and
+deletion-safe. It predates the diff and is now the narrow case — a host that
+wants resolution with no read whatsoever, and controls its own key grammar to get
+it. For anything else the diff is both cheaper and more precise, because it names
+the unit a moved row LEFT as well as the one it entered.
 
 The general soundness rule behind all of it: a scoped read must be **closed
 over unit boundaries** — the omitted (identity) case is entry-closure,
 `recompute_by :cat` (either resolution) is unit-closure, `:cell` is the
 universe. The read auto-scope inverts claims through the same group plan: a
-plain string attribute filters by equality, a Calendar bucket by its date
-range. `key_rule` at block level remains for nodes with **no** combinator
+plain string attribute filters by equality, a composite unit by every column's
+seen values. `key_rule` at block level remains for nodes with **no** combinator
 (`run`/`compute`/leaves); declaring it alongside `recompute_by` is a compile
 error, since they are the same fact.
-`test/date_rollup_demo_test.exs` and `test/group_rule_test.exs` are the worked
-demos: touch one reading (or one expense), watch exactly one month (or
-category) recompute and propagate.
+`test/group_rule_test.exs` is the worked demo: touch one expense, watch exactly
+one category recompute and propagate. `test/payload_diff_propagation_test.exs`
+shows the move — one row changing group claims BOTH units.
 
 ### `join` — a left join (one input, two sides), declared
 
