@@ -81,7 +81,8 @@ defmodule ReactiveDag.Insights do
   @type entry :: %{
           run: ScanRun.t(),
           at: DateTime.t(),
-          polled?: boolean()
+          polled?: boolean(),
+          tenant: String.t() | nil
         }
 
   @typedoc "A cell's observable state."
@@ -257,27 +258,47 @@ defmodule ReactiveDag.Insights do
 
       plan |> ReactiveDag.Drain.run(opts) |> then(fn {:ok, r} -> Insights.record(r) end)
   """
-  @spec record(ScanRun.t()) :: ScanRun.t()
-  @spec record(Report.t()) :: Report.t()
-  def record(%ScanRun{} = run) do
-    put(run, true)
+  @spec record(ScanRun.t(), keyword()) :: ScanRun.t()
+  @spec record(Report.t(), keyword()) :: Report.t()
+  def record(run_or_report, opts \\ [])
+
+  def record(%ScanRun{} = run, opts) do
+    put(run, true, opts)
     run
   end
 
-  def record(%Report{} = report) do
+  def record(%Report{} = report, opts) do
     # A drain with no poll around it. `changed`/`unreachable`/`detail` stay at
     # their empty defaults, which is honest — there was no poll to report them —
     # and `duration_us` is the drain's own, so a log line's duration column means
     # the same thing on both kinds of row.
-    put(%ScanRun{report: report, duration_us: report.duration_us}, false)
+    put(%ScanRun{report: report, duration_us: report.duration_us}, false, opts)
     report
   end
 
-  defp put(run, polled?) do
+  defp put(run, polled?, opts) do
     ensure_table()
-    :ets.insert(table(), {counter(), stamp(run, polled?)})
+    :ets.insert(table(), {counter(), stamp(run, polled?, tenant_of(opts))})
     trim()
     :ok
+  end
+
+  # `:tenant` names WHICH GRAPH this run was. One buffer holds every tenant's
+  # runs — it is a process-wide window, not a per-plan one — so without this a
+  # host running several graphs cannot tell whose drain a log line describes.
+  #
+  # `nil` for a host with one graph, which is most of them, and what `recent/1`
+  # returns unfiltered. A plan's own tenant is `"*"` when it has none, but that
+  # is the FRONTIER's spelling for "untenanted" and belongs in the frontier: an
+  # entry says `nil` for "this host does not divide its graphs", which reads
+  # correctly in a log line and sorts out of a filter cleanly.
+  defp tenant_of(opts) do
+    case Keyword.get(opts, :tenant) do
+      nil -> nil
+      "*" -> nil
+      t when is_binary(t) -> t
+      t -> to_string(t)
+    end
   end
 
   @doc """
@@ -317,9 +338,26 @@ defmodule ReactiveDag.Insights do
   NOT see everything it meant to (`ReactiveDag.ScanRun.complete?/1`), and a
   consumer that renders it the same as an empty one is reporting a gap as a
   clean run.
+
+  ## Tenants
+
+  Pass `tenant:` to see ONE GRAPH's runs. The buffer is process-wide and holds
+  every tenant's, so a host running several graphs and reading unfiltered gets
+  another tenant's drain in the log it is showing for this one.
+
+      Insights.recent(25, tenant: "village")
+
+  The filter is applied BEFORE the limit, so twenty-five means twenty-five of
+  that tenant's — not twenty-five of everyone's, then whichever of them match.
+
+  Without it every entry comes back, which is right for a host with one graph
+  (its entries carry no tenant) and right for an operator who wants to see
+  everything at once.
   """
-  @spec recent(pos_integer() | :all) :: [entry()]
-  def recent(limit \\ :all) do
+  @spec recent(pos_integer() | :all, keyword()) :: [entry()]
+  def recent(limit \\ :all, opts \\ [])
+
+  def recent(limit, opts) do
     ensure_table()
 
     entries =
@@ -327,6 +365,7 @@ defmodule ReactiveDag.Insights do
       |> :ets.tab2list()
       |> Enum.sort_by(&elem(&1, 0), :desc)
       |> Enum.map(&elem(&1, 1))
+      |> filter_tenant(tenant_of(opts))
 
     case limit do
       :all -> entries
@@ -334,9 +373,21 @@ defmodule ReactiveDag.Insights do
     end
   end
 
-  @doc "The most recent run, or `nil` if none has been recorded."
-  @spec last_run() :: entry() | nil
-  def last_run, do: recent(1) |> List.first()
+  defp filter_tenant(entries, nil), do: entries
+
+  # An entry recorded before its host declared tenants carries no tenant at all,
+  # and is NOT claimed by whichever graph happens to be on screen: showing an
+  # untenanted run as the village's asserts something the recording never said.
+  defp filter_tenant(entries, tenant),
+    do: Enum.filter(entries, &(Map.get(&1, :tenant) == tenant))
+
+  @doc """
+  The most recent run, or `nil` if none has been recorded.
+
+  `tenant:` scopes it to one graph, like `recent/2`.
+  """
+  @spec last_run(keyword()) :: entry() | nil
+  def last_run(opts \\ []), do: recent(1, opts) |> List.first()
 
   @doc "Forget every retained run."
   @spec forget_runs() :: :ok
@@ -351,7 +402,8 @@ defmodule ReactiveDag.Insights do
   @table :reactive_dag_insights_runs
   defp table, do: @table
 
-  defp stamp(run, polled?), do: %{run: run, at: DateTime.utc_now(), polled?: polled?}
+  defp stamp(run, polled?, tenant),
+    do: %{run: run, at: DateTime.utc_now(), polled?: polled?, tenant: tenant}
 
   # `get_env` with an explicitly-stored nil returns nil, not the default (a test
   # or a release config that clears the key does exactly that), so fall back on
