@@ -138,8 +138,8 @@ defmodule ReactiveDag.TenantPlanTest do
 
     def query!("INSERT INTO " <> _, params) do
       params
-      |> Enum.chunk_every(7)
-      |> Enum.each(fn [cell, tenant, key, _r, _t, prior, _held] ->
+      |> Enum.chunk_every(8)
+      |> Enum.each(fn [cell, tenant, key, _r, _t, prior, _held, _vid] ->
         Agent.update(__MODULE__, fn rows ->
           # ON CONFLICT (tenant, cell_id, key) DO NOTHING — the FIRST mark wins,
           # so a re-mark must not replace the prior the first one captured.

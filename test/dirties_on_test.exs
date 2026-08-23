@@ -251,8 +251,8 @@ defmodule ReactiveDag.DirtiesOnTest do
     # stores the PRIOR too, so claim can return it — the whole point of #60
     def query!("INSERT INTO " <> _, params) do
       params
-      |> Enum.chunk_every(7)
-      |> Enum.each(fn [cell, tenant, key, _r, _t, prior, _held] ->
+      |> Enum.chunk_every(8)
+      |> Enum.each(fn [cell, tenant, key, _r, _t, prior, _held, _vid] ->
         # ON CONFLICT DO NOTHING: the FIRST snapshot wins
         # ON CONFLICT: MERGE the diffs, via the library's own rule — the earliest
         # prior side and the latest `to`. `Map.put_new` modelled `DO NOTHING`,

@@ -28,11 +28,12 @@ defmodule ReactiveDag.Node.Changes.MarkDirty do
   the sources guide.
   """
   use Ash.Resource.Change
+  require Logger
 
   @impl true
   def change(changeset, opts, context) do
     Ash.Changeset.after_action(changeset, fn cs, result ->
-      mark(result, prior_of(cs, result), opts, cs.tenant, Map.get(context, :actor))
+      mark(result, prior_of(cs, result), opts, cs.tenant, Map.get(context, :actor), cs)
       maybe_schedule_drain(opts)
       {:ok, result}
     end)
@@ -107,7 +108,7 @@ defmodule ReactiveDag.Node.Changes.MarkDirty do
       fn -> ReactiveDag.DrainWorker.enqueue() end
   end
 
-  defp mark(record, prior, opts, tenant, actor) do
+  defp mark(record, prior, opts, tenant, actor, changeset) do
     cell = Keyword.fetch!(opts, :cell)
 
     # The tenant off the CHANGESET, which is where a tenanted write already put
@@ -127,8 +128,33 @@ defmodule ReactiveDag.Node.Changes.MarkDirty do
         ReactiveDag.Frontier.mark_dirty(cell, ["*"], "written (no key)", frontier)
 
       key ->
-        ReactiveDag.Frontier.mark_dirty(cell, [{key, diff(prior, record)}], "written", frontier)
+        entry = {key, diff(prior, record), version_id(opts[:version_id], record, changeset)}
+        ReactiveDag.Frontier.mark_dirty(cell, [entry], "written", frontier)
     end
+  end
+
+  # The id of the version recording this change, from the host's own resolver.
+  # Nil when the node declares none — the mark then carries the diff only, which
+  # is all propagation needs; what is missing is the durable record.
+  #
+  # A raise here would fail the host's WRITE over a bookkeeping lookup, so a
+  # resolver that blows up costs the record and nothing else. Logged, because a
+  # silently absent version is exactly the thing an audit trail cannot afford.
+  defp version_id(nil, _record, _changeset), do: nil
+
+  defp version_id(resolver, record, changeset) do
+    case resolver do
+      {m, f, a} -> apply(m, f, [record, changeset | a])
+      fun when is_function(fun, 2) -> fun.(record, changeset)
+    end
+  rescue
+    e ->
+      Logger.warning(
+        "reactive_dag: version_id resolver failed (#{Exception.message(e)}); " <>
+          "the mark carries its diff but no durable record"
+      )
+
+      nil
   end
 
   # Does this change wait for a human?

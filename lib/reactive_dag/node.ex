@@ -1285,6 +1285,27 @@ defmodule ReactiveDag.Node do
             "following from the answer rather than being a separate switch. Leave it false " <>
             "on a DERIVED node, where a row whose inputs are gone is stale, not archival."
       ],
+      version_id: [
+        type: {:or, [:mfa, {:fun, 2}]},
+        required: false,
+        doc:
+          "how to find the VERSION recording a change to this node's rows — an MFA " <>
+            "or `fn record, changeset -> id end`, called after the write and stored on " <>
+            "the mark.\n\n" <>
+            "A queue row says which entity changed; the version says what the change " <>
+            "WAS. The queue is consumed (`DELETE … RETURNING`), so an approved or " <>
+            "rejected change is only explicable afterwards if something durable holds " <>
+            "it — which is what the version is for.\n\n" <>
+            "The library cannot find it on its own: a version resource belongs to the " <>
+            "HOST, one per versioned resource, with whatever name and key type the host " <>
+            "chose. `ash_paper_trail` with `change_tracking_mode :full_diff` writes " <>
+            "exactly the shape `ReactiveDag.Node.Diff` reads, and " <>
+            "`primary_key_type :uuid_v7` makes its ids sortable — so " <>
+            "`version_id {MyApp.Versions, :latest_for, []}` is the usual wiring.\n\n" <>
+            "Omit it and the mark carries the diff only: propagation is unaffected " <>
+            "(the diff is what a claim is derived from), and there is simply no durable " <>
+            "record to look back at."
+      ],
       gated: [
         type: {:or, [:boolean, :keyword_list]},
         required: false,

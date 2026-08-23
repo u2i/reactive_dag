@@ -88,8 +88,8 @@ defmodule ReactiveDag.DrainTelemetryTest do
 
     def query!("INSERT INTO " <> _, params) do
       params
-      |> Enum.chunk_every(7)
-      |> Enum.each(fn [cell, _tenant, key, _r, _t, _prior, _held] ->
+      |> Enum.chunk_every(8)
+      |> Enum.each(fn [cell, _tenant, key, _r, _t, _prior, _held, _vid] ->
         Agent.update(__MODULE__, &MapSet.put(&1, {cell, key}))
       end)
 

@@ -57,15 +57,30 @@ defmodule ReactiveDag.Migration do
       add(:key, :text, null: false)
       add(:reason, :text)
       add(:enqueued_at, :utc_datetime_usec)
-      # The DIFF the change was marked with — `%{attr => %{"from" =>, "to" =>}}`,
-      # both sides, so a consumer can name the unit a row left as well as the one
-      # it landed in. See `ReactiveDag.Frontier.merge_diffs/2`.
+      # WHAT THE CHANGE DID, by reference: the id of the version row recording
+      # it. A queue row says which entity changed; the version says what the
+      # change was, and a consumer derives its own affected units from the two.
       #
-      # Still called `prior` because it once held only the prior side, and
-      # renaming a column costs every host a migration to buy a better word.
-      # Nullable: a source-fed key has no Ash record behind it. Cheap because
-      # this table is a QUEUE — rows live from mark to claim, then
-      # DELETE … RETURNING removes them.
+      # A REFERENCE rather than the diff inlined, because the change outlives the
+      # work item. This table is a queue — rows live from mark to claim, then
+      # `DELETE … RETURNING` removes them — so an inlined diff is destroyed by
+      # the drain that consumes it. The version persists, which is what makes an
+      # approved change auditable after the fact and a rejected one explicable.
+      #
+      # Nullable: a source-fed key has no Ash record behind it, and a
+      # recalculation (a reprocess, a prompt change) is not a row change at all.
+      # Untyped text, not a foreign key: the version table is the HOST's, one per
+      # versioned resource, so there is nothing single to reference.
+      add(:version_id, :text)
+
+      # The DIFF, still inlined, for the propagation path. Reading the version
+      # back to derive a claim would be a round trip to recover what the writer
+      # held in hand at mark time — see `ReactiveDag.Node.Payload`. So this is the
+      # working copy and `version_id` is the durable record; they are written
+      # together and never disagree.
+      #
+      # Called `prior` because it once held only the prior side. Renaming it costs
+      # every host a migration to buy a better word.
       add(:prior, :map)
 
       # NULL for an ordinary mark — the overwhelming majority — so a host that

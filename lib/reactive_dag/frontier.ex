@@ -67,8 +67,10 @@ defmodule ReactiveDag.Frontier do
       entries
       |> Enum.with_index()
       |> Enum.map_join(", ", fn {_e, i} ->
-        b = i * 7
-        "($#{b + 1}, $#{b + 2}, $#{b + 3}, $#{b + 4}, $#{b + 5}, $#{b + 6}, $#{b + 7})"
+        b = i * 8
+
+        "($#{b + 1}, $#{b + 2}, $#{b + 3}, $#{b + 4}, $#{b + 5}, $#{b + 6}, $#{b + 7}, " <>
+          "$#{b + 8})"
       end)
 
     # `awaiting_approval` is per CALL, not per key: a gated cell holds every
@@ -77,13 +79,13 @@ defmodule ReactiveDag.Frontier do
     held = if Keyword.get(opts, :awaiting_approval, false), do: true, else: nil
 
     params =
-      Enum.flat_map(entries, fn {k, prior} ->
-        [cell, tenant, k, reason, now, prior, held]
+      Enum.flat_map(entries, fn {k, prior, version_id} ->
+        [cell, tenant, k, reason, now, prior, held, version_id]
       end)
 
     query!(
       "INSERT INTO #{dirty()} " <>
-        "(cell_id, tenant, key, reason, enqueued_at, prior, awaiting_approval) " <>
+        "(cell_id, tenant, key, reason, enqueued_at, prior, awaiting_approval, version_id) " <>
         "VALUES #{placeholders} " <> on_conflict_merge(),
       params
     )
@@ -112,8 +114,13 @@ defmodule ReactiveDag.Frontier do
     end
   end
 
-  defp normalize_entry({key, prior}) when is_map(prior) or is_nil(prior), do: {key, prior}
-  defp normalize_entry(key), do: {key, nil}
+  # Three shapes, widening: a bare key, a key with its diff, or a key with both
+  # its diff and the id of the VERSION recording that change.
+  defp normalize_entry({key, prior, version_id}) when is_map(prior) or is_nil(prior),
+    do: {key, prior, version_id}
+
+  defp normalize_entry({key, prior}) when is_map(prior) or is_nil(prior), do: {key, prior, nil}
+  defp normalize_entry(key), do: {key, nil, nil}
 
   @doc """
   Merge two diffs for the same key: the earliest prior side, the latest `to`.
@@ -165,6 +172,10 @@ defmodule ReactiveDag.Frontier do
       -- net effect, not a moving target. And a change arriving on an
       -- already-approved key does not re-hold it — the approval stands for the
       -- key, and re-holding would make a gate un-approve on its own.
+      -- The EARLIEST version, to match the merged diff's `from` side: a reviewer
+      -- looking up the record sees the change the diff starts from, not the last
+      -- one to arrive.
+      version_id = COALESCE(#{dirty()}.version_id, EXCLUDED.version_id),
       awaiting_approval = CASE
         WHEN #{dirty()}.awaiting_approval IS TRUE THEN TRUE
         ELSE #{dirty()}.awaiting_approval
@@ -280,20 +291,24 @@ defmodule ReactiveDag.Frontier do
   end
 
   @doc """
-  The changes a gated cell is holding — `{key, diff}` pairs, for review.
+  The changes a gated cell is holding — `{key, diff, version_id}`, for review.
+
+  The diff is what a reviewer reads; the version id is how they reach the durable
+  record of the same change, which outlives this queue row.
 
   A READ: it consumes nothing, so a UI can poll it while a drain runs.
   """
-  @spec awaiting(String.t(), keyword()) :: [{key(), map() | nil}]
+  @spec awaiting(String.t(), keyword()) :: [{key(), map() | nil, String.t() | nil}]
   def awaiting(cell, opts \\ []) do
     %{rows: rows} =
       query!(
-        "SELECT key, prior FROM #{dirty()} WHERE cell_id = $1 AND tenant = $2 " <>
+        "SELECT key, prior, version_id FROM #{dirty()} " <>
+          "WHERE cell_id = $1 AND tenant = $2 " <>
           "AND awaiting_approval IS TRUE ORDER BY enqueued_at",
         [cell, tenant(opts)]
       )
 
-    Enum.map(rows, fn [k, d] -> {k, d} end)
+    Enum.map(rows, fn [k, d, v] -> {k, d, v} end)
   end
 
   @doc false

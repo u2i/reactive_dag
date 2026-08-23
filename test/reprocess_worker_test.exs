@@ -100,8 +100,8 @@ defmodule ReactiveDag.ReprocessWorkerTest do
 
     def query!("INSERT INTO " <> _, p) do
       p
-      |> Enum.chunk_every(7)
-      |> Enum.each(fn [c, tenant, k, r, _, _, _held] ->
+      |> Enum.chunk_every(8)
+      |> Enum.each(fn [c, tenant, k, r, _, _, _held, _vid] ->
         Agent.update(__MODULE__, &MapSet.put(&1, {tenant, c, k, r}))
         # A LEDGER of every mark ever made, which the claim does not consume.
         # Asserting on the claimable set cannot see a mark the drain has already
@@ -234,8 +234,8 @@ defmodule ReactiveDag.ReprocessWorkerTest do
           pid = Agent.get(__MODULE__, & &1)
 
           p
-          |> Enum.chunk_every(7)
-          |> Enum.each(fn [c, _tenant, k, r, _, _, _held] -> send(pid, {:mark, c, k, r}) end)
+          |> Enum.chunk_every(8)
+          |> Enum.each(fn [c, _tenant, k, r, _, _, _held, _vid] -> send(pid, {:mark, c, k, r}) end)
 
           %{rows: []}
         end
