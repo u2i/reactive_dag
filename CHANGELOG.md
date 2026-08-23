@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.17.0-rc.49](https://github.com/u2i/reactive_dag/compare/v0.17.0-rc.48...v0.17.0-rc.49) (2026-08-23)
+
+
+### Bug Fixes
+
+* reading keys back must honour `row_key`, not `payload_key` ([#207](https://github.com/u2i/reactive_dag/issues/207)) ([636f62a](https://github.com/u2i/reactive_dag/commit/636f62ac1d9433b271750ed8ae577d1a1e82cbb8))
+
 ## [0.17.0-rc.48](https://github.com/u2i/reactive_dag/compare/v0.17.0-rc.47...v0.17.0-rc.48) (2026-08-23)
 
 
