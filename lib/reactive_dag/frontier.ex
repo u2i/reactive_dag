@@ -67,15 +67,23 @@ defmodule ReactiveDag.Frontier do
       entries
       |> Enum.with_index()
       |> Enum.map_join(", ", fn {_e, i} ->
-        b = i * 6
-        "($#{b + 1}, $#{b + 2}, $#{b + 3}, $#{b + 4}, $#{b + 5}, $#{b + 6})"
+        b = i * 7
+        "($#{b + 1}, $#{b + 2}, $#{b + 3}, $#{b + 4}, $#{b + 5}, $#{b + 6}, $#{b + 7})"
       end)
 
+    # `awaiting_approval` is per CALL, not per key: a gated cell holds every
+    # change of a given write, and a caller marking a mixed batch would be
+    # marking two different things.
+    held = if Keyword.get(opts, :awaiting_approval, false), do: true, else: nil
+
     params =
-      Enum.flat_map(entries, fn {k, prior} -> [cell, tenant, k, reason, now, prior] end)
+      Enum.flat_map(entries, fn {k, prior} ->
+        [cell, tenant, k, reason, now, prior, held]
+      end)
 
     query!(
-      "INSERT INTO #{dirty()} (cell_id, tenant, key, reason, enqueued_at, prior) " <>
+      "INSERT INTO #{dirty()} " <>
+        "(cell_id, tenant, key, reason, enqueued_at, prior, awaiting_approval) " <>
         "VALUES #{placeholders} " <> on_conflict_merge(),
       params
     )
@@ -152,7 +160,16 @@ defmodule ReactiveDag.Frontier do
     d = dirty()
 
     """
-    ON CONFLICT (tenant, cell_id, key) DO UPDATE SET prior =
+    ON CONFLICT (tenant, cell_id, key) DO UPDATE SET
+      -- A second change to a HELD key stays held: a reviewer approves the merged
+      -- net effect, not a moving target. And a change arriving on an
+      -- already-approved key does not re-hold it — the approval stands for the
+      -- key, and re-holding would make a gate un-approve on its own.
+      awaiting_approval = CASE
+        WHEN #{dirty()}.awaiting_approval IS TRUE THEN TRUE
+        ELSE #{dirty()}.awaiting_approval
+      END,
+      prior =
       CASE
         WHEN #{d}.prior IS NULL THEN EXCLUDED.prior
         WHEN EXCLUDED.prior IS NULL THEN #{d}.prior
@@ -187,6 +204,98 @@ defmodule ReactiveDag.Frontier do
     """
   end
 
+  @doc """
+  Approve a gated cell's held changes, so the next drain claims them.
+
+  `keys` names which — or `:all` for every held change of that cell. Returns the
+  keys it released, so a caller can report what a click actually did rather than
+  assuming.
+
+  Approving something already claimable is a no-op rather than an error: a double
+  click, or two reviewers, must not fail.
+  """
+  @spec approve(String.t(), [key()] | :all, keyword()) :: [key()]
+  def approve(cell, keys \\ :all, opts \\ [])
+
+  def approve(cell, :all, opts) do
+    %{rows: rows} =
+      query!(
+        "UPDATE #{dirty()} SET awaiting_approval = NULL " <>
+          "WHERE cell_id = $1 AND tenant = $2 AND awaiting_approval IS TRUE RETURNING key",
+        [cell, tenant(opts)]
+      )
+
+    Enum.map(rows, fn [k] -> k end)
+  end
+
+  def approve(_cell, [], _opts), do: []
+
+  def approve(cell, keys, opts) when is_list(keys) do
+    %{rows: rows} =
+      query!(
+        "UPDATE #{dirty()} SET awaiting_approval = NULL " <>
+          "WHERE cell_id = $1 AND tenant = $2 AND awaiting_approval IS TRUE " <>
+          "AND key = ANY($3) RETURNING key",
+        [cell, tenant(opts), keys]
+      )
+
+    Enum.map(rows, fn [k] -> k end)
+  end
+
+  @doc """
+  Reject a gated cell's held changes — DISCARD the marks without recomputing.
+
+  The rows are already written; this says the graph should not propagate from
+  them. So a rejected change leaves the derived table as it stands and the
+  consumers as they were, which is the honest meaning of "no" given the gate
+  holds propagation rather than the write.
+
+  Returns the keys it discarded.
+  """
+  @spec reject(String.t(), [key()] | :all, keyword()) :: [key()]
+  def reject(cell, keys \\ :all, opts \\ [])
+
+  def reject(cell, :all, opts) do
+    %{rows: rows} =
+      query!(
+        "DELETE FROM #{dirty()} WHERE cell_id = $1 AND tenant = $2 " <>
+          "AND awaiting_approval IS TRUE RETURNING key",
+        [cell, tenant(opts)]
+      )
+
+    Enum.map(rows, fn [k] -> k end)
+  end
+
+  def reject(_cell, [], _opts), do: []
+
+  def reject(cell, keys, opts) when is_list(keys) do
+    %{rows: rows} =
+      query!(
+        "DELETE FROM #{dirty()} WHERE cell_id = $1 AND tenant = $2 " <>
+          "AND awaiting_approval IS TRUE AND key = ANY($3) RETURNING key",
+        [cell, tenant(opts), keys]
+      )
+
+    Enum.map(rows, fn [k] -> k end)
+  end
+
+  @doc """
+  The changes a gated cell is holding — `{key, diff}` pairs, for review.
+
+  A READ: it consumes nothing, so a UI can poll it while a drain runs.
+  """
+  @spec awaiting(String.t(), keyword()) :: [{key(), map() | nil}]
+  def awaiting(cell, opts \\ []) do
+    %{rows: rows} =
+      query!(
+        "SELECT key, prior FROM #{dirty()} WHERE cell_id = $1 AND tenant = $2 " <>
+          "AND awaiting_approval IS TRUE ORDER BY enqueued_at",
+        [cell, tenant(opts)]
+      )
+
+    Enum.map(rows, fn [k, d] -> {k, d} end)
+  end
+
   @doc false
   @deprecated "Renamed to claim_with_diffs/2 — a mark carries both sides now, not just the prior"
   def claim_with_priors(cell, opts \\ []), do: claim_with_diffs(cell, opts)
@@ -200,7 +309,11 @@ defmodule ReactiveDag.Frontier do
   @spec dirty_cells(keyword()) :: [String.t()]
   def dirty_cells(opts \\ []) do
     %{rows: rows} =
-      query!("SELECT DISTINCT cell_id FROM #{dirty()} WHERE tenant = $1", [tenant(opts)])
+      query!(
+        "SELECT DISTINCT cell_id FROM #{dirty()} " <>
+          "WHERE tenant = $1 AND awaiting_approval IS NOT TRUE",
+        [tenant(opts)]
+      )
 
     Enum.map(rows, fn [id] -> id end)
   end
@@ -261,7 +374,16 @@ defmodule ReactiveDag.Frontier do
     # tenants' work is simply gone, and their next drain finds nothing to do.
     %{rows: rows} =
       query!(
-        "DELETE FROM #{dirty()} WHERE cell_id = $1 AND tenant = $2 RETURNING key, prior",
+        # `awaiting_approval` is NULL for an ordinary mark and TRUE for a gated
+        # change nobody has approved. `IS NOT TRUE` covers both, and covers a row
+        # written before this column existed.
+        #
+        # The unapproved rows stay in the table: they are not lost work, they are
+        # work waiting on a person. A gated cell with nothing approved simply is
+        # not selected — see `dirty_cells/1`, which filters the same way, or the
+        # drain would pick a cell it cannot claim from and loop.
+        "DELETE FROM #{dirty()} WHERE cell_id = $1 AND tenant = $2 " <>
+          "AND awaiting_approval IS NOT TRUE RETURNING key, prior",
         [cell, tenant(opts)]
       )
 
@@ -272,7 +394,15 @@ defmodule ReactiveDag.Frontier do
   @spec empty?(keyword()) :: boolean()
   def empty?(opts \\ []) do
     %{rows: [[n]]} =
-      query!("SELECT COUNT(*) FROM #{dirty()} WHERE tenant = $1", [tenant(opts)])
+      query!(
+        # CLAIMABLE work, not all work. A gated change awaiting approval leaves
+        # this true: the drain has nothing to do, which is exactly the state.
+        # Counting it would make `empty?/1` false forever and any caller looping
+        # on it never finish.
+        "SELECT COUNT(*) FROM #{dirty()} " <>
+          "WHERE tenant = $1 AND awaiting_approval IS NOT TRUE",
+        [tenant(opts)]
+      )
 
     n == 0
   end

@@ -67,6 +67,13 @@ defmodule ReactiveDag.Migration do
       # this table is a QUEUE — rows live from mark to claim, then
       # DELETE … RETURNING removes them.
       add(:prior, :map)
+
+      # NULL for an ordinary mark — the overwhelming majority — so a host that
+      # gates nothing pays one nullable column and no behaviour change.
+      #
+      # Set when a GATED cell's change is held: the claim skips these until a
+      # human approves. See `ReactiveDag.Frontier.approve/3`.
+      add(:awaiting_approval, :boolean)
     end
 
     # one index serves everything: uniqueness backs mark_dirty's ON CONFLICT,

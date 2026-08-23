@@ -30,9 +30,9 @@ defmodule ReactiveDag.Node.Changes.MarkDirty do
   use Ash.Resource.Change
 
   @impl true
-  def change(changeset, opts, _context) do
+  def change(changeset, opts, context) do
     Ash.Changeset.after_action(changeset, fn cs, result ->
-      mark(result, prior_of(cs, result), opts, cs.tenant)
+      mark(result, prior_of(cs, result), opts, cs.tenant, Map.get(context, :actor))
       maybe_schedule_drain(opts)
       {:ok, result}
     end)
@@ -107,7 +107,7 @@ defmodule ReactiveDag.Node.Changes.MarkDirty do
       fn -> ReactiveDag.DrainWorker.enqueue() end
   end
 
-  defp mark(record, prior, opts, tenant) do
+  defp mark(record, prior, opts, tenant, actor) do
     cell = Keyword.fetch!(opts, :cell)
 
     # The tenant off the CHANGESET, which is where a tenanted write already put
@@ -115,7 +115,9 @@ defmodule ReactiveDag.Node.Changes.MarkDirty do
     # it would name work that tenant's drain never reads. A drain finding nothing
     # reports success, so the write would look handled and nothing would
     # recompute.
-    frontier = if tenant, do: [tenant: tenant], else: []
+    frontier =
+      (if tenant, do: [tenant: tenant], else: [])
+      |> Keyword.put(:awaiting_approval, hold?(opts[:gated], actor))
 
     case key_of(record, opts) do
       nil ->
@@ -126,6 +128,27 @@ defmodule ReactiveDag.Node.Changes.MarkDirty do
 
       key ->
         ReactiveDag.Frontier.mark_dirty(cell, [{key, diff(prior, record)}], "written", frontier)
+    end
+  end
+
+  # Does this change wait for a human?
+  #
+  # `gated true` holds every change through the cell. `gated human?: {M,F,A}`
+  # holds only the MACHINE ones: the host's predicate is called with the write's
+  # ACTOR, and a change a person made propagates immediately — nobody should
+  # queue for approval of their own edit.
+  #
+  # The library cannot tell a person from a service account (a host's LLM calls
+  # may well run as one), so the host says. A nil actor with a predicate declared
+  # is a machine: nothing claimed to be a person.
+  defp hold?(nil, _actor), do: false
+  defp hold?(false, _actor), do: false
+  defp hold?(true, _actor), do: true
+
+  defp hold?(gated, actor) when is_list(gated) do
+    case Keyword.get(gated, :human?) do
+      {m, f, a} -> not apply(m, f, [actor | a])
+      nil -> true
     end
   end
 

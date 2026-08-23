@@ -25,8 +25,8 @@ defmodule ReactiveDag.TenantFrontierTest do
     # rows are {tenant, cell, key}
     def query!("INSERT INTO " <> _, params) do
       params
-      |> Enum.chunk_every(6)
-      |> Enum.each(fn [cell, tenant, key, _r, _t, _prior] ->
+      |> Enum.chunk_every(7)
+      |> Enum.each(fn [cell, tenant, key, _r, _t, _prior, _held] ->
         Agent.update(__MODULE__, fn rows ->
           if {tenant, cell, key} in rows, do: rows, else: rows ++ [{tenant, cell, key}]
         end)

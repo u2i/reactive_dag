@@ -1283,6 +1283,28 @@ defmodule ReactiveDag.Node do
             "following from the answer rather than being a separate switch. Leave it false " <>
             "on a DERIVED node, where a row whose inputs are gone is stale, not archival."
       ],
+      gated: [
+        type: {:or, [:boolean, :keyword_list]},
+        required: false,
+        default: false,
+        doc:
+          "hold a change's PROPAGATION until a human approves it. The row is written " <>
+            "as normal — derived tables stay readable, which matters when they are what " <>
+            "a site serves — but the consumers do not recompute until the mark is " <>
+            "approved.\n\n" <>
+            "`gated true` gates every change through this cell. " <>
+            "`gated human?: {Mod, :fun, []}` gates only MACHINE ones: the MFA is called " <>
+            "with the write's actor and, when it returns true, the change propagates " <>
+            "immediately. A person should not queue for approval of their own edit; an " <>
+            "extractor claiming what a meeting decided is exactly what wants review. " <>
+            "The library cannot tell a person from a service account, so the host says.\n\n" <>
+            "A second change to a key with one already pending MERGES into it " <>
+            "(`ReactiveDag.Frontier.merge_diffs/2`), so a reviewer sees the whole state " <>
+            "change since the last settled point rather than a queue of intermediate " <>
+            "steps — and never an intermediate unit no settled state held.\n\n" <>
+            "Belongs on an extraction boundary, not on arithmetic over " <>
+            "already-approved inputs: gating a sum adds a human step to addition."
+      ],
       dirties_on: [
         type: {:list, {:one_of, [:create, :update, :destroy]}},
         required: false,

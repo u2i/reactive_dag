@@ -27,8 +27,8 @@ defmodule ReactiveDag.PayloadDiffPropagationTest do
 
     def query!("INSERT INTO " <> _, params) do
       params
-      |> Enum.chunk_every(6)
-      |> Enum.each(fn [cell, tenant, key, _r, _t, prior] ->
+      |> Enum.chunk_every(7)
+      |> Enum.each(fn [cell, tenant, key, _r, _t, prior, _held] ->
         # ON CONFLICT: MERGE the diffs, via the library's own rule — the earliest
         # prior side and the latest `to`. `Map.put_new` modelled `DO NOTHING`,
         # which strands the unit a twice-moved row ended up in.

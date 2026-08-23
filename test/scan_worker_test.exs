@@ -146,8 +146,8 @@ defmodule ReactiveDag.ScanWorkerTest do
 
     def query!("INSERT INTO " <> _, p) do
       p
-      |> Enum.chunk_every(6)
-      |> Enum.each(fn [c, _tenant, k, r, _, _] -> Agent.update(__MODULE__, &MapSet.put(&1, {c, k, r})) end)
+      |> Enum.chunk_every(7)
+      |> Enum.each(fn [c, _tenant, k, r, _, _, _held] -> Agent.update(__MODULE__, &MapSet.put(&1, {c, k, r})) end)
 
       %{rows: []}
     end

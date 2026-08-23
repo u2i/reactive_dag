@@ -252,8 +252,8 @@ defmodule ReactiveDag.AugmentedByTest do
 
     def query!("INSERT INTO " <> _, params) do
       params
-      |> Enum.chunk_every(6)
-      |> Enum.each(fn [cell, _tenant, key, _r, _t, prior] ->
+      |> Enum.chunk_every(7)
+      |> Enum.each(fn [cell, _tenant, key, _r, _t, prior, _held] ->
         Agent.update(__MODULE__, fn m -> Map.put_new(m, {cell, key}, prior) end)
       end)
 
