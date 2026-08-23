@@ -132,61 +132,46 @@ defmodule ReactiveDag.Node.KeyRule do
   # Derive each snapshotted key's unit by running the combinator's own grouping
   # against the stored row. Returns the keys derived, plus the changed keys that
   # had no snapshot (which still need the live path).
-  defp snapshot_claims(nil, _meta, _changed, _priors), do: :none
+  defp snapshot_claims(nil, _meta, _changed, _diffs), do: :none
 
-  defp snapshot_claims(spec, meta, changed, priors) do
+  # The DIFF each changed key was written with — both sides of the change, from
+  # the payload write that produced it (`Payload.collecting_diffs/1`).
+  #
+  # This replaces a jsonb snapshot carried on the queue row, and answers strictly
+  # more: a snapshot said where a row WAS, so a move needed it unioned with a live
+  # read of where the row landed. A diff carries both, so there is nothing to read
+  # and nothing to fail — see `ReactiveDag.Node.VersionDiff`.
+  #
+  # `group_key_plan` still gates it, and still refuses a `{:calc, _}` entry. A
+  # calculation is an Ash `expr` evaluated by the datastore; the diff holds the
+  # ATTRIBUTES it derives from (`side` comes from `kind`), but evaluating an expr
+  # in the BEAM against a bare map is a different capability from this module's.
+  # So a node grouping by a calculation keeps the live-read path and its `"*"`
+  # degradation, and says so rather than silently claiming a partial set.
+  defp snapshot_claims(spec, meta, changed, diffs) do
     alias ReactiveDag.Node.Recompute.Declarative
 
     with %ReactiveDag.Node.Reduce{} = r <- spec,
-         plan when is_list(plan) <- meta[:over_source][:group_key_plan] do
+         plan when is_list(plan) <- meta[:over_source][:group_key_plan],
+         true <- Enum.all?(plan, &match?({:attr, _, _}, &1)) do
       key_fn = Declarative.key_fn(Map.get(r, :key), Map.get(r, :key_prefix))
-      snapshotted = Enum.filter(changed, &Map.has_key?(priors, &1))
+      grain = Enum.map(plan, fn {:attr, name, _string?} -> name end)
+      with_diffs = Enum.filter(changed, &Map.has_key?(diffs, &1))
 
       keys =
-        snapshotted
-        |> Enum.map(&unit_from_snapshot(plan, priors[&1], key_fn))
-        |> Enum.reject(&(&1 == :error))
+        with_diffs
+        |> Enum.flat_map(&ReactiveDag.Node.VersionDiff.units(diffs[&1], grain, key_fn))
+        |> Enum.uniq()
 
-      # a snapshot we cannot derive from is no better than none: fall back
-      # wholesale rather than claim a partial set
-      if length(keys) < length(snapshotted), do: :none, else: {:ok, keys}
+      # A key whose diff yields no unit — a nil in its own grain — is no better
+      # than no diff at all: fall back wholesale rather than claim a partial set
+      # and strand the rest.
+      if keys == [] and with_diffs != [], do: :none, else: {:ok, keys}
     else
       _ -> :none
     end
   end
 
-  # The snapshot is jsonb, so its keys are STRINGS and a Calendar bucket's
-  # source is a date that round-tripped as a string — parse it back through the
-  # calculation rather than comparing the wrong thing.
-  defp unit_from_snapshot(plan, prior, key_fn) do
-    values =
-      Enum.map(plan, fn
-        {:attr, name, _string?} ->
-          Map.get(prior, to_string(name), :error)
-
-        {:calendar, kind, of} ->
-          case Map.get(prior, to_string(of)) do
-            nil -> :error
-            raw -> calendar_label(kind, raw)
-          end
-
-        {:calc, _name} ->
-          # an opaque calculation cannot be evaluated from stored attributes
-          :error
-      end)
-
-    if :error in values, do: :error, else: key_fn.(List.to_tuple(values))
-  end
-
-  defp calendar_label(kind, raw) when is_binary(raw) do
-    case Date.from_iso8601(raw) do
-      {:ok, date} -> ReactiveDag.Calendar.label(kind, date)
-      _ -> :error
-    end
-  end
-
-  defp calendar_label(kind, %Date{} = date), do: ReactiveDag.Calendar.label(kind, date)
-  defp calendar_label(_kind, _raw), do: :error
 
   # A TWO-INPUT join: the changed keys belong to ONE side, so translate them
   # through THAT side only. Which side is the `child` that propagated — the same

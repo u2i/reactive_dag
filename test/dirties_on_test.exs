@@ -424,17 +424,23 @@ defmodule ReactiveDag.DirtiesOnTest do
     # `dirties_on` records the row AS IT WAS at mark time, so a parent derives
     # its claim from what the row was — the only thing that survives a delete,
     # and the only thing that names where a moved row came from.
-    test "the snapshot rides on the frontier row" do
+    test "the DIFF rides on the frontier row" do
       Expenses
       |> Ash.Changeset.for_create(:create, %{key: "e1", category: "travel", amount: 10.0})
       |> Ash.create!()
 
-      assert [{"e1", prior}] = Frontier.claim_with_priors("expenses")
+      assert [{"e1", diff}] = Frontier.claim_with_priors("expenses")
 
-      # jsonb, so string keys — and every public attribute, not just the unit's
-      assert prior["category"] == "travel"
-      assert prior["amount"] == 10.0
-      assert prior["key"] == "e1"
+      # jsonb, so string keys — and every public attribute, not just the unit's.
+      #
+      # Each value is a DIFF ENTRY rather than a bare value: `%{"to" => v}` here,
+      # because a create had nothing before it. An update carries
+      # `%{"from" => old, "to" => new}` for what moved and `%{"unchanged" => v}`
+      # for the rest — the same vocabulary `ash_paper_trail`'s `:full_diff` uses,
+      # so a claim does not depend on which writer produced the change.
+      assert diff["category"] == %{"to" => "travel"}
+      assert diff["amount"] == %{"to" => 10.0}
+      assert diff["key"] == %{"to" => "e1"}
     end
 
     test "a DELETED row still names its unit — the claim stays precise" do

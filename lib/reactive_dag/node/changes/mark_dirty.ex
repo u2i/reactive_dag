@@ -54,7 +54,13 @@ defmodule ReactiveDag.Node.Changes.MarkDirty do
   # %OriginalDataNotAvailable{}. Both fall back to the result, which is correct
   # for a create and no worse than today for the rest.
   defp prior_of(%Ash.Changeset{data: %Ash.Changeset.OriginalDataNotAvailable{}}, result), do: result
-  defp prior_of(%Ash.Changeset{action_type: :create}, result), do: result
+
+  # A create has NO prior, and `nil` is how the diff says so — every attribute
+  # reads `%{"to" => v}`, which is what "nothing existed before" looks like. This
+  # returned `result` while the mark carried a snapshot, where a snapshot of the
+  # new row was the only sensible fallback; against a diff it would claim every
+  # attribute `unchanged`, which says the opposite.
+  defp prior_of(%Ash.Changeset{action_type: :create}, _result), do: nil
   defp prior_of(%Ash.Changeset{data: %{__struct__: _} = data}, _result), do: data
   defp prior_of(_changeset, result), do: result
 
@@ -119,13 +125,34 @@ defmodule ReactiveDag.Node.Changes.MarkDirty do
         ReactiveDag.Frontier.mark_dirty(cell, ["*"], "written (no key)", frontier)
 
       key ->
-        ReactiveDag.Frontier.mark_dirty(cell, [{key, snapshot(prior)}], "written", frontier)
+        ReactiveDag.Frontier.mark_dirty(cell, [{key, diff(prior, record)}], "written", frontier)
     end
   end
 
-  # The row as it was, so a parent can derive its claim without reading back —
-  # which is the only thing that works once the row is deleted, or has moved to
-  # a different unit.
+  # BOTH sides of the change, so a parent can derive its claim without reading
+  # back — the only thing that works once the row is deleted or has moved between
+  # units.
+  #
+  # The same shape `ash_paper_trail`'s `:full_diff` writes and
+  # `ReactiveDag.Node.Payload` records: there must be ONE vocabulary for "what
+  # moved", or a claim would depend on which writer produced the change.
+  defp diff(nil, record) do
+    Map.new(snapshot(record), fn {k, v} -> {k, %{"to" => v}} end)
+  end
+
+  defp diff(prior, record) do
+    was = snapshot(prior)
+
+    Map.new(snapshot(record), fn {k, v} ->
+      case Map.fetch(was, k) do
+        {:ok, ^v} -> {k, %{"unchanged" => v}}
+        {:ok, old} -> {k, %{"from" => old, "to" => v}}
+        :error -> {k, %{"to" => v}}
+      end
+    end)
+  end
+
+  # The row as a plain map of dumped public attributes — one side of a diff.
   #
   # PUBLIC attributes only: calculations are not loaded at after_action time
   # (loading them would be a query per write, on the hot path), and private

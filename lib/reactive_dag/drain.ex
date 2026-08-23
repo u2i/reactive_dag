@@ -281,9 +281,19 @@ defmodule ReactiveDag.Drain do
     claimed = Enum.map(entries, &elem(&1, 0))
     keys = if "*" in claimed, do: ["*"], else: claimed
 
-    # the snapshot each claimed key was marked with, so this cell's parents
-    # can derive their claims from a row that may no longer exist
-    priors = for {k, p} <- entries, not is_nil(p), into: %{}, do: {k, p}
+    # The diffs a change arrived WITH. There are two producers of "what moved",
+    # and a cell can see either:
+    #
+    #   * a host writing a row itself (`dirties_on`) attaches the diff to the
+    #     mark, because nothing else in the graph saw that write;
+    #   * a payload write inside this recompute records its own
+    #     (`Payload.collecting_diffs/1`), collected below.
+    #
+    # This cell's OWN writes are what its parents propagate from, so those win on
+    # key collision — but a claimed key this recompute did not rewrite still
+    # carries the diff it came in with, which is what makes an externally-written
+    # row propagate precisely.
+    claimed_diffs = for {k, d} <- entries, is_map(d), into: %{}, do: {k, d}
 
     cond do
       keys == [] ->
@@ -310,8 +320,17 @@ defmodule ReactiveDag.Drain do
         # The plan's tenant rides with the recompute. It is the PLAN's, not the
         # cell's — every tenant's plan holds identical cells — so it can only
         # enter here, where both are in scope.
-        {outcome, us} =
-          timed(fn -> recompute(cell, keys, Keyword.merge(opts, Plan.frontier_opts(plan))) end)
+        #
+        # `collecting_diffs/1` wraps the WHOLE recompute, which is what makes one
+        # mechanism cover every rung: a declarative fold, a `per_key` action and a
+        # `compute` op writing its own rows all reach the same payload write, so
+        # all three yield diffs without any of them knowing.
+        {{outcome, diffs}, us} =
+          timed(fn ->
+            ReactiveDag.Node.Payload.collecting_diffs(fn ->
+              recompute(cell, keys, Keyword.merge(opts, Plan.frontier_opts(plan)))
+            end)
+          end)
 
         case outcome do
           {:failed, reason} ->
@@ -347,7 +366,7 @@ defmodule ReactiveDag.Drain do
               cell_id,
               cell,
               keys,
-              priors,
+              Map.merge(claimed_diffs, diffs),
               changed,
               meta,
               us,
@@ -366,7 +385,7 @@ defmodule ReactiveDag.Drain do
          cell_id,
          cell,
          keys,
-         priors,
+         diffs,
          changed,
          meta,
          us,
@@ -383,7 +402,7 @@ defmodule ReactiveDag.Drain do
         true -> changed
       end
 
-    parents = propagate(plan, cell_id, prop, opts, priors)
+    parents = propagate(plan, cell_id, prop, opts, diffs)
 
     step = %{
       claimed: keys,
@@ -512,10 +531,10 @@ defmodule ReactiveDag.Drain do
 
   # Each clause returns the list of parent cell_ids it dirtied (so the drain can
   # record them as triggered-by this cell).
-  defp propagate(_plan, _cell_id, [], _opts, _priors), do: []
+  defp propagate(_plan, _cell_id, [], _opts, _diffs), do: []
 
   # :all — the cell was claimed whole; every parent recomputes whole too.
-  defp propagate(plan, cell_id, :all, _opts, _priors) do
+  defp propagate(plan, cell_id, :all, _opts, _diffs) do
     parents = Map.get(plan.parents, cell_id, [])
     opts = Plan.frontier_opts(plan)
 
@@ -527,8 +546,8 @@ defmodule ReactiveDag.Drain do
     parents
   end
 
-  defp propagate(plan, cell_id, changed, _opts, priors) do
-    parents = Graph.dirty_parents(plan, cell_id, changed, ReactiveDag.Node.KeyRule, priors)
+  defp propagate(plan, cell_id, changed, _opts, diffs) do
+    parents = Graph.dirty_parents(plan, cell_id, changed, ReactiveDag.Node.KeyRule, diffs)
 
     opts = Plan.frontier_opts(plan)
 
