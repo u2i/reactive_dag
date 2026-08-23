@@ -57,6 +57,40 @@ defmodule ReactiveDag.SliceTest do
     end
   end
 
+  # A tenanted node, because that is what a real host has and the untenanted
+  # `Lines` above cannot show: `keys_where/3` has to be scopeable, or a menu
+  # counting "how many keys would this reprocess claim?" gets a raise.
+  defmodule TenantedLines do
+    use Ash.Resource, domain: Domain, data_layer: Ash.DataLayer.Ets, extensions: [ReactiveDag.Node]
+
+    ets do
+    end
+
+    multitenancy do
+      strategy :attribute
+      attribute :org_id
+    end
+
+    attributes do
+      uuid_primary_key(:id)
+      attribute :org_id, :string, public?: true
+      attribute :fund, :string, allow_nil?: false, public?: true
+      attribute :fiscal_year, :string, allow_nil?: false, public?: true
+    end
+
+    actions do
+      defaults [:read, :destroy]
+      create :upsert, upsert?: true, accept: [:org_id, :fund, :fiscal_year]
+    end
+
+    reactive do
+      id(:tenanted_lines)
+      leaf?(true)
+      row_key([:org_id, :fund, :fiscal_year])
+      slice(:fiscal_year)
+    end
+  end
+
   defmodule Plain do
     use Ash.Resource, domain: Domain, data_layer: Ash.DataLayer.Ets, extensions: [ReactiveDag.Node]
 
@@ -160,6 +194,23 @@ defmodule ReactiveDag.SliceTest do
 
     test "a filter matching nothing is empty, not an error" do
       assert Rows.keys_where(cell(Lines), fiscal_year: "FY99") == []
+    end
+
+    test "the selection is TENANT-scoped" do
+      for {org, fund} <- [{"org_a", "gf"}, {"org_a", "water"}, {"org_b", "gf"}] do
+        Ash.create!(TenantedLines, %{fund: fund, fiscal_year: "FY25"},
+          action: :upsert,
+          tenant: org
+        )
+      end
+
+      # Each tenant sees its own rows, and the key carries no tenant — the count
+      # behind a "reprocess FY25" button is that municipality's, not everyone's.
+      assert Rows.keys_where(cell(TenantedLines), [fiscal_year: "FY25"], tenant: "org_a") ==
+               ["gf|FY25", "water|FY25"]
+
+      assert Rows.keys_where(cell(TenantedLines), [fiscal_year: "FY25"], tenant: "org_b") ==
+               ["gf|FY25"]
     end
 
     test "a node with no rows here selects nothing" do

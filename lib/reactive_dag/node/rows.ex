@@ -219,11 +219,18 @@ defmodule ReactiveDag.Node.Rows do
   `slices/1` reports them — but nothing stops a caller filtering on any column
   it knows about. The declaration is what makes a UI possible, not what makes
   the filter legal.
-  """
-  @spec keys_where(Cell.t() | source(), keyword()) :: [String.t()]
-  def keys_where(%Cell{meta: meta}, filter), do: keys_where(meta, filter)
 
-  def keys_where(%{} = source, filter) do
+  `opts` takes `:tenant`, like `all/2` and `key_count/2` — pass
+  `Plan.frontier_opts/1` and the count is that tenant's. This was the one
+  row-reading helper that could not be scoped, so a host asking "how many keys
+  would this reprocess claim?" against a tenanted resource got a raise, or a zero
+  if it guarded — a button offering to reprocess nothing.
+  """
+  @spec keys_where(Cell.t() | source(), keyword(), keyword()) :: [String.t()]
+  def keys_where(source, filter, opts \\ [])
+  def keys_where(%Cell{meta: meta}, filter, opts), do: keys_where(meta, filter, opts)
+
+  def keys_where(%{} = source, filter, opts) do
     case queryable(source) do
       nil ->
         []
@@ -231,6 +238,7 @@ defmodule ReactiveDag.Node.Rows do
       resource ->
         resource
         |> Ash.Query.do_filter(filter)
+        |> tenant_scoped(opts)
         |> Ash.read!()
         |> Enum.map(keyer(source))
         |> Enum.sort()
