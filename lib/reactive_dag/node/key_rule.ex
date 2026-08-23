@@ -138,7 +138,7 @@ defmodule ReactiveDag.Node.KeyRule do
   # This replaces a jsonb snapshot carried on the queue row, and answers strictly
   # more: a snapshot said where a row WAS, so a move needed it unioned with a live
   # read of where the row landed. A diff carries both, so there is nothing to read
-  # and nothing to fail — see `ReactiveDag.Node.VersionDiff`.
+  # and nothing to fail — see `ReactiveDag.Node.Diff`.
   #
   # FOUR routes still fall back to the live read, and each is a real case rather
   # than a gap left unfinished. Measured on a real host: 3 of its 4 `:group`
@@ -166,7 +166,7 @@ defmodule ReactiveDag.Node.KeyRule do
 
       keys =
         with_diffs
-        |> Enum.flat_map(&ReactiveDag.Node.VersionDiff.units(diffs[&1], grain, key_fn))
+        |> Enum.flat_map(&ReactiveDag.Node.Diff.units(diffs[&1], grain, key_fn))
         |> Enum.uniq()
 
       # A key whose diff yields no unit — a nil in its own grain — is no better

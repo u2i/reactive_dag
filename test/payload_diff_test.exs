@@ -10,14 +10,14 @@ defmodule ReactiveDag.Node.PayloadDiffTest do
   whole cell.
 
   The payload write is the one place both sides are in hand. So it records them,
-  and `ReactiveDag.Node.VersionDiff` reads the result — the same module that
+  and `ReactiveDag.Node.Diff` reads the result — the same module that
   reads an `ash_paper_trail` version, because it is the same shape. That
   equivalence is what these tests are really about: a diff must not read
   differently depending on where it was born.
   """
   use ExUnit.Case, async: false
 
-  alias ReactiveDag.Node.{Payload, VersionDiff}
+  alias ReactiveDag.Node.{Payload, Diff}
 
   defmodule Domain do
     use Ash.Domain, validate_config_inclusion?: false
@@ -91,8 +91,8 @@ defmodule ReactiveDag.Node.PayloadDiffTest do
   end
 
   describe "the diff is the SAME shape a version row carries" do
-    test "so VersionDiff derives the moved row's two units from it" do
-      # THE equivalence. `VersionDiff` was written against
+    test "so Diff derives the moved row's two units from it" do
+      # THE equivalence. `Diff` was written against
       # `AshPaperTrail.ChangeBuilders.FullDiff`; feeding it a payload diff must
       # give the same answer, or a host would get different propagation depending
       # on which writer produced the change.
@@ -101,7 +101,7 @@ defmodule ReactiveDag.Node.PayloadDiffTest do
       {_, diffs} =
         Payload.collecting_diffs(fn -> put("n1", %{line_key: "n1", fund: "ES", value: 10}) end)
 
-      assert VersionDiff.units(diffs["n1"], :fund) == ["A", "ES"],
+      assert Diff.units(diffs["n1"], :fund) == ["A", "ES"],
              "the group it left AND the one it landed in — which a live read cannot see"
     end
 
@@ -109,13 +109,13 @@ defmodule ReactiveDag.Node.PayloadDiffTest do
       {_, diffs} =
         Payload.collecting_diffs(fn -> put("n2", %{line_key: "n2", fund: "GF", value: 1}) end)
 
-      assert VersionDiff.units(diffs["n2"], :fund) == ["GF"]
-      assert VersionDiff.before(diffs["n2"]) == nil, "nothing existed before"
+      assert Diff.units(diffs["n2"], :fund) == ["GF"]
+      assert Diff.before(diffs["n2"]) == nil, "nothing existed before"
     end
 
     test "keys are STRINGS on both sides" do
       # A version's `changes` is a jsonb column, so it round-trips to string
-      # keys. A payload diff must match, or `VersionDiff` would need to know
+      # keys. A payload diff must match, or `Diff` would need to know
       # which source it was reading.
       {_, diffs} =
         Payload.collecting_diffs(fn -> put("n3", %{line_key: "n3", fund: "A", value: 1}) end)

@@ -1,4 +1,4 @@
-defmodule ReactiveDag.Node.VersionDiffTest do
+defmodule ReactiveDag.Node.DiffTest do
   @moduledoc """
   Units derived from an `ash_paper_trail` `:full_diff`, both sides.
 
@@ -17,7 +17,7 @@ defmodule ReactiveDag.Node.VersionDiffTest do
   """
   use ExUnit.Case, async: true
 
-  alias ReactiveDag.Node.VersionDiff
+  alias ReactiveDag.Node.Diff
 
   describe "a moved row claims BOTH units" do
     test "the group it left and the one it landed in" do
@@ -29,7 +29,7 @@ defmodule ReactiveDag.Node.VersionDiffTest do
         "value" => %{"from" => 100, "to" => 100}
       }
 
-      assert VersionDiff.units(changes, :fund) == ["A", "ES"]
+      assert Diff.units(changes, :fund) == ["A", "ES"]
     end
 
     test "a composite grain moves as a whole" do
@@ -38,7 +38,7 @@ defmodule ReactiveDag.Node.VersionDiffTest do
         "fiscal_year" => %{"unchanged" => "FY23/24"}
       }
 
-      assert VersionDiff.units(changes, [:fund, :fiscal_year]) ==
+      assert Diff.units(changes, [:fund, :fiscal_year]) ==
                ["A|FY23/24", "ES|FY23/24"]
     end
 
@@ -50,7 +50,7 @@ defmodule ReactiveDag.Node.VersionDiffTest do
         "value" => %{"from" => 100, "to" => 250}
       }
 
-      assert VersionDiff.units(changes, :fund) == ["A"]
+      assert Diff.units(changes, :fund) == ["A"]
     end
   end
 
@@ -62,9 +62,9 @@ defmodule ReactiveDag.Node.VersionDiffTest do
       }
 
       # Not `"*"`. The whole point: a vanished row knows which group it left.
-      assert VersionDiff.units(changes, [:fund, :fiscal_year]) == ["A|FY23/24"]
-      assert VersionDiff.after_(changes) == nil
-      refute VersionDiff.before(changes) == nil
+      assert Diff.units(changes, [:fund, :fiscal_year]) == ["A|FY23/24"]
+      assert Diff.after_(changes) == nil
+      refute Diff.before(changes) == nil
     end
   end
 
@@ -72,9 +72,9 @@ defmodule ReactiveDag.Node.VersionDiffTest do
     test "create: no attribute has a prior value" do
       changes = %{"fund" => %{"to" => "ES"}, "value" => %{"to" => 5}}
 
-      assert VersionDiff.units(changes, :fund) == ["ES"]
-      assert VersionDiff.before(changes) == nil
-      assert VersionDiff.after_(changes) == %{fund: "ES", value: 5}
+      assert Diff.units(changes, :fund) == ["ES"]
+      assert Diff.before(changes) == nil
+      assert Diff.after_(changes) == %{fund: "ES", value: 5}
     end
   end
 
@@ -87,8 +87,8 @@ defmodule ReactiveDag.Node.VersionDiffTest do
         "fiscal_year" => %{"unchanged" => "FY23/24"}
       }
 
-      assert VersionDiff.before(changes) == %{fund: "A", fiscal_year: "FY23/24"}
-      assert VersionDiff.after_(changes) == %{fund: "ES", fiscal_year: "FY23/24"}
+      assert Diff.before(changes) == %{fund: "A", fiscal_year: "FY23/24"}
+      assert Diff.after_(changes) == %{fund: "ES", fiscal_year: "FY23/24"}
     end
 
     test "an attribute absent from the diff contributes nothing" do
@@ -97,7 +97,7 @@ defmodule ReactiveDag.Node.VersionDiffTest do
       # claim the action touched something it did not.
       changes = %{"fund" => %{"unchanged" => "A"}}
 
-      refute Map.has_key?(VersionDiff.before(changes), :value)
+      refute Map.has_key?(Diff.before(changes), :value)
     end
 
     test "an attribute the host has never named as an atom is skipped" do
@@ -110,7 +110,7 @@ defmodule ReactiveDag.Node.VersionDiffTest do
         "a_column_no_atom_exists_for_xyzzy" => %{"unchanged" => 1}
       }
 
-      assert VersionDiff.before(changes) == %{fund: "A"}
+      assert Diff.before(changes) == %{fund: "A"}
     end
   end
 
@@ -118,22 +118,22 @@ defmodule ReactiveDag.Node.VersionDiffTest do
     test "an empty diff is neither a create nor a destroy" do
       # An update that accepted nothing. Reading it as a destroy would claim the
       # row is gone and retire live rows — the expensive direction to be wrong in.
-      assert VersionDiff.before(%{}) == %{}
-      assert VersionDiff.after_(%{}) == %{}
-      assert VersionDiff.units(%{}, :fund) == []
+      assert Diff.before(%{}) == %{}
+      assert Diff.after_(%{}) == %{}
+      assert Diff.units(%{}, :fund) == []
     end
 
     test "a grain value of nil claims nothing rather than a key of `\"\"`" do
       # `to_string(nil)` is `""`, which names no unit. Claiming it would enqueue
       # work against a key that exists nowhere.
-      assert VersionDiff.units(%{"fund" => %{"unchanged" => nil}}, :fund) == []
+      assert Diff.units(%{"fund" => %{"unchanged" => nil}}, :fund) == []
     end
 
     test "an unchanged row claims its unit ONCE, not twice" do
       # Both sides project to the same map, so the union collapses. Without the
       # dedup a no-op write would claim the same unit twice and the drain would
       # recompute it twice.
-      assert VersionDiff.units(%{"fund" => %{"unchanged" => "A"}}, :fund) == ["A"]
+      assert Diff.units(%{"fund" => %{"unchanged" => "A"}}, :fund) == ["A"]
     end
   end
 
@@ -143,14 +143,14 @@ defmodule ReactiveDag.Node.VersionDiffTest do
 
       grain = fn row -> "fund:" <> to_string(row[:fund]) end
 
-      assert VersionDiff.units(changes, grain) == ["fund:A", "fund:ES"]
+      assert Diff.units(changes, grain) == ["fund:A", "fund:ES"]
     end
 
     test "a key_fn can be supplied, for a node declaring `key_prefix`" do
       changes = %{"fund" => %{"from" => "A", "to" => "ES"}}
       key_fn = fn group -> "va|" <> to_string(group) end
 
-      assert VersionDiff.units(changes, :fund, key_fn) == ["va|A", "va|ES"]
+      assert Diff.units(changes, :fund, key_fn) == ["va|A", "va|ES"]
     end
   end
 end

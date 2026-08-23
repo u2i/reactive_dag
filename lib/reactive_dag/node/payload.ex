@@ -312,7 +312,7 @@ defmodule ReactiveDag.Node.Payload do
   end
 
   # The `:full_diff` shape `ash_paper_trail` writes, and which
-  # `ReactiveDag.Node.VersionDiff` reads — one vocabulary for "what moved",
+  # `ReactiveDag.Node.Diff` reads — one vocabulary for "what moved",
   # whether it came from a version row or from here.
   #
   # STRING keys, because that is what a jsonb column round-trips to and this must

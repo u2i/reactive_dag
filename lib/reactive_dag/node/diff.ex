@@ -1,10 +1,10 @@
-defmodule ReactiveDag.Node.VersionDiff do
+defmodule ReactiveDag.Node.Diff do
   @moduledoc """
-  Which units a CHANGE affects, read from an `ash_paper_trail` version.
+  Which units a CHANGE affects, from the diff of that change.
 
-  A `:group` claim answers "which unit of mine does this changed row belong to",
-  and today it answers by READING the row. That works for an update in place and
-  fails for the two cases that matter:
+  A `:group` claim answers "which unit of mine does this changed row belong to".
+  Answering it by READING the row works for an update in place and fails for the
+  two cases that matter:
 
     * the row was **deleted** — nothing to read, so the propagation degrades to
       `"*"`: reprice the whole cell, because a vanished row might have left any
@@ -22,13 +22,18 @@ defmodule ReactiveDag.Node.VersionDiff do
 
   ## The diff shape
 
-  `change_tracking_mode :full_diff` writes one entry per attribute, in exactly
-  four shapes (`AshPaperTrail.ChangeBuilders.FullDiff.Helpers`):
+  One entry per attribute, in exactly four shapes:
 
       %{"to" => value}                    # a create: there was no prior value
       %{"from" => old, "to" => new}       # the attribute moved
       %{"unchanged" => value}             # present, untouched
       # …and an attribute absent from the map entirely was not accepted
+
+  Borrowed from `ash_paper_trail`'s `change_tracking_mode :full_diff`
+  (`AshPaperTrail.ChangeBuilders.FullDiff.Helpers`) rather than invented. A host
+  already keeping a paper trail speaks this, and a claim should not depend on
+  which producer wrote the change — today that is `Payload`'s own write and the
+  `dirties_on` hook.
 
   `before/1` and `after/1` project those into two plain maps, which is all a
   grain function needs — `Declarative.group_fn/1` reads with `Map.get/2`, so a
