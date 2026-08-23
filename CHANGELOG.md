@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.17.0-rc.52](https://github.com/u2i/reactive_dag/compare/v0.17.0-rc.51...v0.17.0-rc.52) (2026-08-23)
+
+
+### Features
+
+* changes as the propagation source, and a gate for review ([#217](https://github.com/u2i/reactive_dag/issues/217)) ([42467eb](https://github.com/u2i/reactive_dag/commit/42467ebe143021975029dee1b0bc64e669680dee))
+
+
+### Bug Fixes
+
+* a `:group` claim reads under the plan's tenant ([#214](https://github.com/u2i/reactive_dag/issues/214)) ([d751cca](https://github.com/u2i/reactive_dag/commit/d751ccabac8d533e725e868b47fd7407015547da))
+
 ## [0.17.0-rc.51](https://github.com/u2i/reactive_dag/compare/v0.17.0-rc.50...v0.17.0-rc.51) (2026-08-23)
 
 
