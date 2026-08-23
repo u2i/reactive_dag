@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.17.0-rc.48](https://github.com/u2i/reactive_dag/compare/v0.17.0-rc.47...v0.17.0-rc.48) (2026-08-23)
+
+
+### Bug Fixes
+
+* `"*"` is a TENANT value, not the absence of one ([#205](https://github.com/u2i/reactive_dag/issues/205)) ([3321afd](https://github.com/u2i/reactive_dag/commit/3321afdfc7e086510622c67c5a17f3cf7d7dfc5c))
+
 ## [0.17.0-rc.47](https://github.com/u2i/reactive_dag/compare/v0.17.0-rc.46...v0.17.0-rc.47) (2026-08-23)
 
 
