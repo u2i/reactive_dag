@@ -27,13 +27,14 @@ defmodule ReactiveDag.PayloadDiffPropagationTest do
 
     def query!("INSERT INTO " <> _, params) do
       params
-      |> Enum.chunk_every(8)
-      |> Enum.each(fn [cell, tenant, key, _r, _t, prior, _held, _vid] ->
+      |> Enum.chunk_every(7)
+      |> Enum.each(fn [cell, tenant, key, _r, _t, _held, vid] ->
         # ON CONFLICT: MERGE the diffs, via the library's own rule — the earliest
         # prior side and the latest `to`. `Map.put_new` modelled `DO NOTHING`,
         # which strands the unit a twice-moved row ended up in.
         Agent.update(__MODULE__, fn m ->
-          Map.update(m, {tenant, cell, key}, prior, &ReactiveDag.Frontier.merge_diffs(&1, prior))
+          # ON CONFLICT: keep the EARLIEST version id.
+          Map.update(m, {tenant, cell, key}, vid, fn stored -> stored || vid end)
         end)
       end)
 
@@ -49,7 +50,7 @@ defmodule ReactiveDag.PayloadDiffPropagationTest do
       rows =
         Agent.get_and_update(__MODULE__, fn m ->
           {mine, rest} = Enum.split_with(m, fn {{t, c, _}, _} -> t == tenant and c == cell end)
-          {Enum.map(mine, fn {{_t, _c, k}, prior} -> [k, prior] end), Map.new(rest)}
+          {Enum.map(mine, fn {{_t, _c, k}, vid} -> [k, vid] end), Map.new(rest)}
         end)
 
       %{rows: rows}

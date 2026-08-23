@@ -73,15 +73,6 @@ defmodule ReactiveDag.Migration do
       # versioned resource, so there is nothing single to reference.
       add(:version_id, :text)
 
-      # The DIFF, still inlined, for the propagation path. Reading the version
-      # back to derive a claim would be a round trip to recover what the writer
-      # held in hand at mark time — see `ReactiveDag.Node.Payload`. So this is the
-      # working copy and `version_id` is the durable record; they are written
-      # together and never disagree.
-      #
-      # Called `prior` because it once held only the prior side. Renaming it costs
-      # every host a migration to buy a better word.
-      add(:prior, :map)
 
       # NULL for an ordinary mark — the overwhelming majority — so a host that
       # gates nothing pays one nullable column and no behaviour change.

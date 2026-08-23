@@ -108,7 +108,7 @@ defmodule ReactiveDag.Node.Changes.MarkDirty do
       fn -> ReactiveDag.DrainWorker.enqueue() end
   end
 
-  defp mark(record, prior, opts, tenant, actor, changeset) do
+  defp mark(record, _prior, opts, tenant, actor, changeset) do
     cell = Keyword.fetch!(opts, :cell)
 
     # The tenant off the CHANGESET, which is where a tenanted write already put
@@ -128,7 +128,9 @@ defmodule ReactiveDag.Node.Changes.MarkDirty do
         ReactiveDag.Frontier.mark_dirty(cell, ["*"], "written (no key)", frontier)
 
       key ->
-        entry = {key, diff(prior, record), version_id(opts[:version_id], record, changeset)}
+        # WHICH entity changed, and a reference to WHAT the change did. The
+        # version holds the diff; the queue row does not copy it.
+        entry = {key, version_id(opts[:version_id], record, changeset)}
         ReactiveDag.Frontier.mark_dirty(cell, [entry], "written", frontier)
     end
   end
@@ -178,48 +180,7 @@ defmodule ReactiveDag.Node.Changes.MarkDirty do
     end
   end
 
-  # BOTH sides of the change, so a parent can derive its claim without reading
-  # back — the only thing that works once the row is deleted or has moved between
-  # units.
-  #
-  # The same shape `ash_paper_trail`'s `:full_diff` writes and
-  # `ReactiveDag.Node.Payload` records: there must be ONE vocabulary for "what
-  # moved", or a claim would depend on which writer produced the change.
-  defp diff(nil, record) do
-    Map.new(snapshot(record), fn {k, v} -> {k, %{"to" => v}} end)
-  end
 
-  defp diff(prior, record) do
-    was = snapshot(prior)
-
-    Map.new(snapshot(record), fn {k, v} ->
-      case Map.fetch(was, k) do
-        {:ok, ^v} -> {k, %{"unchanged" => v}}
-        {:ok, old} -> {k, %{"from" => old, "to" => v}}
-        :error -> {k, %{"to" => v}}
-      end
-    end)
-  end
-
-  # The row as a plain map of dumped public attributes — one side of a diff.
-  #
-  # PUBLIC attributes only: calculations are not loaded at after_action time
-  # (loading them would be a query per write, on the hot path), and private
-  # fields have no business in a table hosts can read.
-  #
-  # dump_to_embedded/3 per attribute is load-bearing. A %Date{} that reaches
-  # jsonb unprepared comes back as a string, and the calendar derivations that
-  # motivate snapshots would silently start comparing the wrong thing.
-  defp snapshot(record) do
-    record.__struct__
-    |> Ash.Resource.Info.public_attributes()
-    |> Enum.reduce(%{}, fn attr, acc ->
-      case Ash.Type.dump_to_embedded(attr.type, Map.get(record, attr.name), attr.constraints) do
-        {:ok, value} -> Map.put(acc, to_string(attr.name), value)
-        _ -> acc
-      end
-    end)
-  end
 
   # the same derivation the payload loop uses: identity fields serialized in
   # primary-key order, else the single payload key attribute.

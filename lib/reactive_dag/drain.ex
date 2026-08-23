@@ -291,9 +291,14 @@ defmodule ReactiveDag.Drain do
     #
     # This cell's OWN writes are what its parents propagate from, so those win on
     # key collision — but a claimed key this recompute did not rewrite still
-    # carries the diff it came in with, which is what makes an externally-written
+    # carries the change it came in with, which is what makes an externally-written
     # row propagate precisely.
-    claimed_diffs = for {k, d} <- entries, is_map(d), into: %{}, do: {k, d}
+    #
+    # RESOLVED from the version, not copied onto the mark: the queue row holds a
+    # reference, so the diff is read here from the versioned resource's own
+    # record. A cell declaring no `version_diff` reader yields nothing, and its
+    # claims narrow no further than the keys themselves.
+    claimed_diffs = resolve_versions(cell_or_nil(plan, cell_id), entries)
 
     cond do
       keys == [] ->
@@ -527,6 +532,43 @@ defmodule ReactiveDag.Drain do
         failure marks them clean over work that did not happen.
         """
     end
+  end
+
+  defp cell_or_nil(plan, cell_id), do: Map.get(plan.cells, cell_id)
+
+  # `{key, version_id}` pairs → `%{key => diff}`, through the node's own reader.
+  #
+  # A version belongs to the resource whose row changed, so the reader is that
+  # node's declaration — the same node whose `version_id` wrote the reference.
+  # A reader that raises costs precision, not the drain: the claim simply is not
+  # narrowed, which is the same outcome as declaring no reader at all.
+  defp resolve_versions(nil, _entries), do: %{}
+
+  defp resolve_versions(cell, entries) do
+    case cell.meta[:version_diff] do
+      nil ->
+        %{}
+
+      reader ->
+        for {k, vid} <- entries, is_binary(vid), diff = read_version(reader, vid), into: %{} do
+          {k, diff}
+        end
+    end
+  end
+
+  defp read_version(reader, version_id) do
+    case reader do
+      {m, f, a} -> apply(m, f, [version_id | a])
+      fun when is_function(fun, 1) -> fun.(version_id)
+    end
+  rescue
+    e ->
+      Logger.warning(
+        "reactive_dag: version_diff reader failed for #{inspect(version_id)} " <>
+          "(#{Exception.message(e)}); this claim will not be narrowed"
+      )
+
+      nil
   end
 
   # Each clause returns the list of parent cell_ids it dirtied (so the drain can

@@ -67,10 +67,8 @@ defmodule ReactiveDag.Frontier do
       entries
       |> Enum.with_index()
       |> Enum.map_join(", ", fn {_e, i} ->
-        b = i * 8
-
-        "($#{b + 1}, $#{b + 2}, $#{b + 3}, $#{b + 4}, $#{b + 5}, $#{b + 6}, $#{b + 7}, " <>
-          "$#{b + 8})"
+        b = i * 7
+        "($#{b + 1}, $#{b + 2}, $#{b + 3}, $#{b + 4}, $#{b + 5}, $#{b + 6}, $#{b + 7})"
       end)
 
     # `awaiting_approval` is per CALL, not per key: a gated cell holds every
@@ -79,13 +77,13 @@ defmodule ReactiveDag.Frontier do
     held = if Keyword.get(opts, :awaiting_approval, false), do: true, else: nil
 
     params =
-      Enum.flat_map(entries, fn {k, prior, version_id} ->
-        [cell, tenant, k, reason, now, prior, held, version_id]
+      Enum.flat_map(entries, fn {k, version_id} ->
+        [cell, tenant, k, reason, now, held, version_id]
       end)
 
     query!(
       "INSERT INTO #{dirty()} " <>
-        "(cell_id, tenant, key, reason, enqueued_at, prior, awaiting_approval, version_id) " <>
+        "(cell_id, tenant, key, reason, enqueued_at, awaiting_approval, version_id) " <>
         "VALUES #{placeholders} " <> on_conflict_merge(),
       params
     )
@@ -114,106 +112,15 @@ defmodule ReactiveDag.Frontier do
     end
   end
 
-  # Three shapes, widening: a bare key, a key with its diff, or a key with both
-  # its diff and the id of the VERSION recording that change.
-  defp normalize_entry({key, prior, version_id}) when is_map(prior) or is_nil(prior),
-    do: {key, prior, version_id}
+  # A bare key, or a key with the id of the VERSION recording the change that
+  # dirtied it. The version is what says WHAT the change did; the queue row says
+  # only which entity changed.
+  defp normalize_entry({key, version_id}) when is_binary(version_id) or is_nil(version_id),
+    do: {key, version_id}
 
-  defp normalize_entry({key, prior}) when is_map(prior) or is_nil(prior), do: {key, prior, nil}
-  defp normalize_entry(key), do: {key, nil, nil}
+  defp normalize_entry(key) when is_binary(key), do: {key, nil}
 
-  @doc """
-  Merge two diffs for the same key: the earliest prior side, the latest `to`.
 
-  The rule the `ON CONFLICT` clause implements, in Elixir — so a caller modelling
-  the frontier (a fake repo in a test, a host inspecting what a burst of writes
-  would collapse to) has ONE definition to agree with rather than reimplementing
-  it and drifting.
-
-      iex> merge_diffs(%{"c" => %{"from" => "meals", "to" => "travel"}},
-      ...>             %{"c" => %{"from" => "travel", "to" => "lodging"}})
-      %{"c" => %{"from" => "meals", "to" => "lodging"}}
-  """
-  @spec merge_diffs(map() | nil, map() | nil) :: map() | nil
-  def merge_diffs(nil, incoming), do: incoming
-  def merge_diffs(stored, nil), do: stored
-
-  def merge_diffs(stored, incoming) do
-    for k <- Enum.uniq(Map.keys(stored) ++ Map.keys(incoming)), into: %{} do
-      {k, merge_entry(Map.get(stored, k), Map.get(incoming, k))}
-    end
-  end
-
-  defp merge_entry(%{"from" => from}, %{} = new), do: Map.put(new, "from", from)
-
-  defp merge_entry(%{"unchanged" => was}, %{"to" => to}),
-    do: %{"from" => was, "to" => to}
-
-  # A stored CREATE (`to` only, no prior side) stays a create however many times
-  # the row then moves: settled state never held it in any of the intermediate
-  # units, so there is nothing there to reprice.
-  defp merge_entry(%{"to" => _}, %{"to" => to}), do: %{"to" => to}
-
-  defp merge_entry(stored, nil), do: stored
-  defp merge_entry(_stored, new), do: new
-
-  # Per attribute: the EARLIEST prior side (`from`, or `unchanged` — which is a
-  # `from` that did not move) and the LATEST `to`. See `mark_dirty/4`'s docs for
-  # why this merges rather than picking a side.
-  #
-  # `jsonb_object_keys` over the union of both diffs, so an attribute present in
-  # only one of them survives.
-  defp on_conflict_merge do
-    d = dirty()
-
-    """
-    ON CONFLICT (tenant, cell_id, key) DO UPDATE SET
-      -- A second change to a HELD key stays held: a reviewer approves the merged
-      -- net effect, not a moving target. And a change arriving on an
-      -- already-approved key does not re-hold it — the approval stands for the
-      -- key, and re-holding would make a gate un-approve on its own.
-      -- The EARLIEST version, to match the merged diff's `from` side: a reviewer
-      -- looking up the record sees the change the diff starts from, not the last
-      -- one to arrive.
-      version_id = COALESCE(#{dirty()}.version_id, EXCLUDED.version_id),
-      awaiting_approval = CASE
-        WHEN #{dirty()}.awaiting_approval IS TRUE THEN TRUE
-        ELSE #{dirty()}.awaiting_approval
-      END,
-      prior =
-      CASE
-        WHEN #{d}.prior IS NULL THEN EXCLUDED.prior
-        WHEN EXCLUDED.prior IS NULL THEN #{d}.prior
-        ELSE (
-          SELECT COALESCE(jsonb_object_agg(k, merged), '{}'::jsonb)
-            FROM (
-              SELECT k,
-                     CASE
-                       WHEN jsonb_exists(#{d}.prior -> k, 'from')
-                         THEN COALESCE(EXCLUDED.prior -> k, '{}'::jsonb)
-                              || jsonb_build_object('from', #{d}.prior -> k -> 'from')
-                       WHEN jsonb_exists(#{d}.prior -> k, 'unchanged')
-                            AND jsonb_exists(EXCLUDED.prior -> k, 'to')
-                         THEN jsonb_build_object(
-                                'from', #{d}.prior -> k -> 'unchanged',
-                                'to', EXCLUDED.prior -> k -> 'to')
-                       -- a stored CREATE stays a create however many times the
-                       -- row then moves: settled state never held it in any
-                       -- intermediate unit, so there is nothing there to reprice
-                       WHEN jsonb_exists(#{d}.prior -> k, 'to')
-                            AND NOT jsonb_exists(#{d}.prior -> k, 'from')
-                            AND jsonb_exists(EXCLUDED.prior -> k, 'to')
-                         THEN jsonb_build_object('to', EXCLUDED.prior -> k -> 'to')
-                       ELSE COALESCE(EXCLUDED.prior -> k, #{d}.prior -> k)
-                     END AS merged
-                FROM jsonb_object_keys(
-                       COALESCE(#{d}.prior, '{}'::jsonb) ||
-                       COALESCE(EXCLUDED.prior, '{}'::jsonb)) AS k
-            ) m
-        )
-      END
-    """
-  end
 
   @doc """
   Approve a gated cell's held changes, so the next drain claims them.
@@ -291,29 +198,47 @@ defmodule ReactiveDag.Frontier do
   end
 
   @doc """
-  The changes a gated cell is holding — `{key, diff, version_id}`, for review.
+  The changes a gated cell is holding — `{key, version_id}`, for review.
 
-  The diff is what a reviewer reads; the version id is how they reach the durable
-  record of the same change, which outlives this queue row.
+  The version is the record of the change: a reviewer resolves it to see what
+  moved. It outlives this queue row, which is why the queue references it rather
+  than copying it.
 
   A READ: it consumes nothing, so a UI can poll it while a drain runs.
   """
-  @spec awaiting(String.t(), keyword()) :: [{key(), map() | nil, String.t() | nil}]
+  @spec awaiting(String.t(), keyword()) :: [{key(), String.t() | nil}]
   def awaiting(cell, opts \\ []) do
     %{rows: rows} =
       query!(
-        "SELECT key, prior, version_id FROM #{dirty()} " <>
+        "SELECT key, version_id FROM #{dirty()} " <>
           "WHERE cell_id = $1 AND tenant = $2 " <>
           "AND awaiting_approval IS TRUE ORDER BY enqueued_at",
         [cell, tenant(opts)]
       )
 
-    Enum.map(rows, fn [k, d, v] -> {k, d, v} end)
+    Enum.map(rows, fn [k, v] -> {k, v} end)
   end
 
   @doc false
-  @deprecated "Renamed to claim_with_diffs/2 — a mark carries both sides now, not just the prior"
+  @deprecated "Renamed to claim_with_diffs/2 — a mark references the version of a change now"
   def claim_with_priors(cell, opts \\ []), do: claim_with_diffs(cell, opts)
+
+  # Keep the EARLIEST version: it records the change the last settled state was
+  # succeeded by, which is the one a consumer must reprice from. A later version
+  # names only where the row ended up, which the live row already says.
+  #
+  # `awaiting_approval` is carried through unchanged, so a second change landing
+  # on a HELD key stays held — a reviewer approves a net effect, not a moving
+  # target — and one landing on an approved key does not re-hold it.
+  defp on_conflict_merge do
+    d = dirty()
+
+    """
+    ON CONFLICT (tenant, cell_id, key) DO UPDATE SET
+      version_id = COALESCE(#{d}.version_id, EXCLUDED.version_id),
+      awaiting_approval = #{d}.awaiting_approval
+    """
+  end
 
   @doc """
   Every cell with dirty keys waiting — what the next drain would work on.
@@ -374,14 +299,16 @@ defmodule ReactiveDag.Frontier do
   def claim(cell, opts \\ []), do: claim_with_diffs(cell, opts) |> Enum.map(&elem(&1, 0))
 
   @doc """
-  `claim/1`, but returning `{key, diff}` pairs — the DIFF each key was marked
-  with (`nil` for a source-fed key, which has no Ash row behind it).
+  `claim/1`, but returning `{key, version_id}` pairs — the VERSION recording the
+  change that dirtied each key (`nil` for a source-fed key, which has no Ash row
+  behind it, or a recalculation, which is not a row change at all).
 
-  A diff is `%{attr => %{"from" => old, "to" => new}}`: both sides, so a
-  consumer can name the unit a row LEFT as well as the one it landed in. Neither
-  survives a live read — the row is gone, or already says only where it went.
+  A queue row says which entity changed; the version says what the change DID.
+  The consumer resolves the version to a diff and derives its own affected units
+  from both sides — which is the only thing that names the unit a row LEFT as
+  well as the one it landed in.
   """
-  @spec claim_with_diffs(String.t(), keyword()) :: [{key(), map() | nil}]
+  @spec claim_with_diffs(String.t(), keyword()) :: [{key(), String.t() | nil}]
   def claim_with_diffs(cell, opts \\ []) do
     # Scoped to ONE tenant: an unscoped claim would consume every tenant's keys
     # for this cell and recompute them under this tenant's plan. That is the
@@ -398,11 +325,11 @@ defmodule ReactiveDag.Frontier do
         # not selected — see `dirty_cells/1`, which filters the same way, or the
         # drain would pick a cell it cannot claim from and loop.
         "DELETE FROM #{dirty()} WHERE cell_id = $1 AND tenant = $2 " <>
-          "AND awaiting_approval IS NOT TRUE RETURNING key, prior",
+          "AND awaiting_approval IS NOT TRUE RETURNING key, version_id",
         [cell, tenant(opts)]
       )
 
-    Enum.map(rows, fn [k, prior] -> {k, prior} end)
+    Enum.map(rows, fn [k, version_id] -> {k, version_id} end)
   end
 
   @doc "True when nothing is dirty."

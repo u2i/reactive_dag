@@ -1285,6 +1285,22 @@ defmodule ReactiveDag.Node do
             "following from the answer rather than being a separate switch. Leave it false " <>
             "on a DERIVED node, where a row whose inputs are gone is stale, not archival."
       ],
+      version_diff: [
+        type: {:or, [:mfa, {:fun, 1}]},
+        required: false,
+        doc:
+          "how to read a version back — an MFA or `fn version_id -> changes end`, " <>
+            "returning the `:full_diff`-shaped map of what that change did " <>
+            "(`ReactiveDag.Node.Diff`).\n\n" <>
+            "A queue row references a version rather than copying it, so a CONSUMER " <>
+            "resolves it at claim time to learn which of its units the change touched. " <>
+            "Declared on the node whose rows are versioned — the same node as " <>
+            "`version_id`, which writes the reference this reads.\n\n" <>
+            "`ash_paper_trail`'s version resource holds it in `changes`, so " <>
+            "`version_diff {MyApp.Versions, :changes_for, []}` is the usual wiring. " <>
+            "Without it a claim cannot be narrowed from the change, and propagation " <>
+            "falls back to a whole-cell claim."
+      ],
       version_id: [
         type: {:or, [:mfa, {:fun, 2}]},
         required: false,
@@ -1321,10 +1337,9 @@ defmodule ReactiveDag.Node do
             "immediately. A person should not queue for approval of their own edit; an " <>
             "extractor claiming what a meeting decided is exactly what wants review. " <>
             "The library cannot tell a person from a service account, so the host says.\n\n" <>
-            "A second change to a key with one already pending MERGES into it " <>
-            "(`ReactiveDag.Frontier.merge_diffs/2`), so a reviewer sees the whole state " <>
-            "change since the last settled point rather than a queue of intermediate " <>
-            "steps — and never an intermediate unit no settled state held.\n\n" <>
+            "A second change to a key with one already pending keeps the EARLIEST " <>
+            "version, so a reviewer sees the change the last settled state was " <>
+            "succeeded by rather than whichever write landed most recently.\n\n" <>
             "Belongs on an extraction boundary, not on arithmetic over " <>
             "already-approved inputs: gating a sum adds a human step to addition."
       ],
@@ -2572,6 +2587,10 @@ defmodule ReactiveDag.Node do
         source: Ext.get_opt(resource, [:reactive], :source, nil),
         over: Ext.get_opt(resource, [:reactive], :over, nil),
         row_key: Ext.get_opt(resource, [:reactive], :row_key, nil),
+        # How a CONSUMER reads back the version a mark on this cell references.
+        # On the cell whose rows are versioned, because the version table is its
+        # resource's — the drain looks it up on the cell it propagates FROM.
+        version_diff: Ext.get_opt(resource, [:reactive], :version_diff, nil),
         payload_update: Ext.get_opt(resource, [:reactive], :payload_update, nil),
         payload_key: Ext.get_opt(resource, [:reactive], :payload_key, nil) || derived_payload_key(resource),
         payload_action: Ext.get_opt(resource, [:reactive], :payload_action, nil),

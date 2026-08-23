@@ -14,8 +14,8 @@ defmodule ReactiveDag.FrontierTest do
 
     def query!("INSERT INTO " <> _, params) do
       params
-      |> Enum.chunk_every(8)
-      |> Enum.each(fn [cell, _tenant, key, _reason, _at, _prior, _held, _vid] ->
+      |> Enum.chunk_every(7)
+      |> Enum.each(fn [cell, _tenant, key, _reason, _at, _held, _vid] ->
         Agent.update(__MODULE__, &MapSet.put(&1, {cell, key}))
       end)
 
