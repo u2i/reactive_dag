@@ -83,28 +83,48 @@ defmodule ReactiveDag.ReprocessWorkerTest do
   end
 
   defmodule FakeRepo do
-    def start_link, do: Agent.start_link(fn -> MapSet.new() end, name: __MODULE__)
-    def marks, do: Agent.get(__MODULE__, &MapSet.to_list/1) |> Enum.sort()
+    def start_link do
+      # the claimable set, plus a permanent ledger the claim does not consume
+      {:ok, _} = Agent.start_link(fn -> [] end, name: :reprocess_mark_log)
+      Agent.start_link(fn -> MapSet.new() end, name: __MODULE__)
+    end
+
+    def marks,
+      do: Agent.get(__MODULE__, &MapSet.to_list/1) |> Enum.map(&{elem(&1, 1), elem(&1, 2), elem(&1, 3)}) |> Enum.sort()
+
+    @doc "Marks as `{tenant, cell, key, reason}` — the tenant is the point."
+    def tenanted_marks, do: Agent.get(__MODULE__, &MapSet.to_list/1) |> Enum.sort()
+
+    @doc "Every mark made, including ones the drain has since claimed."
+    def mark_log, do: Agent.get(:reprocess_mark_log, & &1) |> Enum.sort()
 
     def query!("INSERT INTO " <> _, p) do
       p
       |> Enum.chunk_every(6)
-      |> Enum.each(fn [c, _tenant, k, r, _, _] -> Agent.update(__MODULE__, &MapSet.put(&1, {c, k, r})) end)
+      |> Enum.each(fn [c, tenant, k, r, _, _] ->
+        Agent.update(__MODULE__, &MapSet.put(&1, {tenant, c, k, r}))
+        # A LEDGER of every mark ever made, which the claim does not consume.
+        # Asserting on the claimable set cannot see a mark the drain has already
+        # taken — and the drain runs inside the worker.
+        Agent.update(:reprocess_mark_log, &[{tenant, c, k, r} | &1])
+      end)
 
       %{rows: []}
     end
 
     def query!("SELECT DISTINCT cell_id" <> _, _),
-      do: %{rows: Agent.get(__MODULE__, & &1) |> Enum.map(&[elem(&1, 0)]) |> Enum.uniq()}
+      do: %{rows: Agent.get(__MODULE__, & &1) |> Enum.map(&[elem(&1, 1)]) |> Enum.uniq()}
 
-    def query!("DELETE FROM " <> _, [cell | _tenant]) do
+    # Rows are `{tenant, cell, key, reason}`, and the claim is scoped to BOTH —
+    # a fake that ignored the tenant would let a tenant-scoping bug pass.
+    def query!("DELETE FROM " <> _, [cell, tenant]) do
       c =
         Agent.get_and_update(__MODULE__, fn s ->
-          {m, r} = Enum.split_with(s, fn {x, _, _} -> x == cell end)
+          {m, r} = Enum.split_with(s, fn {t, x, _, _} -> t == tenant and x == cell end)
           {m, MapSet.new(r)}
         end)
 
-      %{rows: Enum.map(c, fn {_, k, _} -> [k, nil] end)}
+      %{rows: Enum.map(c, fn {_, _, k, _} -> [k, nil] end)}
     end
 
     def query!("SELECT COUNT" <> _, _), do: %{rows: [[Agent.get(__MODULE__, &MapSet.size/1)]]}
@@ -130,6 +150,9 @@ defmodule ReactiveDag.ReprocessWorkerTest do
   @doc false
   def plan, do: ReactiveDag.Node.graph([Lines, Totals])
 
+  @doc "The same plan, as one tenant's — for the tenant-scoping test."
+  def tenanted_plan, do: ReactiveDag.Node.graph([Lines, Totals], tenant: "tenant_a")
+
   defp run(args) do
     ReactiveDag.ReprocessWorker.perform(%Oban.Job{
       args: Map.put(args, "plan_mfa", ["ReactiveDag.ReprocessWorkerTest", "plan", []])
@@ -137,6 +160,39 @@ defmodule ReactiveDag.ReprocessWorkerTest do
   end
 
   defp totals, do: Totals |> Ash.read!() |> Enum.map(&{&1.key, &1.total}) |> Enum.sort()
+
+  describe "the plan's tenant" do
+    test "a reprocess marks in the plan's tenant, not untenanted" do
+      # THE SILENT FAILURE. A mark that omits the tenant names work the drain
+      # never reads — and a drain that finds nothing reports SUCCESS. So the
+      # button appears to work, the job succeeds, and nothing recomputes.
+      #
+      # Asserting the tenant on the MARK rather than a drain outcome, because a
+      # drain that correctly does nothing and one that silently does nothing look
+      # identical from outside.
+      ReactiveDag.ReprocessWorker.perform(%Oban.Job{
+        args: %{
+          "cell" => "lines",
+          "plan_mfa" => ["ReactiveDag.ReprocessWorkerTest", "tenanted_plan", []]
+        }
+      })
+
+      marks = FakeRepo.mark_log()
+      assert marks != [], "the reprocess marked something"
+
+      for {tenant, cell, _key, _reason} <- marks do
+        assert tenant == "tenant_a", "#{cell} was marked under #{inspect(tenant)}"
+      end
+    end
+
+    test "an untenanted plan still marks `\"*\"`" do
+      run(%{"cell" => "lines"})
+
+      for {tenant, _cell, _key, _reason} <- FakeRepo.mark_log() do
+        assert tenant == "*"
+      end
+    end
+  end
 
   describe "selecting what to redo" do
     test "a slice reprocesses ONLY its slice" do

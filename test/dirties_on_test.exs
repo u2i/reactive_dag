@@ -49,11 +49,11 @@ defmodule ReactiveDag.DirtiesOnTest do
     end
 
     reactive do
-      id :attestations
-      leaf? true
-      dirties_on [:create, :destroy]
-      schedule_drain true
-      payload_key :key
+      id(:attestations)
+      leaf?(true)
+      dirties_on([:create, :destroy])
+      schedule_drain(true)
+      payload_key(:key)
     end
   end
 
@@ -194,8 +194,54 @@ defmodule ReactiveDag.DirtiesOnTest do
       id(:category_totals)
       op(:fold)
 
-      recompute_by :category, to: :expenses, from: :category
-      reduce into: [sum: [amount: :total], count: :n]
+      recompute_by(:category, to: :expenses, from: :category)
+      reduce(into: [sum: [amount: :total], count: :n])
+    end
+  end
+
+  # A TENANTED write-fed leaf. `dirties_on` runs as an Ash change with no plan in
+  # scope, so the tenant can only come off the changeset — which is where a
+  # tenanted write already put it.
+  defmodule TenantedExpenses do
+    use Ash.Resource,
+      domain: Domain,
+      data_layer: Ash.DataLayer.Ets,
+      extensions: [ReactiveDag.Node]
+
+    ets do
+      private?(true)
+    end
+
+    multitenancy do
+      strategy :attribute
+      attribute :org_id
+    end
+
+    attributes do
+      uuid_primary_key(:id)
+      attribute :key, :string, allow_nil?: false, public?: true
+      attribute :org_id, :string, public?: true
+      attribute :amount, :float, public?: true
+    end
+
+    identities do
+      identity :by_org_key, [:org_id, :key], pre_check_with: Domain
+    end
+
+    actions do
+      defaults [:read, :destroy]
+
+      create :create do
+        accept([:key, :org_id, :amount])
+      end
+    end
+
+    reactive do
+      id(:tenanted_expenses)
+      op(:source)
+      leaf?(true)
+      row_key([:org_id, :key])
+      dirties_on([:create])
     end
   end
 
@@ -206,24 +252,29 @@ defmodule ReactiveDag.DirtiesOnTest do
     def query!("INSERT INTO " <> _, params) do
       params
       |> Enum.chunk_every(6)
-      |> Enum.each(fn [cell, _tenant, key, _r, _t, prior] ->
+      |> Enum.each(fn [cell, tenant, key, _r, _t, prior] ->
         # ON CONFLICT DO NOTHING: the FIRST snapshot wins
-        Agent.update(__MODULE__, fn m -> Map.put_new(m, {cell, key}, prior) end)
+        Agent.update(__MODULE__, fn m -> Map.put_new(m, {tenant, cell, key}, prior) end)
       end)
 
       %{rows: []}
     end
 
+    @doc "The tenants marks were written under — `dirties_on` has no plan, so
+    it reads the tenant off the CHANGESET, and this is what checks it did."
+    def tenants,
+      do: Agent.get(__MODULE__, & &1) |> Map.keys() |> Enum.map(&elem(&1, 0)) |> Enum.uniq()
+
     def query!("SELECT DISTINCT cell_id" <> _, _params) do
-      ids = Agent.get(__MODULE__, & &1) |> Map.keys() |> Enum.map(&elem(&1, 0)) |> Enum.uniq()
+      ids = Agent.get(__MODULE__, & &1) |> Map.keys() |> Enum.map(&elem(&1, 1)) |> Enum.uniq()
       %{rows: Enum.map(ids, &[&1])}
     end
 
-    def query!("DELETE FROM " <> _, [cell | _tenant]) do
+    def query!("DELETE FROM " <> _, [cell, tenant]) do
       rows =
         Agent.get_and_update(__MODULE__, fn m ->
-          {mine, rest} = Enum.split_with(m, fn {{c, _}, _} -> c == cell end)
-          {Enum.map(mine, fn {{_c, k}, prior} -> [k, prior] end), Map.new(rest)}
+          {mine, rest} = Enum.split_with(m, fn {{t, c, _}, _} -> t == tenant and c == cell end)
+          {Enum.map(mine, fn {{_t, _c, k}, prior} -> [k, prior] end), Map.new(rest)}
         end)
 
       %{rows: rows}
@@ -238,9 +289,11 @@ defmodule ReactiveDag.DirtiesOnTest do
     def query!("SELECT pg_advisory_unlock" <> _, _params), do: %{rows: [[true]]}
 
     # what the frontier currently holds, for assertions
-    def dirty, do: Agent.get(__MODULE__, &Map.keys/1) |> Enum.sort()
+    # `{cell, key}`, tenant dropped — the shape every existing assertion uses.
+    # `tenants/0` is what checks the tenant.
+    def dirty,
+      do: Agent.get(__MODULE__, &Map.keys/1) |> Enum.map(&{elem(&1, 1), elem(&1, 2)}) |> Enum.sort()
   end
-
 
   setup do
     start_supervised!(%{id: FakeRepo, start: {FakeRepo, :start_link, []}})
@@ -259,6 +312,28 @@ defmodule ReactiveDag.DirtiesOnTest do
     Rollups |> Ash.read!() |> Enum.each(&Ash.destroy!/1)
     for cell <- ["expenses", "rollups", "quiet", "category_totals"], do: Frontier.claim(cell)
     :ok
+  end
+
+  test "a TENANTED write marks in its own tenant, read off the changeset" do
+    # THE SILENT FAILURE this guards. `dirties_on` is an Ash change on a write,
+    # so there is no plan in scope — the tenant can only come off the changeset,
+    # which is where a tenanted write already put it. Marking untenanted would
+    # name work that tenant's drain never reads, and a drain that finds nothing
+    # reports SUCCESS: the write succeeds, a mark exists, nothing recomputes.
+    TenantedExpenses
+    |> Ash.Changeset.for_create(:create, %{key: "e1", amount: 1.0}, tenant: "org_a")
+    |> Ash.create!()
+
+    assert FakeRepo.tenants() == ["org_a"],
+           "the mark must land in the tenant the write was made under"
+  end
+
+  test "an untenanted write still marks `\"*\"`" do
+    Expenses
+    |> Ash.Changeset.for_create(:create, %{key: "e1", category: "x", amount: 1.0})
+    |> Ash.create!()
+
+    assert FakeRepo.tenants() == ["*"]
   end
 
   test "a CREATE marks the written record's key — no host wiring" do
@@ -341,6 +416,7 @@ defmodule ReactiveDag.DirtiesOnTest do
 
     assert (CategoryTotals |> Ash.get!("travel")).total == 100.0
   end
+
   defp drain(plan),
     do: Drain.run(plan, recompute: ReactiveDag.Node.Recompute, key_rule: ReactiveDag.Node.KeyRule)
 

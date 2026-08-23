@@ -139,11 +139,16 @@ if Code.ensure_loaded?(Oban.Worker) do
     defp mark(_plan, _cell_id, [], _reason), do: :ok
 
     defp mark(plan, cell_id, keys, reason) do
-      Frontier.mark_dirty(cell_id, keys, reason)
+      # The PLAN's tenant. Without it a reprocess of a tenanted plan marks work
+      # the drain never reads — and a drain that finds nothing reports SUCCESS,
+      # so the button appears to work and nothing recomputes.
+      opts = ReactiveDag.Plan.frontier_opts(plan)
+
+      Frontier.mark_dirty(cell_id, keys, reason, opts)
 
       for {parent, parent_keys} <-
             Graph.dirty_parents(plan, cell_id, keys, ReactiveDag.Node.KeyRule) do
-        Frontier.mark_dirty(parent, parent_keys, reason)
+        Frontier.mark_dirty(parent, parent_keys, reason, opts)
       end
 
       :ok
