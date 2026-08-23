@@ -277,13 +277,41 @@ defmodule ReactiveDag.Drain do
     # test `keys == ["*"]` to mean "recompute the whole cell", so a stray "*"
     # riding alongside real keys must collapse — otherwise the whole-cell branch
     # is missed and the specific keys are processed as if "*" were a real key.
-    entries = Frontier.claim_with_priors(cell_id, Plan.frontier_opts(plan))
+    entries = Frontier.claim_with_diffs(cell_id, Plan.frontier_opts(plan))
     claimed = Enum.map(entries, &elem(&1, 0))
     keys = if "*" in claimed, do: ["*"], else: claimed
 
-    # the snapshot each claimed key was marked with, so this cell's parents
-    # can derive their claims from a row that may no longer exist
-    priors = for {k, p} <- entries, not is_nil(p), into: %{}, do: {k, p}
+    # The diffs a change arrived WITH. There are two producers of "what moved",
+    # and a cell can see either:
+    #
+    #   * a host writing a row itself (`dirties_on`) attaches the diff to the
+    #     mark, because nothing else in the graph saw that write;
+    #   * a payload write inside this recompute records its own
+    #     (`Payload.collecting_diffs/1`), collected below.
+    #
+    # This cell's OWN writes are what its parents propagate from, so those win on
+    # key collision — but a claimed key this recompute did not rewrite still
+    # carries the change it came in with, which is what makes an externally-written
+    # row propagate precisely.
+    #
+    # RESOLVED from the version, not copied onto the mark: the queue row holds a
+    # reference, so the diff is read here from the versioned resource's own
+    # record. A cell declaring no `version_diff` reader yields nothing, and its
+    # claims narrow no further than the keys themselves.
+    claimed_diffs = resolve_versions(plan, cell_or_nil(plan, cell_id), entries)
+
+    # DERIVE this cell's own units from the changes it was marked with.
+    #
+    # A propagated mark names the CHILD row that changed and references its
+    # version — `(cell, uuid, version)`. This is where that becomes work: read the
+    # version, project it onto this cell's declared grain, and the units fall out
+    # as VALUES (`Diff.groups/2`). Nothing composite was stored, so nothing has to
+    # be split apart, and the values scope the fold's read exactly rather than to
+    # a per-column hull.
+    #
+    # `{keys, groups}` — the keys this cell recomputes, and the group values
+    # behind them. Unchanged from `keys` for a cell that derives nothing.
+    {keys, claimed_groups} = derive_units(plan, cell_id, keys, claimed_diffs)
 
     cond do
       keys == [] ->
@@ -310,8 +338,23 @@ defmodule ReactiveDag.Drain do
         # The plan's tenant rides with the recompute. It is the PLAN's, not the
         # cell's — every tenant's plan holds identical cells — so it can only
         # enter here, where both are in scope.
-        {outcome, us} =
-          timed(fn -> recompute(cell, keys, Keyword.merge(opts, Plan.frontier_opts(plan))) end)
+        #
+        # `collecting_diffs/1` wraps the WHOLE recompute, which is what makes one
+        # mechanism cover every rung: a declarative fold, a `per_key` action and a
+        # `compute` op writing its own rows all reach the same payload write, so
+        # all three yield diffs without any of them knowing.
+        {{outcome, diffs, versions}, us} =
+          timed(fn ->
+            ReactiveDag.Node.Payload.collecting_diffs_and_versions(fn ->
+              recompute(
+                cell,
+                keys,
+                opts
+                |> Keyword.merge(Plan.frontier_opts(plan))
+                |> Keyword.put(:claimed_groups, claimed_groups)
+              )
+            end)
+          end)
 
         case outcome do
           {:failed, reason} ->
@@ -347,7 +390,8 @@ defmodule ReactiveDag.Drain do
               cell_id,
               cell,
               keys,
-              priors,
+              Map.merge(claimed_diffs, diffs),
+              versions,
               changed,
               meta,
               us,
@@ -366,7 +410,8 @@ defmodule ReactiveDag.Drain do
          cell_id,
          cell,
          keys,
-         priors,
+         diffs,
+         versions,
          changed,
          meta,
          us,
@@ -383,7 +428,7 @@ defmodule ReactiveDag.Drain do
         true -> changed
       end
 
-    parents = propagate(plan, cell_id, prop, opts, priors)
+    parents = propagate(plan, cell_id, prop, opts, diffs, versions)
 
     step = %{
       claimed: keys,
@@ -510,12 +555,145 @@ defmodule ReactiveDag.Drain do
     end
   end
 
+  defp cell_or_nil(plan, cell_id), do: Map.get(plan.cells, cell_id)
+
+  # `{key, version_id}` pairs → `%{key => diff}`, through the node's own reader.
+  #
+  # A version belongs to the resource whose row changed, so the reader is that
+  # node's declaration — the same node whose `version_id` wrote the reference.
+  # A reader that raises costs precision, not the drain: the claim simply is not
+  # narrowed, which is the same outcome as declaring no reader at all.
+  # This cell's OWN units, derived from the changes its marks referenced.
+  #
+  # Returns `{keys, groups}`: the keys to recompute, and `%{unit => [group_values]}`
+  # for the ones derived from a version. A cell that derives nothing gets its
+  # claimed keys back unchanged and an empty map — which is every cell except a
+  # fold whose grain is a plain field list.
+  #
+  # The units are computed HERE rather than at mark time, and that is the model: a
+  # mark says which child row changed and references the change; the shape of this
+  # cell's work is its own business, declared in its own grain, so it is derived
+  # where that grain lives. Nothing composite is ever stored, so nothing has to be
+  # split apart — and the group VALUES survive, which is what scopes the fold's
+  # read exactly instead of to a per-column hull.
+  defp derive_units(_plan, _cell_id, ["*"], _diffs), do: {["*"], %{}}
+  defp derive_units(_plan, _cell_id, keys, diffs) when map_size(diffs) == 0, do: {keys, %{}}
+
+  defp derive_units(plan, cell_id, keys, diffs) do
+    cell = Map.get(plan.cells, cell_id)
+
+    case grain_of(cell) do
+      nil ->
+        {keys, %{}}
+
+      grain ->
+        key_fn = unit_key_fn(cell)
+
+        derived =
+          for k <- keys,
+              d = diffs[k],
+              group <- ReactiveDag.Node.Diff.groups(d, grain),
+              reduce: %{} do
+            acc -> Map.update(acc, key_fn.(group), [group], &[group | &1])
+          end
+
+        # ALL-OR-NOTHING, and the invariant is enforced upstream: `parent_entries/6`
+        # refuses to write version-bearing marks unless EVERY changed key carried
+        # one, so a claim that gets here has a diff for all of its keys. Mixing
+        # derived units with undrived keys would be the dangerous state — some
+        # units claimed, the rest silently stranded — and it is prevented at the
+        # mark rather than patched here.
+        #
+        # A derivation yielding nothing (a nil in the grain) falls back to the
+        # claimed keys, which is what the cell would have recomputed anyway.
+        case Map.keys(derived) do
+          [] -> {keys, %{}}
+          units -> {units, derived}
+        end
+    end
+  end
+
+  # The cell's grain as a plain field list, or nil when it cannot be projected
+  # onto a map — a `{:calc, _}` the datastore evaluates, or a `%Join{}` whose
+  # sides are picked rather than grouped.
+  defp grain_of(nil), do: nil
+
+  defp grain_of(%Cell{meta: meta}) do
+    with :group <- meta[:key_rule],
+         %{} = src <- meta[:over_source],
+         plan when is_list(plan) <- src[:group_key_plan],
+         true <- Enum.all?(plan, &match?({:attr, _, _}, &1)) do
+      Enum.map(plan, fn {:attr, name, _string?} -> name end)
+    else
+      _ -> nil
+    end
+  end
+
+  # How this cell NAMES a unit. Still a string — a payload row is found by its key
+  # and a claim is reported in the drain's log — but derived here and never stored
+  # in the queue, so it round-trips through nothing.
+  defp unit_key_fn(%Cell{meta: meta}) do
+    spec = meta[:reduce] || meta[:join]
+
+    ReactiveDag.Node.Recompute.Declarative.key_fn(
+      spec && Map.get(spec, :key),
+      spec && Map.get(spec, :key_prefix)
+    )
+  end
+
+  defp resolve_versions(_plan, nil, _entries), do: %{}
+
+  # A mark's version reference was written by the cell whose ROW changed, so the
+  # reader that resolves it is that cell's — the claimed cell itself for a source
+  # mark (`dirties_on`), one of its INPUTS for a propagated one. Try the claimed
+  # cell first, then its inputs; a reference nothing can read leaves the claim
+  # un-narrowed rather than failing it.
+  defp resolve_versions(plan, cell, entries) do
+    readers =
+      [cell.meta[:version_diff] | Enum.map(cell.inputs, &input_reader(plan, &1))]
+      |> Enum.reject(&is_nil/1)
+      |> Enum.uniq()
+
+    if readers == [] do
+      %{}
+    else
+      for {k, vid} <- entries,
+          is_binary(vid),
+          diff = Enum.find_value(readers, &read_version(&1, vid)),
+          into: %{} do
+        {k, diff}
+      end
+    end
+  end
+
+  defp input_reader(plan, input_id) do
+    case Map.get(plan.cells, input_id) do
+      nil -> nil
+      input -> input.meta[:version_diff]
+    end
+  end
+
+  defp read_version(reader, version_id) do
+    case reader do
+      {m, f, a} -> apply(m, f, [version_id | a])
+      fun when is_function(fun, 1) -> fun.(version_id)
+    end
+  rescue
+    e ->
+      Logger.warning(
+        "reactive_dag: version_diff reader failed for #{inspect(version_id)} " <>
+          "(#{Exception.message(e)}); this claim will not be narrowed"
+      )
+
+      nil
+  end
+
   # Each clause returns the list of parent cell_ids it dirtied (so the drain can
   # record them as triggered-by this cell).
-  defp propagate(_plan, _cell_id, [], _opts, _priors), do: []
+  defp propagate(_plan, _cell_id, [], _opts, _diffs, _versions), do: []
 
   # :all — the cell was claimed whole; every parent recomputes whole too.
-  defp propagate(plan, cell_id, :all, _opts, _priors) do
+  defp propagate(plan, cell_id, :all, _opts, _diffs, _versions) do
     parents = Map.get(plan.parents, cell_id, [])
     opts = Plan.frontier_opts(plan)
 
@@ -527,15 +705,78 @@ defmodule ReactiveDag.Drain do
     parents
   end
 
-  defp propagate(plan, cell_id, changed, _opts, priors) do
-    parents = Graph.dirty_parents(plan, cell_id, changed, ReactiveDag.Node.KeyRule, priors)
+  defp propagate(plan, cell_id, changed, _opts, diffs, versions) do
+    parents = Graph.dirty_parents(plan, cell_id, changed, ReactiveDag.Node.KeyRule, diffs)
 
     opts = Plan.frontier_opts(plan)
 
     Enum.each(parents, fn {parent_id, keys} ->
-      Frontier.mark_dirty(parent_id, keys, "propagated from #{cell_id}", opts)
+      Frontier.mark_dirty(
+        parent_id,
+        parent_entries(plan, parent_id, cell_id, keys, changed, versions),
+        "propagated from #{cell_id}",
+        opts
+      )
     end)
 
     Enum.map(parents, fn {parent_id, _keys} -> parent_id end)
+  end
+
+  # WHAT a parent's mark says.
+  #
+  # For a parent whose grain the change can be projected onto, the mark names the
+  # CHILD row that changed and references its version — `(cell, uuid, version)` —
+  # and the parent derives its own units when it drains, from the version and its
+  # own declared grain (`Diff.groups/2`).
+  #
+  # That is the whole reason no composite key is stored: a fold's unit is a tuple
+  # of column values with no storable name, so filing a mark UNDER the unit forces
+  # a `"|"` serialization that the consumer must then split apart — and splitting
+  # can only recover a per-column hull, so the fold over-reads. Deriving in the
+  # consumer keeps the values, and the values scope exactly.
+  #
+  # The child's key is used only when a version backs it. Without one the parent
+  # cannot derive anything from a child key it does not group by, so the
+  # pre-existing behaviour stands: mark the parent's own keys as the rule mapped
+  # them.
+  defp parent_entries(plan, parent_id, child_id, mapped_keys, changed, versions) do
+    parent = Map.get(plan.cells, parent_id)
+
+    cond do
+      "*" in mapped_keys ->
+        mapped_keys
+
+      not derives_units?(parent, child_id) ->
+        mapped_keys
+
+      true ->
+        entries = for k <- changed, vid = versions[k], do: {k, vid}
+
+        # Every changed key must carry a version, or the parent would derive units
+        # for some rows and silently miss the rest. A partial set is worse than
+        # none: the missing rows' units are never claimed at all.
+        if entries != [] and length(entries) == length(changed) do
+          entries
+        else
+          mapped_keys
+        end
+    end
+  end
+
+  # A parent DERIVES its units from a child's change when its grain is a plain
+  # field list over that child — the same condition `KeyRule`'s diff path uses.
+  # A `{:calc, _}` grain or a `%Join{}` spec is evaluated by the datastore, not by
+  # arithmetic on a map, so those keep the mapped-key mark.
+  defp derives_units?(nil, _child_id), do: false
+
+  defp derives_units?(%Cell{meta: meta}, child_id) do
+    with :group <- meta[:key_rule],
+         %{} = src <- meta[:over_source],
+         ^child_id <- meta[:over] || child_id,
+         plan when is_list(plan) <- src[:group_key_plan] do
+      Enum.all?(plan, &match?({:attr, _, _}, &1))
+    else
+      _ -> false
+    end
   end
 end

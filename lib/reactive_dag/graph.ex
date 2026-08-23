@@ -40,7 +40,7 @@ defmodule ReactiveDag.Graph do
   authored block — the drain always uses that one, and the parameter exists so a
   host calling this directly (to pre-mark a re-run, say) gets the same answer.
 
-  `priors` maps a changed key to the child row AS IT WAS when marked dirty (see
+  `diffs` maps a changed key to the DIFF of that change — both sides (see
   `ReactiveDag.Frontier`). A rule that implements `rule/4` receives it and can
   derive a claim from a row that no longer exists; one implementing only
   `rule/3` is called exactly as before.
@@ -52,14 +52,14 @@ defmodule ReactiveDag.Graph do
         child_id,
         keys,
         key_rule \\ ReactiveDag.Node.KeyRule,
-        priors \\ %{}
+        diffs \\ %{}
       ) do
     plan.parents
     |> Map.get(child_id, [])
     |> Enum.map(fn parent_id ->
       parent = Map.fetch!(plan.cells, parent_id)
 
-      case apply_rule(key_rule, parent, child_id, keys, priors, Plan.frontier_opts(plan)) do
+      case apply_rule(key_rule, parent, child_id, keys, diffs, Plan.frontier_opts(plan)) do
         :all -> {parent_id, ["*"]}
         {:keys, mapped} -> {parent_id, mapped}
       end
@@ -67,7 +67,7 @@ defmodule ReactiveDag.Graph do
   end
 
   # The WIDEST arity the module exports — rule/5 (with the plan's opts), then
-  # rule/4 (with priors), then rule/3. The seam is public and hosts implement it,
+  # rule/4 (with diffs), then rule/3. The seam is public and hosts implement it,
   # so widening a callback in place would break them for a feature they have not
   # asked for.
   #
@@ -76,12 +76,12 @@ defmodule ReactiveDag.Graph do
   # process that is exactly the state — which would silently pick a narrower
   # arity and drop the tenant. (Learned the hard way: the same trap made an
   # idempotence test claim 114 phantom changed keys.)
-  defp apply_rule(mod, parent, child, keys, priors, opts) do
+  defp apply_rule(mod, parent, child, keys, diffs, opts) do
     Code.ensure_loaded!(mod)
 
     cond do
-      function_exported?(mod, :rule, 5) -> mod.rule(parent, child, keys, priors, opts)
-      function_exported?(mod, :rule, 4) -> mod.rule(parent, child, keys, priors)
+      function_exported?(mod, :rule, 5) -> mod.rule(parent, child, keys, diffs, opts)
+      function_exported?(mod, :rule, 4) -> mod.rule(parent, child, keys, diffs)
       true -> mod.rule(parent, child, keys)
     end
   end

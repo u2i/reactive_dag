@@ -108,11 +108,16 @@ defmodule ReactiveDag.Node.Payload do
         record -> if moved?(record, attrs, opts), do: :changed, else: :unchanged
       end
 
-    {:ok, _} =
+    {:ok, written} =
       resource
       |> Ash.Changeset.for_create(action, attrs, tenant_opts(opts))
       |> Ash.create()
 
+    # This tail is `write/6`'s, duplicated — `upsert/6` predates the rung split
+    # and never moved onto it. Worth collapsing, but not in the same change as
+    # adding the diff: the two have different `find_prior` shapes and merging
+    # them is its own piece of work with its own tests.
+    record_diff(cell_key, prior, attrs, verdict, written, opts)
     lapse(prior, attrs, resource, cell_key, opts)
 
     verdict
@@ -141,7 +146,13 @@ defmodule ReactiveDag.Node.Payload do
 
     opts =
       Keyword.merge(
-        [lapse: meta[:lapse], compare: meta[:compare], payload_update: meta[:payload_update]],
+        [
+          lapse: meta[:lapse],
+          compare: meta[:compare],
+          payload_update: meta[:payload_update],
+          # so the write can record a version for the mark it will cause
+          version_id: meta[:version_id]
+        ],
         opts
       )
 
@@ -240,14 +251,155 @@ defmodule ReactiveDag.Node.Payload do
         record -> if moved?(record, attrs, opts), do: :changed, else: :unchanged
       end
 
-    {:ok, _} =
+    {:ok, written} =
       resource
       |> Ash.Changeset.for_create(action, attrs, tenant_opts(opts))
       |> Ash.create()
 
+    record_diff(cell_key, prior, attrs, verdict, written, opts)
     lapse(prior, attrs, resource, cell_key, opts)
 
     verdict
+  end
+
+  @diffs __MODULE__.Diffs
+  @versions __MODULE__.Versions
+
+  @doc """
+  Collect the diffs a block of payload writes produced, keyed by cell key.
+
+  A propagating consumer needs to know which UNIT a changed row belonged to
+  BEFORE the write as well as after — a row that moved between units affects
+  both, and a row that was deleted affects the one it left. This is the only
+  place both sides are in hand: the prior record and the new attrs, at the moment
+  of the write.
+
+      {changed, diffs} = Payload.collecting_diffs(fn -> materialize(...) end)
+
+  ## TRANSITIONAL — this is a process-dictionary channel
+
+  The diff should travel in the return value, not in the process. Doing that
+  properly means widening `upsert/6`, `upsert_row/5` and `upsert_identity/5` from
+  a verdict atom to `{verdict, diff}`, which is a breaking change to the one part
+  of this library hosts call directly — a real host has 16 such call sites, each
+  reading `!= :unchanged`.
+
+  So: collected here for now, on the explicit understanding that it is a
+  scaffold. The exit is one release that widens those three returns and deletes
+  this section; until then `collecting_diffs/1` is the only supported way to read
+  them, so the channel has exactly one entry and one exit rather than becoming
+  ambient state anything can reach into.
+  """
+  @spec collecting_diffs((-> result)) :: {result, %{optional(String.t()) => map()}}
+        when result: term()
+  def collecting_diffs(fun) when is_function(fun, 0) do
+    {result, diffs, _versions} = collecting_diffs_and_versions(fun)
+    {result, diffs}
+  end
+
+  @doc """
+  `collecting_diffs/1`, and the VERSIONS those writes recorded.
+
+  Two returns rather than one because they answer different questions: the diffs
+  are what this drain uses NOW to derive its parents' claims, and the versions are
+  the durable references it attaches to the marks it writes, so a LATER drain can
+  derive units from the same change.
+
+  A version appears only for a cell whose node declares `version_id`, keyed by the
+  cell key the write was made under.
+  """
+  @spec collecting_diffs_and_versions((-> result)) ::
+          {result, %{optional(String.t()) => map()}, %{optional(String.t()) => String.t()}}
+        when result: term()
+  def collecting_diffs_and_versions(fun) when is_function(fun, 0) do
+    prev = Process.get(@diffs)
+    prev_v = Process.get(@versions)
+    Process.put(@diffs, %{})
+    Process.put(@versions, %{})
+
+    try do
+      result = fun.()
+      # Returned as VALUES, not left in the process dictionary: `after` restores
+      # the caller's dict, and the drain's propagation runs outside this block.
+      {result, Process.get(@diffs, %{}), Process.get(@versions, %{})}
+    after
+      if prev, do: Process.put(@diffs, prev), else: Process.delete(@diffs)
+      if prev_v, do: Process.put(@versions, prev_v), else: Process.delete(@versions)
+    end
+  end
+
+  # Outside a `collecting_diffs/1` block this is a no-op, so every existing
+  # caller — a host op writing its own rows, a test driving `upsert/6` — behaves
+  # exactly as before and pays nothing.
+  defp record_diff(_cell_key, _prior, _attrs, :unchanged, _written, _opts), do: :ok
+
+  defp record_diff(cell_key, prior, attrs, _verdict, written, opts) do
+    case Process.get(@diffs) do
+      nil ->
+        :ok
+
+      acc ->
+        Process.put(@diffs, Map.put(acc, cell_key, diff(prior, attrs)))
+        record_version(cell_key, written, prior, opts)
+    end
+  end
+
+  # The VERSION this write produced, if the node declared how to record one.
+  #
+  # Why the payload path needs this and not just `dirties_on`: a graph-written row
+  # propagates to its parents, and a propagated mark can only REFERENCE a change
+  # if the write that caused it recorded one. Without this the mark carries a NULL
+  # version, and the parent falls back to splitting its `"|"` key — the round-trip
+  # `Diff.groups/2` exists to remove.
+  #
+  # Same MFA/fun contract as `MarkDirty`'s resolver, so a host declares
+  # `version_id` once and both producers honour it. The arguments differ by
+  # necessity: the payload loop builds attrs rather than accepting a caller's
+  # changeset, so a resolver here receives the written record and the prior one.
+  defp record_version(cell_key, written, prior, opts) do
+    with resolver when not is_nil(resolver) <- opts[:version_id],
+         acc when not is_nil(acc) <- Process.get(@versions),
+         id when is_binary(id) <- resolve_version(resolver, written, prior) do
+      Process.put(@versions, Map.put(acc, cell_key, id))
+    else
+      _ -> :ok
+    end
+  end
+
+  defp resolve_version(resolver, record, prior) do
+    case resolver do
+      {m, f, a} -> apply(m, f, [record, prior | a])
+      fun when is_function(fun, 2) -> fun.(record, prior)
+    end
+  rescue
+    e ->
+      require Logger
+
+      Logger.warning(
+        "reactive_dag: version_id resolver failed on a payload write " <>
+          "(#{Exception.message(e)}); the propagated mark will carry no reference"
+      )
+
+      nil
+  end
+
+  # The `:full_diff` shape `ash_paper_trail` writes, and which
+  # `ReactiveDag.Node.Diff` reads — one vocabulary for "what moved",
+  # whether it came from a version row or from here.
+  #
+  # STRING keys, because that is what a jsonb column round-trips to and this must
+  # not read differently depending on where the diff was born.
+  defp diff(nil, attrs) do
+    Map.new(attrs, fn {k, v} -> {to_string(k), %{"to" => v}} end)
+  end
+
+  defp diff(prior, attrs) do
+    Map.new(attrs, fn {k, v} ->
+      case Map.get(prior, k) do
+        ^v -> {to_string(k), %{"unchanged" => v}}
+        was -> {to_string(k), %{"from" => was, "to" => v}}
+      end
+    end)
   end
 
   defp primary_key!(resource) do

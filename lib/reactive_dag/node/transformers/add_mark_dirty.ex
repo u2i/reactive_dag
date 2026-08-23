@@ -146,7 +146,14 @@ defmodule ReactiveDag.Node.Transformers.AddMarkDirty do
       cell: dsl |> cell_id() |> to_string(),
       payload_key: payload_key(dsl),
       identity_fields: identity_fields(dsl),
-      schedule_drain: schedule?
+      schedule_drain: schedule?,
+      # Whether a change through this cell WAITS for a human. Read here rather
+      # than at mark time because the declaration is on the node and the change
+      # has no plan in scope.
+      gated: Spark.Dsl.Transformer.get_option(dsl, [:reactive], :gated),
+      # How to find the version recording this change. The HOST's, because a
+      # version resource is the host's — see the `version_id` docs.
+      version_id: Spark.Dsl.Transformer.get_option(dsl, [:reactive], :version_id)
     ]
   end
 

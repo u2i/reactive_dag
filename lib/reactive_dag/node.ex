@@ -406,10 +406,12 @@ defmodule ReactiveDag.Node do
         required: false,
         doc:
           "REQUIRED with `over:`; implied by a `recompute_by` that declares `from:`. " <>
-            "An attribute or CALCULATION on the over resource (`:fund`, or `:month` where " <>
-            "the over declares `calculate :month, :string, {ReactiveDag.Calendar, " <>
-            "bucket: :month, of: :date}` — derived grouping values are Ash calculations, " <>
-            "declared where the data lives; the library loads them). A list groups by " <>
+            "An attribute or CALCULATION on the over resource (`:fund`, or a `:month` a " <>
+            "calculation derives from a date — derived grouping values are Ash " <>
+            "calculations, declared where the data lives; the library loads them). " <>
+            "NOTE a calculation grain cannot be resolved from a change's diff, so its " <>
+            "propagation falls back to a whole-cell claim; an ATTRIBUTE grain claims " <>
+            "only the units a change actually touched. A list groups by " <>
             "the TUPLE of values; an entry may be the RELATIONAL-JOIN pair " <>
             "`parent_column: :child_field` (`[category: :expense_cat]` — group by the " <>
             "child's field, carry it as this node's column: Ash's source/destination " <>
@@ -1283,6 +1285,64 @@ defmodule ReactiveDag.Node do
             "following from the answer rather than being a separate switch. Leave it false " <>
             "on a DERIVED node, where a row whose inputs are gone is stale, not archival."
       ],
+      version_diff: [
+        type: {:or, [:mfa, {:fun, 1}]},
+        required: false,
+        doc:
+          "how to read a version back — an MFA or `fn version_id -> changes end`, " <>
+            "returning the `:full_diff`-shaped map of what that change did " <>
+            "(`ReactiveDag.Node.Diff`).\n\n" <>
+            "A queue row references a version rather than copying it, so a CONSUMER " <>
+            "resolves it at claim time to learn which of its units the change touched. " <>
+            "Declared on the node whose rows are versioned — the same node as " <>
+            "`version_id`, which writes the reference this reads.\n\n" <>
+            "`ash_paper_trail`'s version resource holds it in `changes`, so " <>
+            "`version_diff {MyApp.Versions, :changes_for, []}` is the usual wiring. " <>
+            "Without it a claim cannot be narrowed from the change, and propagation " <>
+            "falls back to a whole-cell claim."
+      ],
+      version_id: [
+        type: {:or, [:mfa, {:fun, 2}]},
+        required: false,
+        doc:
+          "how to find the VERSION recording a change to this node's rows — an MFA " <>
+            "or `fn record, changeset -> id end`, called after the write and stored on " <>
+            "the mark.\n\n" <>
+            "A queue row says which entity changed; the version says what the change " <>
+            "WAS. The queue is consumed (`DELETE … RETURNING`), so an approved or " <>
+            "rejected change is only explicable afterwards if something durable holds " <>
+            "it — which is what the version is for.\n\n" <>
+            "The library cannot find it on its own: a version resource belongs to the " <>
+            "HOST, one per versioned resource, with whatever name and key type the host " <>
+            "chose. `ash_paper_trail` with `change_tracking_mode :full_diff` writes " <>
+            "exactly the shape `ReactiveDag.Node.Diff` reads, and " <>
+            "`primary_key_type :uuid_v7` makes its ids sortable — so " <>
+            "`version_id {MyApp.Versions, :latest_for, []}` is the usual wiring.\n\n" <>
+            "Omit it and the mark carries the diff only: propagation is unaffected " <>
+            "(the diff is what a claim is derived from), and there is simply no durable " <>
+            "record to look back at."
+      ],
+      gated: [
+        type: {:or, [:boolean, :keyword_list]},
+        required: false,
+        default: false,
+        doc:
+          "hold a change's PROPAGATION until a human approves it. The row is written " <>
+            "as normal — derived tables stay readable, which matters when they are what " <>
+            "a site serves — but the consumers do not recompute until the mark is " <>
+            "approved.\n\n" <>
+            "`gated true` gates every change through this cell. " <>
+            "`gated human?: {Mod, :fun, []}` gates only MACHINE ones: the MFA is called " <>
+            "with the write's actor and, when it returns true, the change propagates " <>
+            "immediately. A person should not queue for approval of their own edit; an " <>
+            "extractor claiming what a meeting decided is exactly what wants review. " <>
+            "The library cannot tell a person from a service account, so the host says.\n\n" <>
+            "A second change to a key with one already pending keeps the EARLIEST " <>
+            "version, so a reviewer sees the change the last settled state was " <>
+            "succeeded by rather than whichever write landed most recently.\n\n" <>
+            "Belongs on an extraction boundary, not on arithmetic over " <>
+            "already-approved inputs: gating a sum adds a human step to addition."
+      ],
       dirties_on: [
         type: {:list, {:one_of, [:create, :update, :destroy]}},
         required: false,
@@ -1859,7 +1919,6 @@ defmodule ReactiveDag.Node do
   # the ONE cross-node fact behind every `:group` capability — an ordered plan
   # of what each group entry IS on the over resource:
   #   {:attr, name, string?}       — a plain attribute (string? gates equality scoping)
-  #   {:calendar, kind, of_attr}   — a ReactiveDag.Calendar calculation (pure
   #                                  key resolution + date-range scoping)
   #   {:calc, name}                — an opaque calculation (lookup-resolvable only)
   # Only for a reduce with a declarative group and DEFAULT key derivation —
@@ -1872,11 +1931,8 @@ defmodule ReactiveDag.Node do
         attr = Ash.Resource.Info.attribute(resource, name) ->
           {:attr, name, attr.type == Ash.Type.String}
 
-        calc = Ash.Resource.Info.calculation(resource, name) ->
-          case calc.calculation do
-            {ReactiveDag.Calendar, opts} -> {:calendar, opts[:bucket], opts[:of]}
-            _ -> {:calc, name}
-          end
+        Ash.Resource.Info.calculation(resource, name) ->
+          {:calc, name}
 
         true ->
           {:calc, name}
@@ -1900,7 +1956,7 @@ defmodule ReactiveDag.Node do
   # a declarative group_by / left / right entry names an ATTRIBUTE or a
   # CALCULATION on the over resource (derived grouping values — a calendar
   # bucket, a normalized code — are Ash calculations, declared where the data
-  # lives; see `ReactiveDag.Calendar`). Checkable only here, where the over
+  # lives). Checkable only here, where the over
   # resource is known. Returns the calculations to `Ash.Query.load` at read.
   defp declarative_loads!(cell, spec, resource) do
     names =
@@ -2531,6 +2587,15 @@ defmodule ReactiveDag.Node do
         source: Ext.get_opt(resource, [:reactive], :source, nil),
         over: Ext.get_opt(resource, [:reactive], :over, nil),
         row_key: Ext.get_opt(resource, [:reactive], :row_key, nil),
+        # How a CONSUMER reads back the version a mark on this cell references.
+        # On the cell whose rows are versioned, because the version table is its
+        # resource's — the drain looks it up on the cell it propagates FROM.
+        version_diff: Ext.get_opt(resource, [:reactive], :version_diff, nil),
+        # How this cell's OWN write records a version. Needed on the payload path
+        # as well as `dirties_on`: a GRAPH-written row propagates to its parents,
+        # and a propagated mark can only reference a change if the write that
+        # caused it recorded one.
+        version_id: Ext.get_opt(resource, [:reactive], :version_id, nil),
         payload_update: Ext.get_opt(resource, [:reactive], :payload_update, nil),
         payload_key: Ext.get_opt(resource, [:reactive], :payload_key, nil) || derived_payload_key(resource),
         payload_action: Ext.get_opt(resource, [:reactive], :payload_action, nil),

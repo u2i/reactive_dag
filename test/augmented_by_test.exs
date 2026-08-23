@@ -252,9 +252,9 @@ defmodule ReactiveDag.AugmentedByTest do
 
     def query!("INSERT INTO " <> _, params) do
       params
-      |> Enum.chunk_every(6)
-      |> Enum.each(fn [cell, _tenant, key, _r, _t, prior] ->
-        Agent.update(__MODULE__, fn m -> Map.put_new(m, {cell, key}, prior) end)
+      |> Enum.chunk_every(7)
+      |> Enum.each(fn [cell, _tenant, key, _r, _t, _held, vid] ->
+        Agent.update(__MODULE__, fn m -> Map.put_new(m, {cell, key}, vid) end)
       end)
 
       %{rows: []}
@@ -269,7 +269,7 @@ defmodule ReactiveDag.AugmentedByTest do
       rows =
         Agent.get_and_update(__MODULE__, fn m ->
           {mine, rest} = Enum.split_with(m, fn {{c, _}, _} -> c == cell end)
-          {Enum.map(mine, fn {{_c, k}, prior} -> [k, prior] end), Map.new(rest)}
+          {Enum.map(mine, fn {{_c, k}, vid} -> [k, vid] end), Map.new(rest)}
         end)
 
       %{rows: rows}

@@ -86,9 +86,6 @@ defmodule ReactiveDag.Node.Recompute.Read do
   defp scope_query(query, pk, {:keys, keys}),
     do: Ash.Query.do_filter(query, [{pk, [in: keys]}])
 
-  defp scope_query(query, _pk, {:range, attr, from, to}),
-    do: Ash.Query.do_filter(query, [{attr, [greater_than_or_equal: from, less_than: to]}])
-
   defp scope_query(query, _pk, {:attr, attr, values}),
     do: Ash.Query.do_filter(query, [{attr, [in: values]}])
 
@@ -98,4 +95,27 @@ defmodule ReactiveDag.Node.Recompute.Read do
   # tighter than reading whole.
   defp scope_query(query, pk, {:all_of, clauses}),
     do: Enum.reduce(clauses, query, &scope_query(&2, pk, &1))
+
+  # EXACT composite scope: one conjunction per claimed unit, ORed. This is what
+  # `{:all_of, …}` above could not express — it filtered each column
+  # independently, so two claims admitted their cross-product. Here each unit
+  # contributes `(fund == "gf" and fiscal_year == "2025")` and the read covers
+  # the claimed units and nothing else.
+  #
+  # Reachable only when the claim carried the group's VALUES rather than a
+  # `"|"`-joined label, which is the diff path — `Diff.groups/2`.
+  defp scope_query(query, _pk, {:any_of, []}), do: query
+
+  defp scope_query(query, _pk, {:any_of, groups}) do
+    filter =
+      Enum.reduce(groups, nil, fn pairs, acc ->
+        conj = Enum.reduce(pairs, nil, fn {attr, value}, inner ->
+          if inner, do: [and: [inner, [{attr, value}]]], else: [{attr, value}]
+        end)
+
+        if acc, do: [or: [acc, conj]], else: conj
+      end)
+
+    Ash.Query.do_filter(query, filter)
+  end
 end

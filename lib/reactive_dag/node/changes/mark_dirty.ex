@@ -28,11 +28,12 @@ defmodule ReactiveDag.Node.Changes.MarkDirty do
   the sources guide.
   """
   use Ash.Resource.Change
+  require Logger
 
   @impl true
-  def change(changeset, opts, _context) do
+  def change(changeset, opts, context) do
     Ash.Changeset.after_action(changeset, fn cs, result ->
-      mark(result, prior_of(cs, result), opts, cs.tenant)
+      mark(result, prior_of(cs, result), opts, cs.tenant, Map.get(context, :actor), cs)
       maybe_schedule_drain(opts)
       {:ok, result}
     end)
@@ -54,7 +55,13 @@ defmodule ReactiveDag.Node.Changes.MarkDirty do
   # %OriginalDataNotAvailable{}. Both fall back to the result, which is correct
   # for a create and no worse than today for the rest.
   defp prior_of(%Ash.Changeset{data: %Ash.Changeset.OriginalDataNotAvailable{}}, result), do: result
-  defp prior_of(%Ash.Changeset{action_type: :create}, result), do: result
+
+  # A create has NO prior, and `nil` is how the diff says so — every attribute
+  # reads `%{"to" => v}`, which is what "nothing existed before" looks like. This
+  # returned `result` while the mark carried a one-sided snapshot, where the new
+  # row was the only sensible fallback; against a diff it would claim every
+  # attribute `unchanged`, which says the opposite.
+  defp prior_of(%Ash.Changeset{action_type: :create}, _result), do: nil
   defp prior_of(%Ash.Changeset{data: %{__struct__: _} = data}, _result), do: data
   defp prior_of(_changeset, result), do: result
 
@@ -101,7 +108,7 @@ defmodule ReactiveDag.Node.Changes.MarkDirty do
       fn -> ReactiveDag.DrainWorker.enqueue() end
   end
 
-  defp mark(record, prior, opts, tenant) do
+  defp mark(record, _prior, opts, tenant, actor, changeset) do
     cell = Keyword.fetch!(opts, :cell)
 
     # The tenant off the CHANGESET, which is where a tenanted write already put
@@ -109,7 +116,9 @@ defmodule ReactiveDag.Node.Changes.MarkDirty do
     # it would name work that tenant's drain never reads. A drain finding nothing
     # reports success, so the write would look handled and nothing would
     # recompute.
-    frontier = if tenant, do: [tenant: tenant], else: []
+    frontier =
+      (if tenant, do: [tenant: tenant], else: [])
+      |> Keyword.put(:awaiting_approval, hold?(opts[:gated], actor))
 
     case key_of(record, opts) do
       nil ->
@@ -119,31 +128,59 @@ defmodule ReactiveDag.Node.Changes.MarkDirty do
         ReactiveDag.Frontier.mark_dirty(cell, ["*"], "written (no key)", frontier)
 
       key ->
-        ReactiveDag.Frontier.mark_dirty(cell, [{key, snapshot(prior)}], "written", frontier)
+        # WHICH entity changed, and a reference to WHAT the change did. The
+        # version holds the diff; the queue row does not copy it.
+        entry = {key, version_id(opts[:version_id], record, changeset)}
+        ReactiveDag.Frontier.mark_dirty(cell, [entry], "written", frontier)
     end
   end
 
-  # The row as it was, so a parent can derive its claim without reading back —
-  # which is the only thing that works once the row is deleted, or has moved to
-  # a different unit.
+  # The id of the version recording this change, from the host's own resolver.
+  # Nil when the node declares none — the mark then carries the diff only, which
+  # is all propagation needs; what is missing is the durable record.
   #
-  # PUBLIC attributes only: calculations are not loaded at after_action time
-  # (loading them would be a query per write, on the hot path), and private
-  # fields have no business in a table hosts can read.
-  #
-  # dump_to_embedded/3 per attribute is load-bearing. A %Date{} that reaches
-  # jsonb unprepared comes back as a string, and the calendar derivations that
-  # motivate snapshots would silently start comparing the wrong thing.
-  defp snapshot(record) do
-    record.__struct__
-    |> Ash.Resource.Info.public_attributes()
-    |> Enum.reduce(%{}, fn attr, acc ->
-      case Ash.Type.dump_to_embedded(attr.type, Map.get(record, attr.name), attr.constraints) do
-        {:ok, value} -> Map.put(acc, to_string(attr.name), value)
-        _ -> acc
-      end
-    end)
+  # A raise here would fail the host's WRITE over a bookkeeping lookup, so a
+  # resolver that blows up costs the record and nothing else. Logged, because a
+  # silently absent version is exactly the thing an audit trail cannot afford.
+  defp version_id(nil, _record, _changeset), do: nil
+
+  defp version_id(resolver, record, changeset) do
+    case resolver do
+      {m, f, a} -> apply(m, f, [record, changeset | a])
+      fun when is_function(fun, 2) -> fun.(record, changeset)
+    end
+  rescue
+    e ->
+      Logger.warning(
+        "reactive_dag: version_id resolver failed (#{Exception.message(e)}); " <>
+          "the mark carries its diff but no durable record"
+      )
+
+      nil
   end
+
+  # Does this change wait for a human?
+  #
+  # `gated true` holds every change through the cell. `gated human?: {M,F,A}`
+  # holds only the MACHINE ones: the host's predicate is called with the write's
+  # ACTOR, and a change a person made propagates immediately — nobody should
+  # queue for approval of their own edit.
+  #
+  # The library cannot tell a person from a service account (a host's LLM calls
+  # may well run as one), so the host says. A nil actor with a predicate declared
+  # is a machine: nothing claimed to be a person.
+  defp hold?(nil, _actor), do: false
+  defp hold?(false, _actor), do: false
+  defp hold?(true, _actor), do: true
+
+  defp hold?(gated, actor) when is_list(gated) do
+    case Keyword.get(gated, :human?) do
+      {m, f, a} -> not apply(m, f, [actor | a])
+      nil -> true
+    end
+  end
+
+
 
   # the same derivation the payload loop uses: identity fields serialized in
   # primary-key order, else the single payload key attribute.

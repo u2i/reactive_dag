@@ -188,8 +188,8 @@ defmodule ReactiveDag.InsightsTest do
 
     def query!("INSERT INTO " <> _, params) do
       params
-      |> Enum.chunk_every(6)
-      |> Enum.each(fn [cell, _tenant, key, _r, _t, _prior] ->
+      |> Enum.chunk_every(7)
+      |> Enum.each(fn [cell, _tenant, key, _r, _t, _held, vid] ->
         Agent.update(__MODULE__, &MapSet.put(&1, {cell, key}))
       end)
 

@@ -29,18 +29,29 @@ defmodule ReactiveDag.Frontier do
   @doc """
   Mark `keys` of `cell` dirty, coalesced (idempotent per `(cell, key)`).
 
-  `keys` is a list of key strings, or of `{key, prior}` pairs where `prior` is
-  the row AS IT WAS when marked — a map the parent can derive its claim from
-  without reading the live row.
+  `keys` is a list of key strings, or of `{key, diff}` pairs where `diff` is the
+  change's two sides — `%{attr => %{"from" => old, "to" => new}}` — which a
+  consumer derives its claim from without reading the live row.
 
-  That snapshot is what makes a claim survive its subject. A deleted row cannot
-  say which unit it belonged to, and a row that MOVED between units cannot say
-  where it came from; the snapshot answers both, so a claim stays precise where
-  it would otherwise degrade to a whole-cell recompute.
+  The diff is what makes a claim survive its subject. A deleted row cannot say
+  which unit it belonged to; a row that MOVED between units says only where it
+  went. The diff answers both, so a claim stays precise where it would otherwise
+  degrade to a whole-cell recompute.
 
-  Coalescing keeps the FIRST snapshot (`ON CONFLICT DO NOTHING`), which is
-  deliberate: if a row is written twice before a drain, the oldest prior state
-  is the one that names the unit it started in.
+  Coalescing MERGES the diffs: the earliest `from` and the latest `to`, per
+  attribute. If a row moves meals → travel → lodging before a drain, the claim
+  must name `meals` (where the last settled state had it) and `lodging` (where it
+  is now) — never `travel`, an intermediate no settled state ever saw.
+
+  `DO NOTHING` would keep `meals → travel` and strand lodging; overwriting would
+  keep `travel → lodging` and strand meals. Both lose a unit that needs
+  repricing, which is why this merges rather than picks.
+
+  The merge is done in SQL, in the `ON CONFLICT` clause, because marks arrive
+  from arbitrary concurrent writes. Reading the stored diff into Elixir to merge
+  it there would be a read-modify-write with no lock around it — and the marking
+  path deliberately holds none, since it runs inside a host's own write
+  transaction.
   """
   @spec mark_dirty(String.t(), [key() | {key(), map() | nil}], String.t() | nil, keyword()) :: :ok
   def mark_dirty(cell, keys, reason, opts \\ [])
@@ -56,16 +67,24 @@ defmodule ReactiveDag.Frontier do
       entries
       |> Enum.with_index()
       |> Enum.map_join(", ", fn {_e, i} ->
-        b = i * 6
-        "($#{b + 1}, $#{b + 2}, $#{b + 3}, $#{b + 4}, $#{b + 5}, $#{b + 6})"
+        b = i * 7
+        "($#{b + 1}, $#{b + 2}, $#{b + 3}, $#{b + 4}, $#{b + 5}, $#{b + 6}, $#{b + 7})"
       end)
 
+    # `awaiting_approval` is per CALL, not per key: a gated cell holds every
+    # change of a given write, and a caller marking a mixed batch would be
+    # marking two different things.
+    held = if Keyword.get(opts, :awaiting_approval, false), do: true, else: nil
+
     params =
-      Enum.flat_map(entries, fn {k, prior} -> [cell, tenant, k, reason, now, prior] end)
+      Enum.flat_map(entries, fn {k, version_id} ->
+        [cell, tenant, k, reason, now, held, version_id]
+      end)
 
     query!(
-      "INSERT INTO #{dirty()} (cell_id, tenant, key, reason, enqueued_at, prior) " <>
-        "VALUES #{placeholders} ON CONFLICT (tenant, cell_id, key) DO NOTHING",
+      "INSERT INTO #{dirty()} " <>
+        "(cell_id, tenant, key, reason, enqueued_at, awaiting_approval, version_id) " <>
+        "VALUES #{placeholders} " <> on_conflict_merge(),
       params
     )
 
@@ -93,8 +112,133 @@ defmodule ReactiveDag.Frontier do
     end
   end
 
-  defp normalize_entry({key, prior}) when is_map(prior) or is_nil(prior), do: {key, prior}
-  defp normalize_entry(key), do: {key, nil}
+  # A bare key, or a key with the id of the VERSION recording the change that
+  # dirtied it. The version is what says WHAT the change did; the queue row says
+  # only which entity changed.
+  defp normalize_entry({key, version_id}) when is_binary(version_id) or is_nil(version_id),
+    do: {key, version_id}
+
+  defp normalize_entry(key) when is_binary(key), do: {key, nil}
+
+
+
+  @doc """
+  Approve a gated cell's held changes, so the next drain claims them.
+
+  `keys` names which — or `:all` for every held change of that cell. Returns the
+  keys it released, so a caller can report what a click actually did rather than
+  assuming.
+
+  Approving something already claimable is a no-op rather than an error: a double
+  click, or two reviewers, must not fail.
+  """
+  @spec approve(String.t(), [key()] | :all, keyword()) :: [key()]
+  def approve(cell, keys \\ :all, opts \\ [])
+
+  def approve(cell, :all, opts) do
+    %{rows: rows} =
+      query!(
+        "UPDATE #{dirty()} SET awaiting_approval = NULL " <>
+          "WHERE cell_id = $1 AND tenant = $2 AND awaiting_approval IS TRUE RETURNING key",
+        [cell, tenant(opts)]
+      )
+
+    Enum.map(rows, fn [k] -> k end)
+  end
+
+  def approve(_cell, [], _opts), do: []
+
+  def approve(cell, keys, opts) when is_list(keys) do
+    %{rows: rows} =
+      query!(
+        "UPDATE #{dirty()} SET awaiting_approval = NULL " <>
+          "WHERE cell_id = $1 AND tenant = $2 AND awaiting_approval IS TRUE " <>
+          "AND key = ANY($3) RETURNING key",
+        [cell, tenant(opts), keys]
+      )
+
+    Enum.map(rows, fn [k] -> k end)
+  end
+
+  @doc """
+  Reject a gated cell's held changes — DISCARD the marks without recomputing.
+
+  The rows are already written; this says the graph should not propagate from
+  them. So a rejected change leaves the derived table as it stands and the
+  consumers as they were, which is the honest meaning of "no" given the gate
+  holds propagation rather than the write.
+
+  Returns the keys it discarded.
+  """
+  @spec reject(String.t(), [key()] | :all, keyword()) :: [key()]
+  def reject(cell, keys \\ :all, opts \\ [])
+
+  def reject(cell, :all, opts) do
+    %{rows: rows} =
+      query!(
+        "DELETE FROM #{dirty()} WHERE cell_id = $1 AND tenant = $2 " <>
+          "AND awaiting_approval IS TRUE RETURNING key",
+        [cell, tenant(opts)]
+      )
+
+    Enum.map(rows, fn [k] -> k end)
+  end
+
+  def reject(_cell, [], _opts), do: []
+
+  def reject(cell, keys, opts) when is_list(keys) do
+    %{rows: rows} =
+      query!(
+        "DELETE FROM #{dirty()} WHERE cell_id = $1 AND tenant = $2 " <>
+          "AND awaiting_approval IS TRUE AND key = ANY($3) RETURNING key",
+        [cell, tenant(opts), keys]
+      )
+
+    Enum.map(rows, fn [k] -> k end)
+  end
+
+  @doc """
+  The changes a gated cell is holding — `{key, version_id}`, for review.
+
+  The version is the record of the change: a reviewer resolves it to see what
+  moved. It outlives this queue row, which is why the queue references it rather
+  than copying it.
+
+  A READ: it consumes nothing, so a UI can poll it while a drain runs.
+  """
+  @spec awaiting(String.t(), keyword()) :: [{key(), String.t() | nil}]
+  def awaiting(cell, opts \\ []) do
+    %{rows: rows} =
+      query!(
+        "SELECT key, version_id FROM #{dirty()} " <>
+          "WHERE cell_id = $1 AND tenant = $2 " <>
+          "AND awaiting_approval IS TRUE ORDER BY enqueued_at",
+        [cell, tenant(opts)]
+      )
+
+    Enum.map(rows, fn [k, v] -> {k, v} end)
+  end
+
+  @doc false
+  @deprecated "Renamed to claim_with_diffs/2 — a mark references the version of a change now"
+  def claim_with_priors(cell, opts \\ []), do: claim_with_diffs(cell, opts)
+
+  # Keep the EARLIEST version: it records the change the last settled state was
+  # succeeded by, which is the one a consumer must reprice from. A later version
+  # names only where the row ended up, which the live row already says.
+  #
+  # `awaiting_approval` is carried through unchanged, so a second change landing
+  # on a HELD key stays held — a reviewer approves a net effect, not a moving
+  # target — and one landing on an approved key does not re-hold it.
+  defp on_conflict_merge do
+    d = dirty()
+
+    """
+    ON CONFLICT (tenant, cell_id, key) DO UPDATE SET
+      version_id = COALESCE(#{d}.version_id, EXCLUDED.version_id),
+      awaiting_approval = #{d}.awaiting_approval
+    """
+  end
 
   @doc """
   Every cell with dirty keys waiting — what the next drain would work on.
@@ -105,7 +249,11 @@ defmodule ReactiveDag.Frontier do
   @spec dirty_cells(keyword()) :: [String.t()]
   def dirty_cells(opts \\ []) do
     %{rows: rows} =
-      query!("SELECT DISTINCT cell_id FROM #{dirty()} WHERE tenant = $1", [tenant(opts)])
+      query!(
+        "SELECT DISTINCT cell_id FROM #{dirty()} " <>
+          "WHERE tenant = $1 AND awaiting_approval IS NOT TRUE",
+        [tenant(opts)]
+      )
 
     Enum.map(rows, fn [id] -> id end)
   end
@@ -148,35 +296,55 @@ defmodule ReactiveDag.Frontier do
 
   @doc "Atomically claim (delete-returning) all dirty keys for `cell`."
   @spec claim(String.t(), keyword()) :: [key()]
-  def claim(cell, opts \\ []), do: claim_with_priors(cell, opts) |> Enum.map(&elem(&1, 0))
+  def claim(cell, opts \\ []), do: claim_with_diffs(cell, opts) |> Enum.map(&elem(&1, 0))
 
   @doc """
-  `claim/1`, but returning `{key, prior}` pairs — the snapshot each key was
-  marked with (`nil` for a source-fed key, which has no row behind it).
+  `claim/1`, but returning `{key, version_id}` pairs — the VERSION recording the
+  change that dirtied each key (`nil` for a source-fed key, which has no Ash row
+  behind it, or a recalculation, which is not a row change at all).
 
-  The drain uses this so a parent can derive its claim from what the row WAS,
-  which is the only thing that survives a delete.
+  A queue row says which entity changed; the version says what the change DID.
+  The consumer resolves the version to a diff and derives its own affected units
+  from both sides — which is the only thing that names the unit a row LEFT as
+  well as the one it landed in.
   """
-  @spec claim_with_priors(String.t()) :: [{key(), map() | nil}]
-  def claim_with_priors(cell, opts \\ []) do
+  @spec claim_with_diffs(String.t(), keyword()) :: [{key(), String.t() | nil}]
+  def claim_with_diffs(cell, opts \\ []) do
     # Scoped to ONE tenant: an unscoped claim would consume every tenant's keys
     # for this cell and recompute them under this tenant's plan. That is the
     # failure the tenant column exists to prevent, and it is silent — the other
     # tenants' work is simply gone, and their next drain finds nothing to do.
     %{rows: rows} =
       query!(
-        "DELETE FROM #{dirty()} WHERE cell_id = $1 AND tenant = $2 RETURNING key, prior",
+        # `awaiting_approval` is NULL for an ordinary mark and TRUE for a gated
+        # change nobody has approved. `IS NOT TRUE` covers both, and covers a row
+        # written before this column existed.
+        #
+        # The unapproved rows stay in the table: they are not lost work, they are
+        # work waiting on a person. A gated cell with nothing approved simply is
+        # not selected — see `dirty_cells/1`, which filters the same way, or the
+        # drain would pick a cell it cannot claim from and loop.
+        "DELETE FROM #{dirty()} WHERE cell_id = $1 AND tenant = $2 " <>
+          "AND awaiting_approval IS NOT TRUE RETURNING key, version_id",
         [cell, tenant(opts)]
       )
 
-    Enum.map(rows, fn [k, prior] -> {k, prior} end)
+    Enum.map(rows, fn [k, version_id] -> {k, version_id} end)
   end
 
   @doc "True when nothing is dirty."
   @spec empty?(keyword()) :: boolean()
   def empty?(opts \\ []) do
     %{rows: [[n]]} =
-      query!("SELECT COUNT(*) FROM #{dirty()} WHERE tenant = $1", [tenant(opts)])
+      query!(
+        # CLAIMABLE work, not all work. A gated change awaiting approval leaves
+        # this true: the drain has nothing to do, which is exactly the state.
+        # Counting it would make `empty?/1` false forever and any caller looping
+        # on it never finish.
+        "SELECT COUNT(*) FROM #{dirty()} " <>
+          "WHERE tenant = $1 AND awaiting_approval IS NOT TRUE",
+        [tenant(opts)]
+      )
 
     n == 0
   end

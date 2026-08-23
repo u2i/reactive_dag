@@ -23,12 +23,14 @@ defmodule ReactiveDag.Node.KeyRule do
 
   def rule(%Cell{meta: %{key_rule: :all}}, _child, _changed), do: :all
 
-  # `{:group, from: :key}` — pure resolution: the key's leading `|`-segments
-  # carry the group's INPUT fields in group_by order (a plain attribute's
-  # value; a Calendar calculation's raw date, relabeled through the calc's own
-  # bucket). No query, and deletion-safe: a vanished key still names the group
-  # it left. A key that violates the grammar degrades the propagation to :all
-  # — correctness over precision.
+  # `{:group, from: :key}` — pure resolution: the key's leading `|`-segments carry
+  # the group's INPUT fields in `group_by` order. No query, and deletion-safe: a
+  # vanished key still names the group it left. A key that violates the grammar
+  # degrades the propagation to `:all` — correctness over precision.
+  #
+  # The DIFF path answers the same question without a key grammar, and answers a
+  # move better (both units, not one), so this rung is the narrow case where a
+  # host wants resolution with no read at all.
   def rule(%Cell{meta: %{key_rule: {:group, _opts}} = meta}, _child, changed) do
     pure_group_claims(meta, changed)
   end
@@ -49,48 +51,46 @@ defmodule ReactiveDag.Node.KeyRule do
   def rule(_parent, _child, changed), do: {:keys, changed}
 
   @doc """
-  `rule/3` with the SNAPSHOTS the changed keys were marked with — the child rows
-  as they were, which `ReactiveDag.Frontier` captured at mark time.
+  `rule/3` with the DIFF each changed key was marked with — both sides of the
+  change, from whichever writer produced it.
 
-  A snapshot survives its row, so a `:group` claim stays precise in the two
-  cases a live lookup cannot handle:
+  A diff survives its row and names where it went, so a `:group` claim stays
+  precise in the two cases a live lookup cannot handle at all:
 
-    * the row was **deleted** — nothing to read, but the snapshot still names
-      the unit it belonged to;
-    * the row **moved** between units — the live row names where it landed, the
-      snapshot names where it came from, and BOTH need repricing.
+    * the row was **deleted** — nothing to read, but the diff still names the
+      unit it belonged to;
+    * the row **moved** between units — the live row names only where it landed,
+      and BOTH units need repricing.
 
-  Keys with no snapshot (a source-fed leaf has no Ash row behind it) fall back
-  to `rule/3` exactly as before, so the two paths coexist.
+  There is no live read on this path. An earlier version carried only the prior
+  side, so a move had to union the snapshot with a lookup of where the row landed
+  — and that lookup was itself what degraded to `:all` on a delete.
+
+  Keys with no diff (a source-fed leaf has no Ash row behind it) fall back to
+  `rule/3`, so the two paths coexist.
   """
   @spec rule(Cell.t(), Cell.id(), [String.t()], %{String.t() => map()}) ::
           ReactiveDag.KeyRule.result()
-  def rule(parent, child, changed, priors) when map_size(priors) == 0,
+  def rule(parent, child, changed, diffs) when map_size(diffs) == 0,
     do: rule(parent, child, changed)
 
-  def rule(%Cell{meta: %{key_rule: :group} = meta} = parent, child, changed, priors) do
+  def rule(%Cell{meta: %{key_rule: :group} = meta} = parent, child, changed, diffs) do
     spec = meta[:reduce] || meta[:join]
 
-    case snapshot_claims(spec, meta, changed, priors) do
+    case diff_claims(spec, meta, changed, diffs) do
       :none ->
         rule(parent, child, changed)
 
-      {:ok, from_snapshots} ->
-        # The snapshot names where each row WAS; the live lookup names where it
-        # is NOW. A move needs both, so the live path still runs over every
-        # changed key and the two sets are unioned.
-        #
-        # The live lookup degrading to :all no longer forces :all overall: that
-        # degradation means "a row vanished and I cannot name its group", which
-        # is exactly what the snapshot just answered.
-        case rule(parent, child, changed) do
-          :all -> {:keys, from_snapshots}
-          {:keys, looked_up} -> {:keys, Enum.uniq(from_snapshots ++ looked_up)}
-        end
+      {:ok, from_diffs} ->
+        # NO live read. A snapshot said only where a row WAS, so a move had to
+        # union it with a lookup of where the row landed — and that lookup was
+        # the thing that degraded to `:all` on a deleted row. A diff carries both
+        # sides, so the union has nothing to add and the query is pure cost.
+        {:keys, from_diffs}
     end
   end
 
-  def rule(parent, child, changed, _priors), do: rule(parent, child, changed)
+  def rule(parent, child, changed, _diffs), do: rule(parent, child, changed)
 
   @doc """
   `rule/4` with the plan's OPTS — currently `:tenant`.
@@ -106,7 +106,7 @@ defmodule ReactiveDag.Node.KeyRule do
   """
   @spec rule(Cell.t(), Cell.id(), [String.t()], %{String.t() => map()}, keyword()) ::
           ReactiveDag.KeyRule.result()
-  def rule(parent, child, changed, priors, opts) do
+  def rule(parent, child, changed, diffs, opts) do
     # The read scope travels in the process, not the argument list. Every clause
     # below reaches the two reads through several private functions that exist to
     # express the GROUPING, and threading a tenant through each would put the
@@ -118,7 +118,7 @@ defmodule ReactiveDag.Node.KeyRule do
     Process.put(__MODULE__, opts)
 
     try do
-      rule(parent, child, changed, priors)
+      rule(parent, child, changed, diffs)
     after
       if prev, do: Process.put(__MODULE__, prev), else: Process.delete(__MODULE__)
     end
@@ -132,61 +132,54 @@ defmodule ReactiveDag.Node.KeyRule do
   # Derive each snapshotted key's unit by running the combinator's own grouping
   # against the stored row. Returns the keys derived, plus the changed keys that
   # had no snapshot (which still need the live path).
-  defp snapshot_claims(nil, _meta, _changed, _priors), do: :none
+  defp diff_claims(nil, _meta, _changed, _diffs), do: :none
 
-  defp snapshot_claims(spec, meta, changed, priors) do
+  # The DIFF each changed key was written with — both sides of the change, from
+  # the payload write that produced it (`Payload.collecting_diffs/1`).
+  #
+  # This replaces a jsonb snapshot carried on the queue row, and answers strictly
+  # more: a snapshot said where a row WAS, so a move needed it unioned with a live
+  # read of where the row landed. A diff carries both, so there is nothing to read
+  # and nothing to fail — see `ReactiveDag.Node.Diff`.
+  #
+  # FOUR routes still fall back to the live read, and each is a real case rather
+  # than a gap left unfinished. Measured on a real host: 3 of its 4 `:group`
+  # cells take the diff path, and the fourth needs the first of these.
+  #
+  #   * a `{:calc, _}` in the grain — a calculation is an Ash `expr` the
+  #     datastore evaluates. The diff holds the ATTRIBUTES it derives from (a
+  #     host's `side` comes from `kind`), but evaluating an expr in the BEAM
+  #     against a bare map is a different capability from this module's.
+  #   * a `%Join{}` rather than a `%Reduce{}` — its sides are picked by
+  #     `side_fn/1`, not by a group plan, so the grain is not a field list.
+  #   * a key with NO diff — a source-fed leaf has no Ash row behind it, so
+  #     nothing captured one.
+  #   * a diff that yields no unit — a nil in the row's own grain. Falling back
+  #     wholesale beats claiming a partial set and stranding the rest.
+  defp diff_claims(spec, meta, changed, diffs) do
     alias ReactiveDag.Node.Recompute.Declarative
 
     with %ReactiveDag.Node.Reduce{} = r <- spec,
-         plan when is_list(plan) <- meta[:over_source][:group_key_plan] do
+         plan when is_list(plan) <- meta[:over_source][:group_key_plan],
+         true <- Enum.all?(plan, &match?({:attr, _, _}, &1)) do
       key_fn = Declarative.key_fn(Map.get(r, :key), Map.get(r, :key_prefix))
-      snapshotted = Enum.filter(changed, &Map.has_key?(priors, &1))
+      grain = Enum.map(plan, fn {:attr, name, _string?} -> name end)
+      with_diffs = Enum.filter(changed, &Map.has_key?(diffs, &1))
 
       keys =
-        snapshotted
-        |> Enum.map(&unit_from_snapshot(plan, priors[&1], key_fn))
-        |> Enum.reject(&(&1 == :error))
+        with_diffs
+        |> Enum.flat_map(&ReactiveDag.Node.Diff.units(diffs[&1], grain, key_fn))
+        |> Enum.uniq()
 
-      # a snapshot we cannot derive from is no better than none: fall back
-      # wholesale rather than claim a partial set
-      if length(keys) < length(snapshotted), do: :none, else: {:ok, keys}
+      # A key whose diff yields no unit — a nil in its own grain — is no better
+      # than no diff at all: fall back wholesale rather than claim a partial set
+      # and strand the rest.
+      if keys == [] and with_diffs != [], do: :none, else: {:ok, keys}
     else
       _ -> :none
     end
   end
 
-  # The snapshot is jsonb, so its keys are STRINGS and a Calendar bucket's
-  # source is a date that round-tripped as a string — parse it back through the
-  # calculation rather than comparing the wrong thing.
-  defp unit_from_snapshot(plan, prior, key_fn) do
-    values =
-      Enum.map(plan, fn
-        {:attr, name, _string?} ->
-          Map.get(prior, to_string(name), :error)
-
-        {:calendar, kind, of} ->
-          case Map.get(prior, to_string(of)) do
-            nil -> :error
-            raw -> calendar_label(kind, raw)
-          end
-
-        {:calc, _name} ->
-          # an opaque calculation cannot be evaluated from stored attributes
-          :error
-      end)
-
-    if :error in values, do: :error, else: key_fn.(List.to_tuple(values))
-  end
-
-  defp calendar_label(kind, raw) when is_binary(raw) do
-    case Date.from_iso8601(raw) do
-      {:ok, date} -> ReactiveDag.Calendar.label(kind, date)
-      _ -> :error
-    end
-  end
-
-  defp calendar_label(kind, %Date{} = date), do: ReactiveDag.Calendar.label(kind, date)
-  defp calendar_label(_kind, _raw), do: :error
 
   # A TWO-INPUT join: the changed keys belong to ONE side, so translate them
   # through THAT side only. Which side is the `child` that propagated — the same
@@ -343,12 +336,6 @@ defmodule ReactiveDag.Node.KeyRule do
         |> Enum.map(fn
           {{:attr, _name, _string?}, seg} ->
             seg
-
-          {{:calendar, kind, _of}, seg} ->
-            case ReactiveDag.Calendar.parse(seg) do
-              {_child_kind, first} -> ReactiveDag.Calendar.label(kind, first)
-              :error -> :error
-            end
 
           {{:calc, _name}, _seg} ->
             # an opaque calculation can't be evaluated from a segment

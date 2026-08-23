@@ -57,11 +57,29 @@ defmodule ReactiveDag.Migration do
       add(:key, :text, null: false)
       add(:reason, :text)
       add(:enqueued_at, :utc_datetime_usec)
-      # the row as it was when marked — see ReactiveDag.Frontier. Nullable: a
-      # source-fed key has no Ash record behind it. Cheap because this table is
-      # a QUEUE: rows live from mark to claim, then DELETE … RETURNING removes
-      # them.
-      add(:prior, :map)
+      # WHAT THE CHANGE DID, by reference: the id of the version row recording
+      # it. A queue row says which entity changed; the version says what the
+      # change was, and a consumer derives its own affected units from the two.
+      #
+      # A REFERENCE rather than the diff inlined, because the change outlives the
+      # work item. This table is a queue — rows live from mark to claim, then
+      # `DELETE … RETURNING` removes them — so an inlined diff is destroyed by
+      # the drain that consumes it. The version persists, which is what makes an
+      # approved change auditable after the fact and a rejected one explicable.
+      #
+      # Nullable: a source-fed key has no Ash record behind it, and a
+      # recalculation (a reprocess, a prompt change) is not a row change at all.
+      # Untyped text, not a foreign key: the version table is the HOST's, one per
+      # versioned resource, so there is nothing single to reference.
+      add(:version_id, :text)
+
+
+      # NULL for an ordinary mark — the overwhelming majority — so a host that
+      # gates nothing pays one nullable column and no behaviour change.
+      #
+      # Set when a GATED cell's change is held: the claim skips these until a
+      # human approves. See `ReactiveDag.Frontier.approve/3`.
+      add(:awaiting_approval, :boolean)
     end
 
     # one index serves everything: uniqueness backs mark_dirty's ON CONFLICT,

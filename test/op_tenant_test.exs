@@ -97,8 +97,8 @@ defmodule ReactiveDag.OpTenantTest do
 
     def query!("INSERT INTO " <> _, params) do
       params
-      |> Enum.chunk_every(6)
-      |> Enum.each(fn [cell, tenant, key, _r, _t, _p] ->
+      |> Enum.chunk_every(7)
+      |> Enum.each(fn [cell, tenant, key, _r, _t, _held, vid] ->
         Agent.update(__MODULE__, &(&1 ++ [{tenant, cell, key}]))
       end)
 
