@@ -38,9 +38,20 @@ defmodule ReactiveDag.Frontier do
   where it came from; the snapshot answers both, so a claim stays precise where
   it would otherwise degrade to a whole-cell recompute.
 
-  Coalescing keeps the FIRST snapshot (`ON CONFLICT DO NOTHING`), which is
-  deliberate: if a row is written twice before a drain, the oldest prior state
-  is the one that names the unit it started in.
+  Coalescing MERGES the diffs: the earliest `from` and the latest `to`, per
+  attribute. If a row moves meals → travel → lodging before a drain, the claim
+  must name `meals` (where the last settled state had it) and `lodging` (where it
+  is now) — never `travel`, an intermediate no settled state ever saw.
+
+  `DO NOTHING` would keep `meals → travel` and strand lodging; overwriting would
+  keep `travel → lodging` and strand meals. Both lose a unit that needs
+  repricing, which is why this merges rather than picks.
+
+  The merge is done in SQL, in the `ON CONFLICT` clause, because marks arrive
+  from arbitrary concurrent writes. Reading the stored diff into Elixir to merge
+  it there would be a read-modify-write with no lock around it — and the marking
+  path deliberately holds none, since it runs inside a host's own write
+  transaction.
   """
   @spec mark_dirty(String.t(), [key() | {key(), map() | nil}], String.t() | nil, keyword()) :: :ok
   def mark_dirty(cell, keys, reason, opts \\ [])
@@ -65,7 +76,7 @@ defmodule ReactiveDag.Frontier do
 
     query!(
       "INSERT INTO #{dirty()} (cell_id, tenant, key, reason, enqueued_at, prior) " <>
-        "VALUES #{placeholders} ON CONFLICT (tenant, cell_id, key) DO NOTHING",
+        "VALUES #{placeholders} " <> on_conflict_merge(),
       params
     )
 
@@ -95,6 +106,86 @@ defmodule ReactiveDag.Frontier do
 
   defp normalize_entry({key, prior}) when is_map(prior) or is_nil(prior), do: {key, prior}
   defp normalize_entry(key), do: {key, nil}
+
+  @doc """
+  Merge two diffs for the same key: the earliest prior side, the latest `to`.
+
+  The rule the `ON CONFLICT` clause implements, in Elixir — so a caller modelling
+  the frontier (a fake repo in a test, a host inspecting what a burst of writes
+  would collapse to) has ONE definition to agree with rather than reimplementing
+  it and drifting.
+
+      iex> merge_diffs(%{"c" => %{"from" => "meals", "to" => "travel"}},
+      ...>             %{"c" => %{"from" => "travel", "to" => "lodging"}})
+      %{"c" => %{"from" => "meals", "to" => "lodging"}}
+  """
+  @spec merge_diffs(map() | nil, map() | nil) :: map() | nil
+  def merge_diffs(nil, incoming), do: incoming
+  def merge_diffs(stored, nil), do: stored
+
+  def merge_diffs(stored, incoming) do
+    for k <- Enum.uniq(Map.keys(stored) ++ Map.keys(incoming)), into: %{} do
+      {k, merge_entry(Map.get(stored, k), Map.get(incoming, k))}
+    end
+  end
+
+  defp merge_entry(%{"from" => from}, %{} = new), do: Map.put(new, "from", from)
+
+  defp merge_entry(%{"unchanged" => was}, %{"to" => to}),
+    do: %{"from" => was, "to" => to}
+
+  # A stored CREATE (`to` only, no prior side) stays a create however many times
+  # the row then moves: settled state never held it in any of the intermediate
+  # units, so there is nothing there to reprice.
+  defp merge_entry(%{"to" => _}, %{"to" => to}), do: %{"to" => to}
+
+  defp merge_entry(stored, nil), do: stored
+  defp merge_entry(_stored, new), do: new
+
+  # Per attribute: the EARLIEST prior side (`from`, or `unchanged` — which is a
+  # `from` that did not move) and the LATEST `to`. See `mark_dirty/4`'s docs for
+  # why this merges rather than picking a side.
+  #
+  # `jsonb_object_keys` over the union of both diffs, so an attribute present in
+  # only one of them survives.
+  defp on_conflict_merge do
+    d = dirty()
+
+    """
+    ON CONFLICT (tenant, cell_id, key) DO UPDATE SET prior =
+      CASE
+        WHEN #{d}.prior IS NULL THEN EXCLUDED.prior
+        WHEN EXCLUDED.prior IS NULL THEN #{d}.prior
+        ELSE (
+          SELECT COALESCE(jsonb_object_agg(k, merged), '{}'::jsonb)
+            FROM (
+              SELECT k,
+                     CASE
+                       WHEN jsonb_exists(#{d}.prior -> k, 'from')
+                         THEN COALESCE(EXCLUDED.prior -> k, '{}'::jsonb)
+                              || jsonb_build_object('from', #{d}.prior -> k -> 'from')
+                       WHEN jsonb_exists(#{d}.prior -> k, 'unchanged')
+                            AND jsonb_exists(EXCLUDED.prior -> k, 'to')
+                         THEN jsonb_build_object(
+                                'from', #{d}.prior -> k -> 'unchanged',
+                                'to', EXCLUDED.prior -> k -> 'to')
+                       -- a stored CREATE stays a create however many times the
+                       -- row then moves: settled state never held it in any
+                       -- intermediate unit, so there is nothing there to reprice
+                       WHEN jsonb_exists(#{d}.prior -> k, 'to')
+                            AND NOT jsonb_exists(#{d}.prior -> k, 'from')
+                            AND jsonb_exists(EXCLUDED.prior -> k, 'to')
+                         THEN jsonb_build_object('to', EXCLUDED.prior -> k -> 'to')
+                       ELSE COALESCE(EXCLUDED.prior -> k, #{d}.prior -> k)
+                     END AS merged
+                FROM jsonb_object_keys(
+                       COALESCE(#{d}.prior, '{}'::jsonb) ||
+                       COALESCE(EXCLUDED.prior, '{}'::jsonb)) AS k
+            ) m
+        )
+      END
+    """
+  end
 
   @doc """
   Every cell with dirty keys waiting — what the next drain would work on.

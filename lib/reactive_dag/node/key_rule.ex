@@ -75,18 +75,12 @@ defmodule ReactiveDag.Node.KeyRule do
       :none ->
         rule(parent, child, changed)
 
-      {:ok, from_snapshots} ->
-        # The snapshot names where each row WAS; the live lookup names where it
-        # is NOW. A move needs both, so the live path still runs over every
-        # changed key and the two sets are unioned.
-        #
-        # The live lookup degrading to :all no longer forces :all overall: that
-        # degradation means "a row vanished and I cannot name its group", which
-        # is exactly what the snapshot just answered.
-        case rule(parent, child, changed) do
-          :all -> {:keys, from_snapshots}
-          {:keys, looked_up} -> {:keys, Enum.uniq(from_snapshots ++ looked_up)}
-        end
+      {:ok, from_diffs} ->
+        # NO live read. A snapshot said only where a row WAS, so a move had to
+        # union it with a lookup of where the row landed — and that lookup was
+        # the thing that degraded to `:all` on a deleted row. A diff carries both
+        # sides, so the union has nothing to add and the query is pure cost.
+        {:keys, from_diffs}
     end
   end
 

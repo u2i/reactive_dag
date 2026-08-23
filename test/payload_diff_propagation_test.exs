@@ -29,7 +29,12 @@ defmodule ReactiveDag.PayloadDiffPropagationTest do
       params
       |> Enum.chunk_every(6)
       |> Enum.each(fn [cell, tenant, key, _r, _t, prior] ->
-        Agent.update(__MODULE__, fn m -> Map.put_new(m, {tenant, cell, key}, prior) end)
+        # ON CONFLICT: MERGE the diffs, via the library's own rule — the earliest
+        # prior side and the latest `to`. `Map.put_new` modelled `DO NOTHING`,
+        # which strands the unit a twice-moved row ended up in.
+        Agent.update(__MODULE__, fn m ->
+          Map.update(m, {tenant, cell, key}, prior, &ReactiveDag.Frontier.merge_diffs(&1, prior))
+        end)
       end)
 
       %{rows: []}
