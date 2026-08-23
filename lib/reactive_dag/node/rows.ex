@@ -690,10 +690,33 @@ defmodule ReactiveDag.Node.Rows do
 
   # the same derivation `Payload` writes under: a composite-PK node serializes
   # its identity fields, everything else reads one column.
+  # How a stored row reports its CELL KEY — the inverse of the write's `row_key`,
+  # and it has to agree with it or a read-back names keys the frontier never saw.
+  #
+  # `row_key` first, because `payload_key` derives from the primary key and a UUID
+  # primary key derives to `:id` — so a node whose identity moved off its primary
+  # key would report UUIDs where cell keys belong. `Nodes.live_keys/1` in a host
+  # returned exactly that.
   defp keyer(source) do
-    case source[:identity_fields] do
-      fields when is_list(fields) -> Declarative.identity_key_fn(fields, nil)
-      _ -> &(&1 |> Map.fetch!(source[:payload_key] || :key) |> to_string())
+    case source[:row_key] do
+      :uuid ->
+        &(&1 |> Map.fetch!(source[:payload_key] || :id) |> to_string())
+
+      fields when is_list(fields) and fields != [] ->
+        Declarative.identity_key_fn(fields, nil)
+
+      fun when is_function(fun) ->
+        # A resolver decides which ROW a key writes to; it cannot be run backwards
+        # to recover the key. A node declaring one must keep the key in a column
+        # if it wants its keys enumerable — so fall through to `payload_key` and
+        # let the resource say where.
+        &(&1 |> Map.fetch!(source[:payload_key] || :key) |> to_string())
+
+      _ ->
+        case source[:identity_fields] do
+          fields when is_list(fields) -> Declarative.identity_key_fn(fields, nil)
+          _ -> &(&1 |> Map.fetch!(source[:payload_key] || :key) |> to_string())
+        end
     end
   end
 end

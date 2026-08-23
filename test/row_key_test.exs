@@ -20,7 +20,7 @@ defmodule ReactiveDag.RowKeyTest do
   """
   use ExUnit.Case, async: false
 
-  alias ReactiveDag.Node.Payload
+  alias ReactiveDag.Node.{Payload, Rows}
 
   defmodule Domain do
     use Ash.Domain, validate_config_inclusion?: false
@@ -253,6 +253,44 @@ defmodule ReactiveDag.RowKeyTest do
 
       assert Payload.upsert_row(Meeting, meta(Meeting), "m2", evening) == :created
       assert length(Ash.read!(Meeting)) == 2
+    end
+  end
+
+  describe "reading keys back — the write's inverse" do
+    # `Rows.all/2` reports each row's CELL KEY, and that has to agree with what
+    # the write used. It read `payload_key`, which derives from the primary key —
+    # so under a UUID primary key it derived to `:id` and reported UUIDs where
+    # cell keys belong. A host's `live_keys/1` returned exactly that.
+    test "rung 2 reports the declared columns joined, not the uuid" do
+      Payload.upsert_row(Line, meta(Line), "gf|FY24", %{fund: "gf", fiscal_year: "FY24", total: 1})
+
+      keys = Rows.all(ReactiveDag.Node.to_cell(Line)) |> Enum.map(& &1.key)
+
+      assert keys == ["gf|FY24"], "the key the write was given, not the row's id"
+    end
+
+    test "rung 1 reports the uuid, because that IS the key" do
+      id = Ash.UUID.generate()
+      Payload.upsert_row(Doc, meta(Doc), id, %{title: "x"})
+
+      assert Rows.all(ReactiveDag.Node.to_cell(Doc)) |> Enum.map(& &1.key) == [id]
+    end
+
+    test "a round trip: every key written is a key read back" do
+      # The property that matters. A read-back naming keys the frontier never saw
+      # makes `live_keys`, retirement and every whole-cell recompute disagree
+      # about what the cell holds.
+      for {fund, fy} <- [{"gf", "FY24"}, {"gf", "FY25"}, {"water", "FY24"}] do
+        Payload.upsert_row(Line, meta(Line), "#{fund}|#{fy}", %{
+          fund: fund,
+          fiscal_year: fy,
+          total: 1
+        })
+      end
+
+      read_back = Rows.all(ReactiveDag.Node.to_cell(Line)) |> Enum.map(& &1.key) |> Enum.sort()
+
+      assert read_back == ["gf|FY24", "gf|FY25", "water|FY24"]
     end
   end
 
