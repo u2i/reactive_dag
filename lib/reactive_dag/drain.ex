@@ -277,7 +277,7 @@ defmodule ReactiveDag.Drain do
     # test `keys == ["*"]` to mean "recompute the whole cell", so a stray "*"
     # riding alongside real keys must collapse — otherwise the whole-cell branch
     # is missed and the specific keys are processed as if "*" were a real key.
-    entries = Frontier.claim_with_priors(cell_id, Plan.frontier_opts(plan))
+    entries = Frontier.claim_with_diffs(cell_id, Plan.frontier_opts(plan))
     claimed = Enum.map(entries, &elem(&1, 0))
     keys = if "*" in claimed, do: ["*"], else: claimed
 

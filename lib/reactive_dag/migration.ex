@@ -57,10 +57,15 @@ defmodule ReactiveDag.Migration do
       add(:key, :text, null: false)
       add(:reason, :text)
       add(:enqueued_at, :utc_datetime_usec)
-      # the row as it was when marked — see ReactiveDag.Frontier. Nullable: a
-      # source-fed key has no Ash record behind it. Cheap because this table is
-      # a QUEUE: rows live from mark to claim, then DELETE … RETURNING removes
-      # them.
+      # The DIFF the change was marked with — `%{attr => %{"from" =>, "to" =>}}`,
+      # both sides, so a consumer can name the unit a row left as well as the one
+      # it landed in. See `ReactiveDag.Frontier.merge_diffs/2`.
+      #
+      # Still called `prior` because it once held only the prior side, and
+      # renaming a column costs every host a migration to buy a better word.
+      # Nullable: a source-fed key has no Ash record behind it. Cheap because
+      # this table is a QUEUE — rows live from mark to claim, then
+      # DELETE … RETURNING removes them.
       add(:prior, :map)
     end
 

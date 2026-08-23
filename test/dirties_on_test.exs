@@ -434,7 +434,7 @@ defmodule ReactiveDag.DirtiesOnTest do
       |> Ash.Changeset.for_create(:create, %{key: "e1", category: "travel", amount: 10.0})
       |> Ash.create!()
 
-      assert [{"e1", diff}] = Frontier.claim_with_priors("expenses")
+      assert [{"e1", diff}] = Frontier.claim_with_diffs("expenses")
 
       # jsonb, so string keys — and every public attribute, not just the unit's.
       #

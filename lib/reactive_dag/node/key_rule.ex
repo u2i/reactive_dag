@@ -49,29 +49,33 @@ defmodule ReactiveDag.Node.KeyRule do
   def rule(_parent, _child, changed), do: {:keys, changed}
 
   @doc """
-  `rule/3` with the SNAPSHOTS the changed keys were marked with — the child rows
-  as they were, which `ReactiveDag.Frontier` captured at mark time.
+  `rule/3` with the DIFF each changed key was marked with — both sides of the
+  change, from whichever writer produced it.
 
-  A snapshot survives its row, so a `:group` claim stays precise in the two
-  cases a live lookup cannot handle:
+  A diff survives its row and names where it went, so a `:group` claim stays
+  precise in the two cases a live lookup cannot handle at all:
 
-    * the row was **deleted** — nothing to read, but the snapshot still names
-      the unit it belonged to;
-    * the row **moved** between units — the live row names where it landed, the
-      snapshot names where it came from, and BOTH need repricing.
+    * the row was **deleted** — nothing to read, but the diff still names the
+      unit it belonged to;
+    * the row **moved** between units — the live row names only where it landed,
+      and BOTH units need repricing.
 
-  Keys with no snapshot (a source-fed leaf has no Ash row behind it) fall back
-  to `rule/3` exactly as before, so the two paths coexist.
+  There is no live read on this path. An earlier version carried only the prior
+  side, so a move had to union the snapshot with a lookup of where the row landed
+  — and that lookup was itself what degraded to `:all` on a delete.
+
+  Keys with no diff (a source-fed leaf has no Ash row behind it) fall back to
+  `rule/3`, so the two paths coexist.
   """
   @spec rule(Cell.t(), Cell.id(), [String.t()], %{String.t() => map()}) ::
           ReactiveDag.KeyRule.result()
-  def rule(parent, child, changed, priors) when map_size(priors) == 0,
+  def rule(parent, child, changed, diffs) when map_size(diffs) == 0,
     do: rule(parent, child, changed)
 
-  def rule(%Cell{meta: %{key_rule: :group} = meta} = parent, child, changed, priors) do
+  def rule(%Cell{meta: %{key_rule: :group} = meta} = parent, child, changed, diffs) do
     spec = meta[:reduce] || meta[:join]
 
-    case snapshot_claims(spec, meta, changed, priors) do
+    case diff_claims(spec, meta, changed, diffs) do
       :none ->
         rule(parent, child, changed)
 
@@ -84,7 +88,7 @@ defmodule ReactiveDag.Node.KeyRule do
     end
   end
 
-  def rule(parent, child, changed, _priors), do: rule(parent, child, changed)
+  def rule(parent, child, changed, _diffs), do: rule(parent, child, changed)
 
   @doc """
   `rule/4` with the plan's OPTS — currently `:tenant`.
@@ -100,7 +104,7 @@ defmodule ReactiveDag.Node.KeyRule do
   """
   @spec rule(Cell.t(), Cell.id(), [String.t()], %{String.t() => map()}, keyword()) ::
           ReactiveDag.KeyRule.result()
-  def rule(parent, child, changed, priors, opts) do
+  def rule(parent, child, changed, diffs, opts) do
     # The read scope travels in the process, not the argument list. Every clause
     # below reaches the two reads through several private functions that exist to
     # express the GROUPING, and threading a tenant through each would put the
@@ -112,7 +116,7 @@ defmodule ReactiveDag.Node.KeyRule do
     Process.put(__MODULE__, opts)
 
     try do
-      rule(parent, child, changed, priors)
+      rule(parent, child, changed, diffs)
     after
       if prev, do: Process.put(__MODULE__, prev), else: Process.delete(__MODULE__)
     end
@@ -126,7 +130,7 @@ defmodule ReactiveDag.Node.KeyRule do
   # Derive each snapshotted key's unit by running the combinator's own grouping
   # against the stored row. Returns the keys derived, plus the changed keys that
   # had no snapshot (which still need the live path).
-  defp snapshot_claims(nil, _meta, _changed, _diffs), do: :none
+  defp diff_claims(nil, _meta, _changed, _diffs), do: :none
 
   # The DIFF each changed key was written with — both sides of the change, from
   # the payload write that produced it (`Payload.collecting_diffs/1`).
@@ -142,7 +146,7 @@ defmodule ReactiveDag.Node.KeyRule do
   # in the BEAM against a bare map is a different capability from this module's.
   # So a node grouping by a calculation keeps the live-read path and its `"*"`
   # degradation, and says so rather than silently claiming a partial set.
-  defp snapshot_claims(spec, meta, changed, diffs) do
+  defp diff_claims(spec, meta, changed, diffs) do
     alias ReactiveDag.Node.Recompute.Declarative
 
     with %ReactiveDag.Node.Reduce{} = r <- spec,

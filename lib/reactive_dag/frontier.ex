@@ -29,14 +29,14 @@ defmodule ReactiveDag.Frontier do
   @doc """
   Mark `keys` of `cell` dirty, coalesced (idempotent per `(cell, key)`).
 
-  `keys` is a list of key strings, or of `{key, prior}` pairs where `prior` is
-  the row AS IT WAS when marked — a map the parent can derive its claim from
-  without reading the live row.
+  `keys` is a list of key strings, or of `{key, diff}` pairs where `diff` is the
+  change's two sides — `%{attr => %{"from" => old, "to" => new}}` — which a
+  consumer derives its claim from without reading the live row.
 
-  That snapshot is what makes a claim survive its subject. A deleted row cannot
-  say which unit it belonged to, and a row that MOVED between units cannot say
-  where it came from; the snapshot answers both, so a claim stays precise where
-  it would otherwise degrade to a whole-cell recompute.
+  The diff is what makes a claim survive its subject. A deleted row cannot say
+  which unit it belonged to; a row that MOVED between units says only where it
+  went. The diff answers both, so a claim stays precise where it would otherwise
+  degrade to a whole-cell recompute.
 
   Coalescing MERGES the diffs: the earliest `from` and the latest `to`, per
   attribute. If a row moves meals → travel → lodging before a drain, the claim
@@ -187,6 +187,10 @@ defmodule ReactiveDag.Frontier do
     """
   end
 
+  @doc false
+  @deprecated "Renamed to claim_with_diffs/2 — a mark carries both sides now, not just the prior"
+  def claim_with_priors(cell, opts \\ []), do: claim_with_diffs(cell, opts)
+
   @doc """
   Every cell with dirty keys waiting — what the next drain would work on.
 
@@ -239,17 +243,18 @@ defmodule ReactiveDag.Frontier do
 
   @doc "Atomically claim (delete-returning) all dirty keys for `cell`."
   @spec claim(String.t(), keyword()) :: [key()]
-  def claim(cell, opts \\ []), do: claim_with_priors(cell, opts) |> Enum.map(&elem(&1, 0))
+  def claim(cell, opts \\ []), do: claim_with_diffs(cell, opts) |> Enum.map(&elem(&1, 0))
 
   @doc """
-  `claim/1`, but returning `{key, prior}` pairs — the snapshot each key was
-  marked with (`nil` for a source-fed key, which has no row behind it).
+  `claim/1`, but returning `{key, diff}` pairs — the DIFF each key was marked
+  with (`nil` for a source-fed key, which has no Ash row behind it).
 
-  The drain uses this so a parent can derive its claim from what the row WAS,
-  which is the only thing that survives a delete.
+  A diff is `%{attr => %{"from" => old, "to" => new}}`: both sides, so a
+  consumer can name the unit a row LEFT as well as the one it landed in. Neither
+  survives a live read — the row is gone, or already says only where it went.
   """
-  @spec claim_with_priors(String.t()) :: [{key(), map() | nil}]
-  def claim_with_priors(cell, opts \\ []) do
+  @spec claim_with_diffs(String.t(), keyword()) :: [{key(), map() | nil}]
+  def claim_with_diffs(cell, opts \\ []) do
     # Scoped to ONE tenant: an unscoped claim would consume every tenant's keys
     # for this cell and recompute them under this tenant's plan. That is the
     # failure the tenant column exists to prevent, and it is silent — the other

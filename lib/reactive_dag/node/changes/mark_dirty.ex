@@ -57,8 +57,8 @@ defmodule ReactiveDag.Node.Changes.MarkDirty do
 
   # A create has NO prior, and `nil` is how the diff says so — every attribute
   # reads `%{"to" => v}`, which is what "nothing existed before" looks like. This
-  # returned `result` while the mark carried a snapshot, where a snapshot of the
-  # new row was the only sensible fallback; against a diff it would claim every
+  # returned `result` while the mark carried a one-sided snapshot, where the new
+  # row was the only sensible fallback; against a diff it would claim every
   # attribute `unchanged`, which says the opposite.
   defp prior_of(%Ash.Changeset{action_type: :create}, _result), do: nil
   defp prior_of(%Ash.Changeset{data: %{__struct__: _} = data}, _result), do: data
