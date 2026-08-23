@@ -217,6 +217,82 @@ defmodule ReactiveDag.InvalidateTest do
     end
   end
 
+  # A tenanted node, because the untenanted `Summaries` above cannot show it:
+  # `invalidate/3` reads the rows it is about to clear and then UPDATES them, and
+  # both halves need the tenant. Without it a reprocess of a tenanted plan raises,
+  # and clearing another municipality's fingerprints would make ITS next drain
+  # recompute rows nobody asked about.
+  defmodule TenantedSummaries do
+    use Ash.Resource, domain: Domain, data_layer: Ash.DataLayer.Ets, extensions: [ReactiveDag.Node]
+
+    ets do
+    end
+
+    multitenancy do
+      strategy :attribute
+      attribute :org_id
+    end
+
+    attributes do
+      uuid_primary_key(:id)
+      attribute :org_id, :string, public?: true
+      attribute :key, :string, allow_nil?: false, public?: true
+      attribute :fingerprint, :string, public?: true
+    end
+
+    identities do
+      identity :by_org_key, [:org_id, :key], pre_check_with: Domain
+    end
+
+    actions do
+      defaults [:read, :destroy, update: [:fingerprint]]
+
+      create :upsert,
+        upsert?: true,
+        upsert_identity: :by_org_key,
+        accept: [:org_id, :key, :fingerprint]
+    end
+
+    reactive do
+      id(:tenanted_summaries)
+      leaf?(true)
+      row_key([:org_id, :key])
+    end
+  end
+
+  describe "invalidate/3 under tenancy" do
+    setup do
+      for org <- ["org_a", "org_b"] do
+        Ash.create!(TenantedSummaries, %{key: "t1", fingerprint: "fp"},
+          action: :upsert,
+          tenant: org
+        )
+      end
+
+      [cell: hd(ReactiveDag.Node.cells(TenantedSummaries))]
+    end
+
+    test "clears only the named tenant's rows", %{cell: cell} do
+      assert Rows.invalidate(cell, :all, tenant: "org_a") == ["t1"]
+
+      a = Ash.read!(TenantedSummaries, tenant: "org_a") |> hd()
+      b = Ash.read!(TenantedSummaries, tenant: "org_b") |> hd()
+
+      refute a.fingerprint, "the named tenant's fingerprint is cleared"
+
+      assert b.fingerprint == "fp",
+             "the OTHER tenant's is untouched — clearing it would make its next " <>
+               "drain recompute rows nobody asked about"
+    end
+
+    test "a specific key is scoped too", %{cell: cell} do
+      assert Rows.invalidate(cell, ["t1"], tenant: "org_b") == ["t1"]
+
+      assert Ash.read!(TenantedSummaries, tenant: "org_a") |> hd() |> Map.get(:fingerprint) ==
+               "fp"
+    end
+  end
+
   describe "invalidate/2 on its own" do
     test "clears the stored fingerprint and reports what it touched" do
       assert Rows.invalidate(cell(), ["t1"]) == ["t1"]

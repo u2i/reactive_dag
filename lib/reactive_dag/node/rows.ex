@@ -219,11 +219,18 @@ defmodule ReactiveDag.Node.Rows do
   `slices/1` reports them — but nothing stops a caller filtering on any column
   it knows about. The declaration is what makes a UI possible, not what makes
   the filter legal.
-  """
-  @spec keys_where(Cell.t() | source(), keyword()) :: [String.t()]
-  def keys_where(%Cell{meta: meta}, filter), do: keys_where(meta, filter)
 
-  def keys_where(%{} = source, filter) do
+  `opts` takes `:tenant`, like `all/2` and `key_count/2` — pass
+  `Plan.frontier_opts/1` and the count is that tenant's. This was the one
+  row-reading helper that could not be scoped, so a host asking "how many keys
+  would this reprocess claim?" against a tenanted resource got a raise, or a zero
+  if it guarded — a button offering to reprocess nothing.
+  """
+  @spec keys_where(Cell.t() | source(), keyword(), keyword()) :: [String.t()]
+  def keys_where(source, filter, opts \\ [])
+  def keys_where(%Cell{meta: meta}, filter, opts), do: keys_where(meta, filter, opts)
+
+  def keys_where(%{} = source, filter, opts) do
     case queryable(source) do
       nil ->
         []
@@ -231,6 +238,7 @@ defmodule ReactiveDag.Node.Rows do
       resource ->
         resource
         |> Ash.Query.do_filter(filter)
+        |> tenant_scoped(opts)
         |> Ash.read!()
         |> Enum.map(keyer(source))
         |> Enum.sort()
@@ -323,15 +331,16 @@ defmodule ReactiveDag.Node.Rows do
   regardless, so this is a no-op there. Returns the keys it actually cleared.
   """
   @spec invalidate(Cell.t() | source(), [String.t()] | :all) :: [String.t()]
-  def invalidate(%Cell{meta: meta}, keys), do: invalidate(meta, keys)
+  def invalidate(source, keys, opts \\ [])
+  def invalidate(%Cell{meta: meta}, keys, opts), do: invalidate(meta, keys, opts)
 
-  def invalidate(%{} = source, keys) do
+  def invalidate(%{} = source, keys, opts) do
     attr = source[:fingerprint_attribute] || ReactiveDag.Node.Fingerprint.default_attribute()
 
     with resource when not is_nil(resource) <- queryable(source),
          attribute when not is_nil(attribute) <- Ash.Resource.Info.attribute(resource, attr) do
       source
-      |> rows_to_clear(keys)
+      |> rows_to_clear(keys, opts)
       |> Enum.map(fn row ->
         row.record
         |> Ash.Changeset.for_update(update_action(resource), %{attr => nil})
@@ -344,11 +353,11 @@ defmodule ReactiveDag.Node.Rows do
     end
   end
 
-  defp rows_to_clear(source, :all), do: all(source)
+  defp rows_to_clear(source, :all, opts), do: all(source, opts)
 
-  defp rows_to_clear(source, keys) do
+  defp rows_to_clear(source, keys, opts) do
     want = MapSet.new(keys)
-    source |> all() |> Enum.filter(&MapSet.member?(want, &1.key))
+    source |> all(opts) |> Enum.filter(&MapSet.member?(want, &1.key))
   end
 
   # a node's `:upsert` is a create action, so clearing goes through an UPDATE

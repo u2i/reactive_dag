@@ -1584,9 +1584,67 @@ defmodule ReactiveDag.Node do
     end
 
     verify_one_node_per_source!(plan)
+    verify_tenancy_flows_downstream!(plan)
 
     plan
   end
+
+  # A tenanted node must not feed an UNTENANTED one.
+  #
+  # This is the shape that loses data silently. Ash ignores `tenant:` on a
+  # resource that declares no multitenancy — no error, the option is simply
+  # dropped — so the plumbing all works and every read succeeds. What breaks is
+  # arithmetic: each tenant's drain folds its own upstream rows correctly and then
+  # writes the result to the SAME downstream row, because that row has no tenant
+  # to tell them apart. The last drain to run wins, and the others' numbers are
+  # gone. Measured on a two-tenant fold: inputs of 10 and 99, one row, total 99.
+  #
+  # Nothing else catches it. A Spark verifier sees one resource at a time and
+  # cannot know what feeds it; the datastore is satisfied, because one row for one
+  # key is exactly what an untenanted table promises; and the suite of a host with
+  # one tenant passes forever, since the collision needs a second one.
+  #
+  # So it is checked HERE, at assembly, which is the first point every resource in
+  # the graph is known — and it raises rather than warns, because a graph in this
+  # shape produces confidently wrong numbers.
+  #
+  # The reverse direction is FINE and deliberately not checked: an untenanted node
+  # feeding a tenanted one is a shared upstream, which is how a common corpus
+  # (an exchange-rate table, a chart of accounts) serves every tenant. Each
+  # tenant's own rows stay separate; only the input is shared.
+  defp verify_tenancy_flows_downstream!(%ReactiveDag.Plan{} = plan) do
+    for {child, parents} <- plan.parents,
+        tenanted?(plan.cells[child]),
+        parent <- parents,
+        parent_cell = plan.cells[parent],
+        parent_cell != nil,
+        not tenanted?(parent_cell) do
+      raise ArgumentError,
+            "reactive_dag: cell #{inspect(parent)} is NOT tenanted but reads " <>
+              "#{inspect(child)}, which is. Every tenant's drain would fold its own " <>
+              "rows and write them to the same #{inspect(parent)} row — the last drain " <>
+              "to run wins and the rest are lost, with no error anywhere: Ash ignores " <>
+              "`tenant:` on a resource declaring no multitenancy.\n\n" <>
+              "Declare multitenancy on #{inspect(parent)}'s resource (with the tenant " <>
+              "as a COLUMN and `row_key [<tenant>, <key>]`, so its identity is the " <>
+              "pair), or make #{inspect(child)} untenanted if these rows really are " <>
+              "shared across tenants."
+    end
+
+    plan
+  end
+
+  # A cell is tenanted when the resource holding its rows declares multitenancy.
+  # Asked of Ash rather than tracked here: the resource says it once.
+  defp tenanted?(%{meta: meta}) do
+    case meta[:resource] do
+      nil -> nil
+      resource -> Ash.Resource.Info.multitenancy_strategy(resource)
+    end
+    |> then(&(&1 != nil))
+  end
+
+  defp tenanted?(_), do: false
 
   # A source is a NODE, so one scanner belongs to one cell.
   #
