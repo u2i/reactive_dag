@@ -140,12 +140,20 @@ defmodule ReactiveDag.Node.KeyRule do
   # read of where the row landed. A diff carries both, so there is nothing to read
   # and nothing to fail — see `ReactiveDag.Node.VersionDiff`.
   #
-  # `group_key_plan` still gates it, and still refuses a `{:calc, _}` entry. A
-  # calculation is an Ash `expr` evaluated by the datastore; the diff holds the
-  # ATTRIBUTES it derives from (`side` comes from `kind`), but evaluating an expr
-  # in the BEAM against a bare map is a different capability from this module's.
-  # So a node grouping by a calculation keeps the live-read path and its `"*"`
-  # degradation, and says so rather than silently claiming a partial set.
+  # FOUR routes still fall back to the live read, and each is a real case rather
+  # than a gap left unfinished. Measured on a real host: 3 of its 4 `:group`
+  # cells take the diff path, and the fourth needs the first of these.
+  #
+  #   * a `{:calc, _}` in the grain — a calculation is an Ash `expr` the
+  #     datastore evaluates. The diff holds the ATTRIBUTES it derives from (a
+  #     host's `side` comes from `kind`), but evaluating an expr in the BEAM
+  #     against a bare map is a different capability from this module's.
+  #   * a `%Join{}` rather than a `%Reduce{}` — its sides are picked by
+  #     `side_fn/1`, not by a group plan, so the grain is not a field list.
+  #   * a key with NO diff — a source-fed leaf has no Ash row behind it, so
+  #     nothing captured one.
+  #   * a diff that yields no unit — a nil in the row's own grain. Falling back
+  #     wholesale beats claiming a partial set and stranding the rest.
   defp diff_claims(spec, meta, changed, diffs) do
     alias ReactiveDag.Node.Recompute.Declarative
 
