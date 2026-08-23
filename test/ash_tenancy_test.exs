@@ -498,6 +498,29 @@ defmodule ReactiveDag.AshTenancyTest do
     end
   end
 
+  describe "`\"*\"` is a TENANT, not an absence" do
+    test "an untenanted plan can still read a tenanted resource" do
+      # The state EVERY existing host is in: a plan with no tenant, and a
+      # resource that has just declared multitenancy. `"*"` is what the frontier
+      # writes when no tenant is named, so it is a tenant VALUE — but the tenant
+      # helpers treated it as "no tenant" and passed nothing, which Ash refuses
+      # on a tenanted resource. So adopting tenancy on one resource broke every
+      # untenanted read of it.
+      Payload.upsert(Meeting, :key, "m1", %{title: "x"}, :upsert, tenant: "*")
+
+      assert Rows.all(meeting_cell(), tenant: "*") |> Enum.map(& &1.key) == ["m1"]
+      assert Rows.key_count(meeting_cell(), tenant: "*") == 1
+    end
+
+    test "and its rows are separate from a named tenant's" do
+      Payload.upsert(Meeting, :key, "m1", %{title: "untenanted"}, :upsert, tenant: "*")
+      Payload.upsert(Meeting, :key, "m1", %{title: "a"}, :upsert, tenant: "a")
+
+      assert [%{title: "untenanted"}] = Ash.read!(Meeting, tenant: "*")
+      assert [%{title: "a"}] = Ash.read!(Meeting, tenant: "a")
+    end
+  end
+
   describe "an untenanted resource is untouched" do
     test "writes and reads work with no tenant at all" do
       assert Payload.upsert(Shared, :key, "s1", %{title: "x"}, :upsert) == :created

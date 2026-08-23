@@ -85,7 +85,6 @@ defmodule ReactiveDag.Node.Rows do
   defp tenant_scoped(queryable, opts) do
     case Keyword.get(opts, :tenant) do
       nil -> queryable
-      "*" -> queryable
       tenant -> Ash.Query.set_tenant(queryable, tenant)
     end
   end
