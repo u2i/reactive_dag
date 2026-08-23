@@ -92,6 +92,43 @@ defmodule ReactiveDag.Node.KeyRule do
 
   def rule(parent, child, changed, _priors), do: rule(parent, child, changed)
 
+  @doc """
+  `rule/4` with the plan's OPTS — currently `:tenant`.
+
+  A `:group` claim resolves by READING the changed rows, and that read has to be
+  scoped: a tenanted resource refuses an unscoped one outright, so `:group`
+  propagation raised for any host running a graph per tenant. `:identity` and
+  `:all` never read, which is why this went unnoticed.
+
+  A fifth arity rather than widening `rule/4`, for the reason `rule/4` itself was
+  added rather than widening `rule/3`: the seam is public and hosts implement it.
+  `ReactiveDag.Graph` calls the widest arity a module exports.
+  """
+  @spec rule(Cell.t(), Cell.id(), [String.t()], %{String.t() => map()}, keyword()) ::
+          ReactiveDag.KeyRule.result()
+  def rule(parent, child, changed, priors, opts) do
+    # The read scope travels in the process, not the argument list. Every clause
+    # below reaches the two reads through several private functions that exist to
+    # express the GROUPING, and threading a tenant through each would put the
+    # plan's identity into a dozen signatures that are otherwise about fields.
+    #
+    # Set-and-restore rather than set-and-leave: `rule/5` is called once per
+    # propagation edge on the drain's own process, which also runs recomputes.
+    prev = Process.get(__MODULE__)
+    Process.put(__MODULE__, opts)
+
+    try do
+      rule(parent, child, changed, priors)
+    after
+      if prev, do: Process.put(__MODULE__, prev), else: Process.delete(__MODULE__)
+    end
+  end
+
+  # The scope a `:group` lookup reads under — the plan's tenant, put there by
+  # `rule/5`. Empty when a caller used an older arity, which is correct for an
+  # untenanted host and is what every existing caller does.
+  defp scope, do: Process.get(__MODULE__, [])
+
   # Derive each snapshotted key's unit by running the combinator's own grouping
   # against the stored row. Returns the keys derived, plus the changed keys that
   # had no snapshot (which still need the live path).
@@ -202,7 +239,7 @@ defmodule ReactiveDag.Node.KeyRule do
       source.resource
       |> Ash.Query.do_filter([{source.payload_key, [in: changed]}])
       |> load_calcs(Map.get(source, :load, []))
-      |> Ash.read!()
+      |> Ash.read!(scope())
 
     if length(rows) < length(changed) do
       :all
@@ -234,7 +271,7 @@ defmodule ReactiveDag.Node.KeyRule do
       source.resource
       |> Ash.Query.do_filter([{source.payload_key, [in: changed]}])
       |> load_calcs(Map.get(source, :load, []))
-      |> Ash.read!()
+      |> Ash.read!(scope())
 
     if length(rows) < length(changed) do
       :all

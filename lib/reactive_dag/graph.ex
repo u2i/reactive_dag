@@ -59,21 +59,30 @@ defmodule ReactiveDag.Graph do
     |> Enum.map(fn parent_id ->
       parent = Map.fetch!(plan.cells, parent_id)
 
-      case apply_rule(key_rule, parent, child_id, keys, priors) do
+      case apply_rule(key_rule, parent, child_id, keys, priors, Plan.frontier_opts(plan)) do
         :all -> {parent_id, ["*"]}
         {:keys, mapped} -> {parent_id, mapped}
       end
     end)
   end
 
-  # rule/4 when the module has it, rule/3 otherwise — the seam is public and
-  # hosts implement it, so widening the callback would break them for a feature
-  # they have not asked for.
-  defp apply_rule(mod, parent, child, keys, priors) do
-    if function_exported?(mod, :rule, 4) do
-      mod.rule(parent, child, keys, priors)
-    else
-      mod.rule(parent, child, keys)
+  # The WIDEST arity the module exports — rule/5 (with the plan's opts), then
+  # rule/4 (with priors), then rule/3. The seam is public and hosts implement it,
+  # so widening a callback in place would break them for a feature they have not
+  # asked for.
+  #
+  # `Code.ensure_loaded!/1` first: `function_exported?/3` answers FALSE for a
+  # module that is not loaded yet, and under a release or a first call in a fresh
+  # process that is exactly the state — which would silently pick a narrower
+  # arity and drop the tenant. (Learned the hard way: the same trap made an
+  # idempotence test claim 114 phantom changed keys.)
+  defp apply_rule(mod, parent, child, keys, priors, opts) do
+    Code.ensure_loaded!(mod)
+
+    cond do
+      function_exported?(mod, :rule, 5) -> mod.rule(parent, child, keys, priors, opts)
+      function_exported?(mod, :rule, 4) -> mod.rule(parent, child, keys, priors)
+      true -> mod.rule(parent, child, keys)
     end
   end
 
