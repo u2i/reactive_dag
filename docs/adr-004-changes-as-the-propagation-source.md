@@ -1,9 +1,24 @@
 # ADR-004 — Changes as the propagation source
 
-**Status:** proposed. Nothing implemented. Reasoned from first principles in
-conversation and priced against a real host (cascade, 33 cells, 39 edges) at
+**Status:** accepted; implementation in progress. Reasoned from first principles
+in conversation and priced against a real host (cascade, 33 cells, 39 edges) at
 every step; the measurements below are from that host's dev data, not estimates.
 **Date:** 2026-08-23
+
+## Build order
+
+1. **`changes_from`** — a reader that takes a version resource and derives
+   affected units from a version's diff, applying the consumer's declared grain
+   to both sides. This is the whole propagation change; everything else is
+   plumbing around it.
+2. **The watermark** — per `(tenant, cell)`, ordinate is the version's v7
+   primary key.
+3. **`gated`** — the node declaration, and the actor-aware semantics below.
+4. **Retire `prior` and the eager mapping** once 1–3 carry the load.
+
+Cascade adopts per resource, not wholesale: versioning all 33 tables would double
+write volume on tables the graph itself writes and already knows the resolved
+unit for.
 
 > **Scope, third revision.** This ADR started out proposing a new `change_queue`
 > table. It does not any more. Both halves already exist:
@@ -352,14 +367,13 @@ Superseded by `ash_paper_trail`, which has the diff mode, the in-transaction
 guarantee, the sortable key, the actor, and the retention story already — and is
 maintained by the Ash team rather than by us.
 
-**Doing nothing.** Still the honest default, and the recommendation until a
-trigger appears. The existing `prior` mechanism already implements the "where it
-was" half of this design, including the union with the live read — and cascade
-populates it on **zero** nodes, so the snapshot path never runs. The trigger for
-wanting any of this is a writer that moves a row between groups from *outside* the
-graph. Cascade has none today; its one candidate (`Correction`) deliberately
-writes *through* a derived row instead. The gate, by contrast, has independent
-value and does not need this ADR.
+**Doing nothing.** Considered and rejected. The existing `prior` mechanism
+implements the "where it was" half already, including the union with the live
+read, and cascade populates it on **zero** nodes — so today's design has a
+correctness story it never exercises, which is worse than not having one. The
+argument for waiting was that no cascade writer moves a row between groups from
+outside the graph yet. That is an argument for the *precision* win being latent,
+not for the design being wrong, and it does not apply to the gate at all.
 
 ## Related
 
