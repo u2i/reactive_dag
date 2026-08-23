@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.17.0-rc.51](https://github.com/u2i/reactive_dag/compare/v0.17.0-rc.50...v0.17.0-rc.51) (2026-08-23)
+
+
+### Features
+
+* retained runs know which graph they were ([#213](https://github.com/u2i/reactive_dag/issues/213)) ([9f9e77b](https://github.com/u2i/reactive_dag/commit/9f9e77bd675423a3c92d20b9197dc85f84ccd39e))
+
+
+### Bug Fixes
+
+* tenancy correctness across the row readers, the reprocess path, and graph assembly ([#211](https://github.com/u2i/reactive_dag/issues/211)) ([eb4900f](https://github.com/u2i/reactive_dag/commit/eb4900f2c7b1b5098f4ed596d53cd20f0265f24d))
+
 ## [0.17.0-rc.50](https://github.com/u2i/reactive_dag/compare/v0.17.0-rc.49...v0.17.0-rc.50) (2026-08-23)
 
 
