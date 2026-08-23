@@ -294,6 +294,86 @@ defmodule ReactiveDag.RowKeyTest do
     end
   end
 
+  describe "a `row_key` that includes the TENANT attribute" do
+    # The shape a real host has, and the one the round-trip test above missed:
+    # `[:fund, :fiscal_year]` contains no tenant, so joining every field is right
+    # there. When one of the fields IS the multitenancy attribute, joining it
+    # invents a key form that exists nowhere — the op wrote `"osc:FY22/23"`, and
+    # a read-back saying `"red_hook_village|osc:FY22/23"` names a key the
+    # frontier never saw.
+    #
+    # The tenant is a COLUMN, twice: on the row, and on the frontier. It is never
+    # part of a cell key — the plan already carries it.
+    defmodule Filing do
+      use Ash.Resource,
+        domain: Domain,
+        data_layer: Ash.DataLayer.Ets,
+        extensions: [ReactiveDag.Node]
+
+      ets do
+        private?(true)
+      end
+
+      multitenancy do
+        strategy :attribute
+        attribute :org_id
+      end
+
+      attributes do
+        uuid_primary_key(:id)
+        attribute :doc_key, :string, allow_nil?: false, public?: true
+        attribute :org_id, :string, public?: true
+        attribute :total, :integer, public?: true
+      end
+
+      identities do
+        identity :by_org_doc, [:org_id, :doc_key], pre_check_with: Domain
+      end
+
+      actions do
+        defaults [:read, :destroy]
+
+        create :upsert do
+          upsert?(true)
+          upsert_identity(:by_org_doc)
+          accept([:doc_key, :org_id, :total])
+        end
+      end
+
+      reactive do
+        id(:filings)
+        op(:source)
+        leaf?(true)
+        payload_key(:doc_key)
+        row_key([:org_id, :doc_key])
+      end
+    end
+
+    test "the key read back is the key written — the tenant is NOT in it" do
+      Payload.upsert_row(Filing, meta(Filing), "osc:FY24", %{doc_key: "osc:FY24", total: 1}, tenant: "org_a")
+
+      keys =
+        Rows.all(ReactiveDag.Node.to_cell(Filing), tenant: "org_a") |> Enum.map(& &1.key)
+
+      assert keys == ["osc:FY24"],
+             "the tenant is a column and lives on the plan — not inside the cell key"
+    end
+
+    test "two tenants report the SAME cell key, because it is the same unit" do
+      for org <- ["org_a", "org_b"] do
+        Payload.upsert_row(Filing, meta(Filing), "osc:FY24", %{doc_key: "osc:FY24", total: 1}, tenant: org)
+      end
+
+      cell = ReactiveDag.Node.to_cell(Filing)
+
+      assert Rows.all(cell, tenant: "org_a") |> Enum.map(& &1.key) == ["osc:FY24"]
+
+      assert Rows.all(cell, tenant: "org_b") |> Enum.map(& &1.key) == ["osc:FY24"],
+             "the same unit of work in both tenants, told apart by the frontier's " <>
+               "tenant column rather than by the key"
+    end
+  end
+
   describe "assembly" do
     test "each rung lowers to a distinct meta shape" do
       assert meta(Doc)[:row_key] == :uuid

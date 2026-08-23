@@ -697,13 +697,37 @@ defmodule ReactiveDag.Node.Rows do
   # primary key derives to `:id` — so a node whose identity moved off its primary
   # key would report UUIDs where cell keys belong. `Nodes.live_keys/1` in a host
   # returned exactly that.
+  # The resource's own multitenancy attribute, or nil. Read from Ash rather than
+  # declared again here — the resource says it once.
+  defp tenant_attribute(source) do
+    case source[:resource] do
+      nil ->
+        nil
+
+      resource ->
+        if Ash.Resource.Info.multitenancy_strategy(resource) == :attribute,
+          do: Ash.Resource.Info.multitenancy_attribute(resource)
+    end
+  end
+
   defp keyer(source) do
     case source[:row_key] do
       :uuid ->
         &(&1 |> Map.fetch!(source[:payload_key] || :id) |> to_string())
 
       fields when is_list(fields) and fields != [] ->
-        Declarative.identity_key_fn(fields, nil)
+        # WITHOUT the tenant. `row_key` names the fields that identify the ROW,
+        # and for a tenanted resource that includes the multitenancy attribute —
+        # but the tenant is not part of the cell key. It is a COLUMN, twice: on
+        # the row, and on the frontier. The plan already carries it.
+        #
+        # Joining it in invents a key form that exists nowhere: the op writes
+        # `"osc:FY24"` and a read-back saying `"org_a|osc:FY24"` names a key the
+        # frontier never saw. Two tenants share a cell key precisely because it is
+        # the same unit of work — the frontier's tenant column tells them apart.
+        fields
+        |> Enum.reject(&(&1 == tenant_attribute(source)))
+        |> Declarative.identity_key_fn(nil)
 
       fun when is_function(fun) ->
         # A resolver decides which ROW a key writes to; it cannot be run backwards
