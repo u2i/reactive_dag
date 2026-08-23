@@ -87,13 +87,13 @@ if Code.ensure_loaded?(Oban.Worker) do
           :ok
 
         cell ->
-          keys = select(cell, args)
+          keys = select(cell, args, plan)
 
           # Clear the stored fingerprints FIRST, or a `per_key` node skips the
           # very rows we just claimed: its fingerprint answers "did the input
           # move?" and after a code change it did not. A null fingerprint means
           # "no valid prior result", which is exactly true here.
-          invalidated = invalidate(cell, keys)
+          invalidated = invalidate(cell, keys, plan)
 
           mark(plan, cell_id, keys, reason)
 
@@ -125,13 +125,20 @@ if Code.ensure_loaded?(Oban.Worker) do
 
     # Explicit keys win; a `where` filter selects them from the node's own rows;
     # neither means the whole cell.
-    defp select(_cell, %{"keys" => keys}) when is_list(keys) and keys != [], do: keys
+    defp select(_cell, %{"keys" => keys}, _plan) when is_list(keys) and keys != [], do: keys
 
-    defp select(cell, %{"where" => %{} = where}) when map_size(where) > 0 do
-      Rows.keys_where(cell, Enum.map(where, fn {k, v} -> {String.to_existing_atom(k), v} end))
+    defp select(cell, %{"where" => %{} = where}, plan) when map_size(where) > 0 do
+      # The PLAN's tenant, for the same reason `mark/4` below needs it: selecting
+      # a slice of a tenanted node without one raises, and reading another
+      # municipality's rows would claim keys this plan does not own.
+      Rows.keys_where(
+        cell,
+        Enum.map(where, fn {k, v} -> {String.to_existing_atom(k), v} end),
+        ReactiveDag.Plan.frontier_opts(plan)
+      )
     end
 
-    defp select(_cell, _args), do: ["*"]
+    defp select(_cell, _args, _plan), do: ["*"]
 
     # A whole-cell claim propagates `:all` to parents; specific keys go through
     # the key rule, exactly as a scan's would. Marking the leaf without its
@@ -155,8 +162,11 @@ if Code.ensure_loaded?(Oban.Worker) do
     end
 
     # `"*"` is not a key list, so everything the cell holds is invalidated.
-    defp invalidate(cell, ["*"]), do: Rows.invalidate(cell, :all)
-    defp invalidate(cell, keys), do: Rows.invalidate(cell, keys)
+    defp invalidate(cell, ["*"], plan),
+      do: Rows.invalidate(cell, :all, ReactiveDag.Plan.frontier_opts(plan))
+
+    defp invalidate(cell, keys, plan),
+      do: Rows.invalidate(cell, keys, ReactiveDag.Plan.frontier_opts(plan))
 
     defp claimed_count(["*"]), do: nil
     defp claimed_count(keys), do: length(keys)

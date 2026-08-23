@@ -331,15 +331,16 @@ defmodule ReactiveDag.Node.Rows do
   regardless, so this is a no-op there. Returns the keys it actually cleared.
   """
   @spec invalidate(Cell.t() | source(), [String.t()] | :all) :: [String.t()]
-  def invalidate(%Cell{meta: meta}, keys), do: invalidate(meta, keys)
+  def invalidate(source, keys, opts \\ [])
+  def invalidate(%Cell{meta: meta}, keys, opts), do: invalidate(meta, keys, opts)
 
-  def invalidate(%{} = source, keys) do
+  def invalidate(%{} = source, keys, opts) do
     attr = source[:fingerprint_attribute] || ReactiveDag.Node.Fingerprint.default_attribute()
 
     with resource when not is_nil(resource) <- queryable(source),
          attribute when not is_nil(attribute) <- Ash.Resource.Info.attribute(resource, attr) do
       source
-      |> rows_to_clear(keys)
+      |> rows_to_clear(keys, opts)
       |> Enum.map(fn row ->
         row.record
         |> Ash.Changeset.for_update(update_action(resource), %{attr => nil})
@@ -352,11 +353,11 @@ defmodule ReactiveDag.Node.Rows do
     end
   end
 
-  defp rows_to_clear(source, :all), do: all(source)
+  defp rows_to_clear(source, :all, opts), do: all(source, opts)
 
-  defp rows_to_clear(source, keys) do
+  defp rows_to_clear(source, keys, opts) do
     want = MapSet.new(keys)
-    source |> all() |> Enum.filter(&MapSet.member?(want, &1.key))
+    source |> all(opts) |> Enum.filter(&MapSet.member?(want, &1.key))
   end
 
   # a node's `:upsert` is a create action, so clearing goes through an UPDATE
