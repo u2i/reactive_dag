@@ -119,7 +119,6 @@ defmodule ReactiveDag.Node.Recompute.PerKey do
   defp tenant_opts(opts) do
     case Keyword.get(opts, :tenant) do
       nil -> []
-      "*" -> []
       tenant -> [tenant: tenant]
     end
   end
@@ -127,7 +126,6 @@ defmodule ReactiveDag.Node.Recompute.PerKey do
   defp scoped(query, opts) do
     case Keyword.get(opts, :tenant) do
       nil -> query
-      "*" -> query
       tenant -> Ash.Query.set_tenant(query, tenant)
     end
   end

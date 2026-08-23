@@ -67,7 +67,6 @@ defmodule ReactiveDag.Node.Recompute.Read do
   defp tenant_scoped(query, opts) do
     case Keyword.get(opts, :tenant) do
       nil -> query
-      "*" -> query
       tenant -> Ash.Query.set_tenant(query, tenant)
     end
   end
