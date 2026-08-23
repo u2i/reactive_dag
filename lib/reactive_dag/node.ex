@@ -2591,6 +2591,11 @@ defmodule ReactiveDag.Node do
         # On the cell whose rows are versioned, because the version table is its
         # resource's — the drain looks it up on the cell it propagates FROM.
         version_diff: Ext.get_opt(resource, [:reactive], :version_diff, nil),
+        # How this cell's OWN write records a version. Needed on the payload path
+        # as well as `dirties_on`: a GRAPH-written row propagates to its parents,
+        # and a propagated mark can only reference a change if the write that
+        # caused it recorded one.
+        version_id: Ext.get_opt(resource, [:reactive], :version_id, nil),
         payload_update: Ext.get_opt(resource, [:reactive], :payload_update, nil),
         payload_key: Ext.get_opt(resource, [:reactive], :payload_key, nil) || derived_payload_key(resource),
         payload_action: Ext.get_opt(resource, [:reactive], :payload_action, nil),

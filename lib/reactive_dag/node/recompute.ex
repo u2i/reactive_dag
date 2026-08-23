@@ -89,7 +89,14 @@ defmodule ReactiveDag.Node.Recompute do
       end
 
     pairs =
-      Read.items(cell.meta[:over_source], r.over, r.query, scope(keys), auto_scope(cell, keys), opts)
+      Read.items(
+        cell.meta[:over_source],
+        r.over,
+        r.query,
+        scope(keys),
+        auto_scope(cell, keys, opts[:claimed_groups]),
+        opts
+      )
       |> Enum.group_by(group_by)
       |> Enum.flat_map(fn {group, items} -> emit.(group, items) end)
 
@@ -255,12 +262,59 @@ defmodule ReactiveDag.Node.Recompute do
   #                     them for host-grain scoping.
   @doc false
   # public for tests: the scope the library derives from a claim set.
-  def auto_scope(%Cell{meta: meta}, keys) do
+  def auto_scope(cell, keys), do: auto_scope(cell, keys, nil)
+
+  @doc false
+  # `auto_scope/2` with the claimed units' own group VALUES, when the drain could
+  # derive them from the version (`Drain.claimed_groups/3`).
+  #
+  # Preferred over inverting the `"|"`-joined label, and not merely tidier: the
+  # label can only be split per-column, so two claims admit their cross-product
+  # (`"gf|2025"` + `"water|2026"` also reads `"gf|2026"`). The values name the
+  # exact pairs.
+  def auto_scope(%Cell{meta: meta} = cell, keys, groups) do
     case meta[:key_rule] do
       :identity -> keyed_scope(keys)
       nil -> keyed_scope(keys)
-      :group -> group_scope(meta, scope(keys))
-      {:group, _opts} -> group_scope(meta, scope(keys))
+      :group -> exact_or_label_scope(cell, meta, keys, groups)
+      {:group, _opts} -> exact_or_label_scope(cell, meta, keys, groups)
+      _ -> nil
+    end
+  end
+
+  defp exact_or_label_scope(_cell, meta, keys, groups) do
+    case exact_scope(meta, scope(keys), groups) do
+      nil -> group_scope(meta, scope(keys))
+      exact -> exact
+    end
+  end
+
+  # One conjunction per claimed unit, ORed — exact rather than a hull. Requires
+  # a group value for EVERY claimed key: a partial set would scope the read to
+  # the units it could name and silently starve the rest, so a gap falls back to
+  # the label hull (a superset, which is sound).
+  defp exact_scope(_meta, nil, _groups), do: nil
+  defp exact_scope(_meta, _labels, nil), do: nil
+  defp exact_scope(_meta, _labels, groups) when map_size(groups) == 0, do: nil
+
+  defp exact_scope(meta, labels, groups) do
+    with plan when is_list(plan) <- meta[:over_source][:group_key_plan],
+         true <- Enum.all?(plan, &match?({:attr, _, true}, &1)),
+         true <- Enum.all?(labels, &Map.has_key?(groups, &1)) do
+      fields = Enum.map(plan, fn {:attr, name, _} -> name end)
+
+      clauses =
+        labels
+        |> Enum.flat_map(&Map.fetch!(groups, &1))
+        |> Enum.uniq()
+        |> Enum.map(fn group ->
+          values = if is_tuple(group), do: Tuple.to_list(group), else: [group]
+          Enum.zip(fields, values)
+        end)
+        |> Enum.filter(&(length(&1) == length(fields)))
+
+      if clauses == [], do: nil, else: {:any_of, clauses}
+    else
       _ -> nil
     end
   end

@@ -74,8 +74,30 @@ defmodule ReactiveDag.Node.Diff do
   """
   @spec units(changes(), term(), (term() -> String.t()) | nil) :: [String.t()]
   def units(changes, grain, key_fn \\ nil) do
-    group = Declarative.group_fn(grain)
     key = key_fn || Declarative.key_fn(nil, nil)
+
+    changes |> groups(grain) |> Enum.map(key) |> Enum.uniq()
+  end
+
+  @doc """
+  The units a version affects, as the GROUP'S OWN VALUES — a tuple for a
+  composite grain, a bare value for a single one. `units/3` is this, serialized.
+
+  The values are what a consumer actually wants. A fold scoping its read needs
+  `fund == "gf" and fiscal_year == "2025"`, and from a joined `"gf|2025"` it can
+  only split on `"|"` and scope each column independently — which admits pairs
+  that never changed (`"gf|2025"` and `"water|2026"` together also admit
+  `"gf|2026"`). The values name the exact pairs, so the read is exact.
+
+      iex> groups(%{"fund" => %{"from" => "A", "to" => "ES"}}, :fund)
+      ["A", "ES"]
+
+      iex> groups(%{"f" => %{"unchanged" => "A"}, "y" => %{"to" => "25"}}, [:f, :y])
+      [{"A", "25"}]
+  """
+  @spec groups(changes(), term()) :: [term()]
+  def groups(changes, grain) do
+    group = Declarative.group_fn(grain)
 
     [before(changes), after_(changes)]
     |> Enum.reject(&is_nil/1)
@@ -85,7 +107,6 @@ defmodule ReactiveDag.Node.Diff do
     # A composite grain is a tuple, so a nil in one position is checked too: a row
     # missing part of its own grain does not belong to a unit.
     |> Enum.reject(&nil_group?/1)
-    |> Enum.map(key)
     |> Enum.uniq()
   end
 
