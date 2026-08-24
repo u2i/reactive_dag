@@ -83,42 +83,9 @@ defmodule ReactiveDag.DrainTelemetryTest do
   end
 
   # an in-memory frontier — this suite has no Postgres
-  defmodule FakeRepo do
-    def start_link, do: Agent.start_link(fn -> MapSet.new() end, name: __MODULE__)
-
-    def query!("INSERT INTO " <> _, params) do
-      params
-      |> Enum.chunk_every(7)
-      |> Enum.each(fn [cell, _tenant, key, _r, _t, _held, vid] ->
-        Agent.update(__MODULE__, &MapSet.put(&1, {cell, key}))
-      end)
-
-      %{rows: []}
-    end
-
-    def query!("SELECT DISTINCT cell_id" <> _, _params) do
-      ids = Agent.get(__MODULE__, & &1) |> Enum.map(&elem(&1, 0)) |> Enum.uniq()
-      %{rows: Enum.map(ids, &[&1])}
-    end
-
-    def query!("DELETE FROM " <> _, [cell | _tenant]) do
-      claimed =
-        Agent.get_and_update(__MODULE__, fn set ->
-          {mine, rest} = Enum.split_with(set, fn {c, _} -> c == cell end)
-          {mine, MapSet.new(rest)}
-        end)
-
-      %{rows: Enum.map(claimed, fn {_c, k} -> [k, nil] end)}
-    end
-
-    def query!("SELECT COUNT" <> _, _), do: %{rows: [[Agent.get(__MODULE__, &MapSet.size/1)]]}
-  end
-
   setup do
-    start_supervised!(%{id: FakeRepo, start: {FakeRepo, :start_link, []}})
-    prev = Application.get_env(:reactive_dag, :repo)
-    Application.put_env(:reactive_dag, :repo, FakeRepo)
-    on_exit(fn -> Application.put_env(:reactive_dag, :repo, prev) end)
+    start_supervised!(ReactiveDag.Test.FakeFrontierRepo)
+    ReactiveDag.Test.FakeFrontierRepo.install()
 
     for r <- [Expenses, CategoryTotals], row <- Ash.read!(r), do: Ash.destroy!(row)
 

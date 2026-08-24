@@ -22,45 +22,6 @@ defmodule ReactiveDag.PayloadDiffPropagationTest do
 
   # The frontier's repo. Mirrors `dirties_on_test`'s: it must retain the DIFF a
   # mark carried, since that is half of what this file is about.
-  defmodule FakeRepo do
-    def start_link, do: Agent.start_link(fn -> %{} end, name: __MODULE__)
-
-    def query!("INSERT INTO " <> _, params) do
-      params
-      |> Enum.chunk_every(7)
-      |> Enum.each(fn [cell, tenant, key, _r, _t, _held, vid] ->
-        # ON CONFLICT: MERGE the diffs, via the library's own rule — the earliest
-        # prior side and the latest `to`. `Map.put_new` modelled `DO NOTHING`,
-        # which strands the unit a twice-moved row ended up in.
-        Agent.update(__MODULE__, fn m ->
-          # ON CONFLICT: keep the EARLIEST version id.
-          Map.update(m, {tenant, cell, key}, vid, fn stored -> stored || vid end)
-        end)
-      end)
-
-      %{rows: []}
-    end
-
-    def query!("SELECT DISTINCT cell_id" <> _, _params) do
-      ids = Agent.get(__MODULE__, & &1) |> Map.keys() |> Enum.map(&elem(&1, 1)) |> Enum.uniq()
-      %{rows: Enum.map(ids, &[&1])}
-    end
-
-    def query!("DELETE FROM " <> _, [cell, tenant]) do
-      rows =
-        Agent.get_and_update(__MODULE__, fn m ->
-          {mine, rest} = Enum.split_with(m, fn {{t, c, _}, _} -> t == tenant and c == cell end)
-          {Enum.map(mine, fn {{_t, _c, k}, vid} -> [k, vid] end), Map.new(rest)}
-        end)
-
-      %{rows: rows}
-    end
-
-    def query!("SELECT COUNT" <> _, _params), do: %{rows: [[Agent.get(__MODULE__, &map_size/1)]]}
-    def query!("SELECT pg_try_advisory_lock" <> _, _params), do: %{rows: [[true]]}
-    def query!("SELECT pg_advisory_unlock" <> _, _params), do: %{rows: [[true]]}
-  end
-
   defmodule Domain do
     use Ash.Domain, validate_config_inclusion?: false
 
@@ -201,10 +162,8 @@ defmodule ReactiveDag.PayloadDiffPropagationTest do
   end
 
   setup do
-    start_supervised!(%{id: FakeRepo, start: {FakeRepo, :start_link, []}})
-    prev = Application.get_env(:reactive_dag, :repo)
-    Application.put_env(:reactive_dag, :repo, FakeRepo)
-    on_exit(fn -> Application.put_env(:reactive_dag, :repo, prev) end)
+    start_supervised!(ReactiveDag.Test.FakeFrontierRepo)
+    ReactiveDag.Test.FakeFrontierRepo.install()
 
     # The ETS tables are shared, so start from a known-empty state — and drain
     # the frontier the destroys above just dirtied.

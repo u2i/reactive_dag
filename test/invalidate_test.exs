@@ -98,40 +98,10 @@ defmodule ReactiveDag.InvalidateTest do
     end
   end
 
-  defmodule FakeRepo do
-    def start_link, do: Agent.start_link(fn -> MapSet.new() end, name: __MODULE__)
-
-    def query!("INSERT INTO " <> _, p) do
-      p
-      |> Enum.chunk_every(7)
-      |> Enum.each(fn [c, _tenant, k, _, _, _held, _vid] -> Agent.update(__MODULE__, &MapSet.put(&1, {c, k})) end)
-
-      %{rows: []}
-    end
-
-    def query!("SELECT DISTINCT cell_id" <> _, _),
-      do: %{rows: Agent.get(__MODULE__, & &1) |> Enum.map(&[elem(&1, 0)]) |> Enum.uniq()}
-
-    def query!("DELETE FROM " <> _, [cell | _tenant]) do
-      c =
-        Agent.get_and_update(__MODULE__, fn s ->
-          {m, r} = Enum.split_with(s, fn {x, _} -> x == cell end)
-          {m, MapSet.new(r)}
-        end)
-
-      %{rows: Enum.map(c, fn {_, k} -> [k, nil] end)}
-    end
-
-    def query!("SELECT COUNT" <> _, _), do: %{rows: [[Agent.get(__MODULE__, &MapSet.size/1)]]}
-  end
-
   setup do
     start_supervised!(%{id: Calls, start: {Calls, :start_link, []}})
-    start_supervised!(%{id: FakeRepo, start: {FakeRepo, :start_link, []}})
-
-    prev = Application.get_env(:reactive_dag, :repo)
-    Application.put_env(:reactive_dag, :repo, FakeRepo)
-    on_exit(fn -> Application.put_env(:reactive_dag, :repo, prev) end)
+    start_supervised!(ReactiveDag.Test.FakeFrontierRepo)
+    ReactiveDag.Test.FakeFrontierRepo.install()
 
     for r <- [Transcripts, Summaries], row <- Ash.read!(r), do: Ash.destroy!(row)
 

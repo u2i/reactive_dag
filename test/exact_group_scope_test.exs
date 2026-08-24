@@ -15,44 +15,6 @@ defmodule ReactiveDag.ExactGroupScopeTest do
 
   alias ReactiveDag.{Drain, Frontier}
 
-  defmodule FakeRepo do
-    def start_link, do: Agent.start_link(fn -> %{} end, name: __MODULE__)
-
-    def query!("INSERT INTO " <> _, params) do
-      params
-      |> Enum.chunk_every(7)
-      |> Enum.each(fn [cell, tenant, key, _r, _t, _held, vid] ->
-        Agent.update(__MODULE__, fn m ->
-          Map.update(m, {tenant, cell, key}, vid, fn stored -> stored || vid end)
-        end)
-      end)
-
-      %{rows: []}
-    end
-
-    def query!("SELECT DISTINCT cell_id" <> _, _p) do
-      ids = Agent.get(__MODULE__, & &1) |> Map.keys() |> Enum.map(&elem(&1, 1)) |> Enum.uniq()
-      %{rows: Enum.map(ids, &[&1])}
-    end
-
-    def query!("DELETE FROM " <> _, [cell, tenant]) do
-      rows =
-        Agent.get_and_update(__MODULE__, fn m ->
-          {mine, rest} = Enum.split_with(m, fn {{t, c, _}, _} -> t == tenant and c == cell end)
-          {Enum.map(mine, fn {{_t, _c, k}, vid} -> [k, vid] end), Map.new(rest)}
-        end)
-
-      %{rows: rows}
-    end
-
-    def query!("SELECT COUNT" <> _, _p), do: %{rows: [[Agent.get(__MODULE__, &map_size/1)]]}
-    def query!("SELECT pg_try_advisory_lock" <> _, _p), do: %{rows: [[true]]}
-    def query!("SELECT pg_advisory_unlock" <> _, _p), do: %{rows: [[true]]}
-  end
-
-  # Stands in for a host's version resource: records what a write did and hands
-  # back a reference. `record/2` matches the `version_id` resolver contract on the
-  # payload path (written record, prior record); `changes/1` matches `version_diff`.
   defmodule Versions do
     def start_link, do: Agent.start_link(fn -> %{} end, name: __MODULE__)
 
@@ -213,11 +175,9 @@ defmodule ReactiveDag.ExactGroupScopeTest do
   end
 
   setup do
-    start_supervised!(%{id: FakeRepo, start: {FakeRepo, :start_link, []}})
+    start_supervised!(ReactiveDag.Test.FakeFrontierRepo)
+    ReactiveDag.Test.FakeFrontierRepo.install()
     start_supervised!(%{id: Versions, start: {Versions, :start_link, []}})
-    prev = Application.get_env(:reactive_dag, :repo)
-    Application.put_env(:reactive_dag, :repo, FakeRepo)
-    on_exit(fn -> Application.put_env(:reactive_dag, :repo, prev) end)
 
     for m <- [Lines, Projected, Rollup], r <- Ash.read!(m), do: Ash.destroy!(r)
     for cell <- ["lines", "projected", "rollup"], do: Frontier.claim(cell)
