@@ -1477,14 +1477,29 @@ defmodule ReactiveDag.Node do
             "`starts_at` — so the matched row is revised in place."
       ],
       payload_key: [
-        type: :atom,
+        # `false` — this node has NO key column: its row is identified by its
+        # `row_key` columns, and the cell key is their serialization rather than a
+        # value stored anywhere.
+        #
+        # Explicit rather than inferred. An earlier version deduced it from
+        # "declares `row_key` and has a surrogate primary key", which silently
+        # changed how an EXISTING node was written the moment it declared a
+        # `row_key` — a host's `fiscal_actuals`, which stores its key and had never
+        # been touched, started being written by identity and its lookups broke.
+        # `row_key` is a lookup declaration; whether a key column exists is a
+        # different fact, and the node says it.
+        type: {:or, [:atom, {:literal, false}]},
         doc:
           "the resource attribute the cell key writes to when the library closes the " <>
             "payload loop. DERIVED like Ash derives keys: defaults to the resource's " <>
             "single-attribute primary key (else `:key`) — declare it only for a " <>
             "non-primary key column. A COMPOSITE primary key needs no payload_key at " <>
             "all: the row is upserted by its identity and the cell key is the " <>
-            "identity's serialization."
+            "identity's serialization.\n\n" <>
+            "`false` declares that there is NO key column: the row is identified " <>
+            "by its `row_key` columns. Use it for a node whose unit is named by " <>
+            "columns the row already carries, so a joined copy beside them would " <>
+            "be a duplicate."
       ],
       payload_action: [
         type: :atom,
@@ -2542,6 +2557,16 @@ defmodule ReactiveDag.Node do
   # Composite primary keys return nil: those nodes are IDENTITY-KEYED (the row
   # upserts by its identity; the cell key is the identity's serialization, in
   # primary-key order).
+  # `false` stays false — it is the node SAYING it has no key column, and the
+  # primary-key fallback must not overwrite that.
+  defp payload_key(resource) do
+    case Ext.get_opt(resource, [:reactive], :payload_key, nil) do
+      false -> false
+      nil -> derived_payload_key(resource)
+      attr -> attr
+    end
+  end
+
   defp derived_payload_key(resource) do
     case Ash.Resource.Info.primary_key(resource) do
       [single] -> single
@@ -2597,7 +2622,10 @@ defmodule ReactiveDag.Node do
         # caused it recorded one.
         version_id: Ext.get_opt(resource, [:reactive], :version_id, nil),
         payload_update: Ext.get_opt(resource, [:reactive], :payload_update, nil),
-        payload_key: Ext.get_opt(resource, [:reactive], :payload_key, nil) || derived_payload_key(resource),
+        payload_key: payload_key(resource),
+        # `false` when the node declared it has no key column. Distinct from nil,
+        # which means "not declared, use the derived default".
+        declared_payload_key: Ext.get_opt(resource, [:reactive], :payload_key, nil),
         payload_action: Ext.get_opt(resource, [:reactive], :payload_action, nil),
         fingerprint: Ext.get_opt(resource, [:reactive], :fingerprint, nil),
         fingerprint_attribute: Ext.get_opt(resource, [:reactive], :fingerprint_attribute, nil),

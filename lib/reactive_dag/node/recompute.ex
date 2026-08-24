@@ -501,7 +501,13 @@ defmodule ReactiveDag.Node.Recompute do
                 meta[:identity_fields],
                 vanished,
                 meta[:payload_destroy] || :destroy,
-                Keyword.take(opts, [:tenant])
+                opts
+                |> Keyword.take([:tenant])
+                # So a retire can find its row by the unit's own columns rather
+                # than by a stored key. A node whose `row_key` names real columns
+                # then needs no `"|"`-joined key column at all.
+                |> Keyword.put(:groups, opts[:claimed_groups] || %{})
+                |> Keyword.put(:row_key_fields, retire_key_fields(meta, resource))
               )
             end
 
@@ -561,21 +567,72 @@ defmodule ReactiveDag.Node.Recompute do
             Keyword.take(tenant_opts, [:tenant])
           )
 
-        case meta[:identity_fields] do
-          fields when is_list(fields) ->
+        # WHICH LOOKUP finds the row this write lands on, in declaration order.
+        #
+        # `row_key` before `payload_key`: a node declaring real columns as its
+        # identity has no key column to write a unit name into, and the
+        # `payload_key` default is the resource's single primary key — a UUID —
+        # so falling through would try to write `"gf|2025"` into `:id`. That
+        # failed loudly (`NoSuchInput`), which is how this gap was found; the
+        # ordering is what makes a keyless fold expressible at all.
+        case ReactiveDag.Node.Payload.lookup(meta) do
+          {:identity, fields} ->
             fn _key, row ->
               ReactiveDag.Node.Payload.upsert_identity(resource, fields, row, action, opts) !=
                 :unchanged
             end
 
-          _ ->
-            key_attr = meta[:payload_key] || :key
-
+          {:key, key_attr} ->
             fn key, row ->
               ReactiveDag.Node.Payload.upsert(resource, key_attr, key, row, action, opts) !=
                 :unchanged
             end
         end
+    end
+  end
+
+  # The columns a retire finds a keyless node's row by.
+  #
+  # The GRAIN's order when it lines up with `row_key` (a group's values arrive in
+  # grain order), and otherwise `row_key` minus the tenant — which is the order the
+  # unit's NAME was built in, and so the order splitting that name yields. Only for
+  # a node with no key column: one that still stores its key is found by it.
+  defp retire_key_fields(meta, resource) do
+    case ReactiveDag.Node.Payload.lookup(meta) do
+      {:identity, fields} ->
+        row_key_grain(meta) || Enum.reject(fields, &(&1 == tenant_attr(resource)))
+
+      _ ->
+        nil
+    end
+  end
+
+  defp tenant_attr(resource) do
+    if Ash.Resource.Info.multitenancy_strategy(resource) == :attribute,
+      do: Ash.Resource.Info.multitenancy_attribute(resource)
+  end
+
+  # The node's `row_key` columns that a derived group's values line up with —
+  # `row_key` minus the tenant column, since the tenant travels in opts rather
+  # than in the grain.
+  #
+  # Order matters: the group's values arrive in the grain's order, so these must
+  # be the same columns in the same order. Taken from the GRAIN rather than from
+  # `row_key` for exactly that reason — `row_key` is a uniqueness declaration and
+  # its order is the identity's, not the group's.
+  defp row_key_grain(meta) do
+    with plan when is_list(plan) <- meta[:over_source][:group_key_plan],
+         fields when is_list(fields) <- meta[:row_key] do
+      names = Enum.map(plan, fn
+        {:attr, name, _} -> name
+        {:calc, name} -> name
+      end)
+
+      # Only when the grain's columns are all real `row_key` columns: otherwise
+      # the values name something this node is not keyed by.
+      if Enum.all?(names, &(&1 in fields)), do: names, else: nil
+    else
+      _ -> nil
     end
   end
 

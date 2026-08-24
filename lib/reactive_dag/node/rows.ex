@@ -623,8 +623,8 @@ defmodule ReactiveDag.Node.Rows do
       compare: meta[:compare]
     ]
 
-    case meta[:identity_fields] do
-      fields when is_list(fields) ->
+    case ReactiveDag.Node.Payload.lookup(meta) do
+      {:identity, fields} ->
         ReactiveDag.Node.Payload.upsert_identity(
           meta[:resource],
           fields,
@@ -633,10 +633,10 @@ defmodule ReactiveDag.Node.Rows do
           opts
         )
 
-      _ ->
+      {:key, key_attr} ->
         ReactiveDag.Node.Payload.upsert(
           meta[:resource],
-          meta[:payload_key] || :key,
+          key_attr,
           key,
           row,
           meta[:payload_action] || :upsert,
@@ -670,12 +670,22 @@ defmodule ReactiveDag.Node.Rows do
   defp retire(keys, nil, %{retain_if_vanished: {:mark, fun}}), do: fun.(keys)
 
   defp retire(keys, _nil, meta) do
+    {key_attr, fields} =
+      case ReactiveDag.Node.Payload.lookup(meta) do
+        {:identity, fields} -> {meta[:payload_key] || :key, fields}
+        {:key, attr} -> {attr, meta[:identity_fields]}
+      end
+
     ReactiveDag.Node.Payload.retire(
       meta[:resource],
-      meta[:payload_key] || :key,
+      key_attr,
       meta[:identity_fields],
       keys,
-      meta[:payload_destroy] || :destroy
+      meta[:payload_destroy] || :destroy,
+      # The columns to find the row by, for a node with no key column. Without
+      # this the lookup fell through to filtering the whole composite key against
+      # the surrogate primary key — `id == "|FY25/26||"`.
+      row_key_fields: fields && Enum.reject(fields, &(&1 == tenant_attribute(meta)))
     )
   end
 
