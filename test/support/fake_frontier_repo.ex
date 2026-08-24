@@ -72,6 +72,23 @@ defmodule ReactiveDag.Test.FakeFrontierRepo do
   @doc "The full row for one mark, or nil."
   def mark(tenant, cell, key), do: Agent.get(__MODULE__, &Map.get(&1, {tenant, cell, key}))
 
+  @doc """
+  Held marks as `{cell_id, key}`, sorted — the assertion most tests actually make.
+
+  Tenant-free on purpose: a test asserting WHICH work is queued does not care which
+  tenant queued it, and the ones that do care use `tenants/0` or `marks/0`.
+  """
+  def dirty do
+    Agent.get(__MODULE__, &Map.keys(&1))
+    |> Enum.map(fn {_tenant, cell, key} -> {cell, key} end)
+    |> Enum.sort()
+  end
+
+  @doc "The distinct tenants holding marks."
+  def tenants do
+    Agent.get(__MODULE__, &Map.keys(&1)) |> Enum.map(&elem(&1, 0)) |> Enum.uniq()
+  end
+
   @doc "Drop everything — for a test that wants a known-empty frontier mid-run."
   def reset, do: Agent.update(__MODULE__, fn _ -> %{} end)
 
