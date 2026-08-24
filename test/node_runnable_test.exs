@@ -5,7 +5,16 @@ defmodule ReactiveDag.NodeRunnableTest do
   Tested at the dispatch level (pure over a Cell) — the DB-backed drain integration
   is proven by the host suites, as with Frontier/Tuple.
   """
-  use ExUnit.Case, async: true
+  # NOT async: these tests define modules at RUNTIME, and module definition is not
+  # safely concurrent. Elixir serialises compilation behind a lock, and a Spark
+  # verifier building its error reads the CALLING process's stacktrace
+  # (`Spark.Error.DslError.exception/1` → `Process.info/2`) — which returns nil for a
+  # process that has already moved on, failing a test whose assertion never ran.
+  #
+  # Observed once in a full async run and not reproducible in ~10 attempts since,
+  # including at `--max-cases 64`. Left non-async rather than chased: these are a
+  # handful of fast tests, and the concurrency bought nothing.
+  use ExUnit.Case, async: false
 
   alias ReactiveDag.Cell
   alias ReactiveDag.Node.{KeyRule, Recompute}

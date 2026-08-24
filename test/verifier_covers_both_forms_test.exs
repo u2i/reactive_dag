@@ -7,7 +7,16 @@ defmodule ReactiveDag.VerifierCoversBothFormsTest do
   is absent: it reads as coverage. Both bugs were found not by a failing test but
   by reading dispatch code to find out why a declaration had no effect.
   """
-  use ExUnit.Case, async: true
+  # NOT async: these tests define modules at RUNTIME, and module definition is not
+  # safely concurrent. Elixir serialises compilation behind a lock, and a Spark
+  # verifier building its error reads the CALLING process's stacktrace
+  # (`Spark.Error.DslError.exception/1` → `Process.info/2`) — which returns nil for a
+  # process that has already moved on, failing a test whose assertion never ran.
+  #
+  # Observed once in a full async run and not reproducible in ~10 attempts since,
+  # including at `--max-cases 64`. Left non-async rather than chased: these are a
+  # handful of fast tests, and the concurrency bought nothing.
+  use ExUnit.Case, async: false
 
   alias ReactiveDag.Node.Verifiers.VerifyReactive
 
