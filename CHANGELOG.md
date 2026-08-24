@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.17.0-rc.54](https://github.com/u2i/reactive_dag/compare/v0.17.0-rc.53...v0.17.0-rc.54) (2026-08-24)
+
+
+### Features
+
+* multi-column join keys, keyless overs, and real SQL coverage ([ab2ad1c](https://github.com/u2i/reactive_dag/commit/ab2ad1cb070b4d006b7c0434aa808a1f63d84b08))
+
 ## [0.17.0-rc.53](https://github.com/u2i/reactive_dag/compare/v0.17.0-rc.52...v0.17.0-rc.53) (2026-08-24)
 
 
