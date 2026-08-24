@@ -578,7 +578,11 @@ defmodule ReactiveDag.Node do
           "the LEFT side: an attribute (`:declared_id` — nil value = not on this side), " <>
             "`[key: :acct, where: [kind: :budget]]` (on this side iff every `where` pair " <>
             "matches; join key = the `key:` attribute), or the fn escape hatch " <>
-            "`(item -> join_key | nil)`."
+            "`(item -> join_key | nil)`.\n\n" <>
+            "`key:` also takes a LIST of attributes — `[key: [:code, :year]]` — and the " <>
+            "join key is their tuple. A join pairs its sides in the BEAM, so a tuple " <>
+            "keys it as well as a string: a pair of columns needs no joined column " <>
+            "stored beside them."
       ],
       right: [
         type: {:or, [{:fun, 1}, :atom, :keyword_list]},
@@ -1868,6 +1872,12 @@ defmodule ReactiveDag.Node do
           # nil for an IDENTITY-KEYED over (composite PK): its cell keys are
           # serialized identities, not a column — key scoping then stands down.
           payload_key: over.meta[:payload_key],
+          # …and `false` when the over node DECLARED it has no key column. Carried
+          # here because a consumer reads this map, not the over's cell meta, and
+          # without it a keyless node looked keyed — the propagation path then
+          # filtered a cell key against a `:key` column the resource lacks.
+          declared_payload_key: over.meta[:declared_payload_key],
+          row_key: over.meta[:row_key],
           read_action: read,
           load: loads,
           group_key_plan: group_key_plan(spec, resource)
@@ -2009,8 +2019,15 @@ defmodule ReactiveDag.Node do
 
   defp side_attrs(side) when is_atom(side) and not is_nil(side), do: [side]
 
-  defp side_attrs(side) when is_list(side),
-    do: [Keyword.fetch!(side, :key) | Keyword.keys(Keyword.get(side, :where, []))]
+  defp side_attrs(side) when is_list(side) do
+    # `key:` is one attribute or a LIST of them (the join key is their tuple), so
+    # flatten — the caller validates each name against the resource, and handing it
+    # the list itself raised `FunctionClauseError` in `Ash.Resource.Info.attribute/2`.
+    key = Keyword.fetch!(side, :key)
+    keys = if is_list(key), do: key, else: [key]
+
+    keys ++ Keyword.keys(Keyword.get(side, :where, []))
+  end
 
   defp side_attrs(_fn_or_nil), do: []
 

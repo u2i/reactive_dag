@@ -271,19 +271,61 @@ defmodule ReactiveDag.Node.KeyRule do
     # Such a node degrades to `:all` here rather than reading: this path is the
     # LIVE-READ fallback, and the precise answer for these nodes comes from the
     # diff path (`rule/4`), which needs no key column at all.
-    case lookup_key(source) do
-      nil ->
-        :all
+    case ReactiveDag.Node.Payload.lookup(Map.to_list(source)) do
+      {:key, attr} ->
+        group_claims_by_key(spec, source, changed, attr)
 
-      key_attr ->
-        group_claims_by_key(spec, source, changed, key_attr)
+      {:identity, fields} ->
+        # A KEYLESS over: no key column, so the changed keys are read back through
+        # the columns they were built from. `:all` would be sound here and is what
+        # an earlier revision did — but it reprices the whole cell because one row
+        # moved, which is exactly the widening `recompute_by` exists to avoid, and a
+        # host's test caught it.
+        group_claims_by_fields(spec, source, changed, fields)
     end
   end
 
-  defp lookup_key(source) do
-    case ReactiveDag.Node.Payload.lookup(Map.to_list(source)) do
-      {:key, attr} -> attr
-      {:identity, _fields} -> nil
+  # Read the changed rows by splitting each cell key across the columns that
+  # identify the row — the same decomposition `Payload.retire/6` performs, and the
+  # inverse of the join that built the key.
+  #
+  # A key whose arity does not match the columns is not this node's, and a row the
+  # read cannot find is a DELETED row: both degrade to `:all`, since a vanished row
+  # may have left any group.
+  defp group_claims_by_fields(spec, source, changed, fields) do
+    cols = Enum.reject(fields, &(&1 == tenant_attribute(source)))
+    decoded = Enum.map(changed, &decode_key(&1, cols))
+
+    if Enum.any?(decoded, &is_nil/1) do
+      :all
+    else
+      filter = Enum.map(decoded, fn pairs -> [and: Enum.map(pairs, &[&1])] end)
+
+      rows =
+        source.resource
+        |> Ash.Query.do_filter(or: filter)
+        |> load_calcs(Map.get(source, :load, []))
+        |> Ash.read!(scope())
+
+      if length(rows) < length(changed), do: :all, else: claims_from(spec, rows)
+    end
+  end
+
+  defp decode_key(key, cols) when is_binary(key) do
+    values = String.split(key, "|")
+    if length(values) == length(cols), do: Enum.zip(cols, values), else: nil
+  end
+
+  defp decode_key(_key, _cols), do: nil
+
+  defp tenant_attribute(source) do
+    case source[:resource] do
+      nil ->
+        nil
+
+      resource ->
+        if Ash.Resource.Info.multitenancy_strategy(resource) == :attribute,
+          do: Ash.Resource.Info.multitenancy_attribute(resource)
     end
   end
 
@@ -296,29 +338,34 @@ defmodule ReactiveDag.Node.KeyRule do
       |> load_calcs(Map.get(source, :load, []))
       |> Ash.read!(scope())
 
-    if length(rows) < length(changed) do
-      :all
-    else
-      key_fn = Declarative.key_fn(Map.get(spec, :key), Map.get(spec, :key_prefix))
+    if length(rows) < length(changed), do: :all, else: claims_from(spec, rows)
+  end
 
-      keys =
-        case spec do
-          %ReactiveDag.Node.Reduce{} = r ->
-            group_fn = Declarative.group_fn(r.group_by)
-            Enum.map(rows, &key_fn.(group_fn.(&1)))
+  # The parent UNITS the changed rows belong to — each row through the combinator's
+  # own grouping, then named by its key fn. Shared by the keyed and keyless reads:
+  # only HOW the rows are found differs, never what they mean.
+  defp claims_from(spec, rows) do
+    alias ReactiveDag.Node.Recompute.Declarative
 
-          %ReactiveDag.Node.Join{} = j ->
-            left = Declarative.side_fn(j.left)
-            right = Declarative.side_fn(j.right)
+    key_fn = Declarative.key_fn(Map.get(spec, :key), Map.get(spec, :key_prefix))
 
-            rows
-            |> Enum.flat_map(&[left.(&1), right.(&1)])
-            |> Enum.reject(&(&1 in [nil, false]))
-            |> Enum.map(key_fn)
-        end
+    keys =
+      case spec do
+        %ReactiveDag.Node.Reduce{} = r ->
+          group_fn = Declarative.group_fn(r.group_by)
+          Enum.map(rows, &key_fn.(group_fn.(&1)))
 
-      {:keys, Enum.uniq(keys)}
-    end
+        %ReactiveDag.Node.Join{} = j ->
+          left = Declarative.side_fn(j.left)
+          right = Declarative.side_fn(j.right)
+
+          rows
+          |> Enum.flat_map(&[left.(&1), right.(&1)])
+          |> Enum.reject(&(&1 in [nil, false]))
+          |> Enum.map(key_fn)
+      end
+
+    {:keys, Enum.uniq(keys)}
   end
 
   defp load_calcs(query, []), do: query

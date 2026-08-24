@@ -160,11 +160,31 @@ defmodule ReactiveDag.Node.Recompute.Declarative do
   def side_fn(spec) when is_list(spec) do
     key_attr = Keyword.fetch!(spec, :key)
     where = Keyword.get(spec, :where, [])
+    key_of = key_getter(key_attr)
 
     fn item ->
       if Enum.all?(where, fn {a, v} -> Map.get(item, a) == v end),
-        do: Map.get(item, key_attr),
+        do: key_of.(item),
         else: nil
+    end
+  end
+
+  # A join key from one attribute, or from SEVERAL as a tuple.
+  #
+  # Several is the point: a join pairs its sides by indexing both into maps and
+  # matching keys in the BEAM (`Recompute.recompute/3`), and a tuple is a map key
+  # exactly as well as a string is. So a pair of columns needs no joined column
+  # beside them — which is what `match_key`
+  # (`normalized_code <> "|" <> fiscal_year`) was for.
+  #
+  # A nil in any position makes the whole key nil: a row missing part of its join
+  # key is not on this side, the same rule the single-attribute form follows.
+  defp key_getter(attr) when is_atom(attr), do: &Map.get(&1, attr)
+
+  defp key_getter(attrs) when is_list(attrs) do
+    fn item ->
+      values = Enum.map(attrs, &Map.get(item, &1))
+      if Enum.any?(values, &is_nil/1), do: nil, else: List.to_tuple(values)
     end
   end
 

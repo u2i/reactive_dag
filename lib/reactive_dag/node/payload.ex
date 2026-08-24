@@ -303,7 +303,13 @@ defmodule ReactiveDag.Node.Payload do
   # composite cell key against a UUID. `row_key` says how to FIND a row; whether a
   # key column exists is a separate fact only the node can state.
   defp keyless_row_key?(meta) do
-    meta[:declared_payload_key] == false and is_list(meta[:row_key])
+    # `payload_key: false` is the declaration itself, and it is enough on its own.
+    # `declared_payload_key` carries it on a CELL's meta, but a lowered
+    # `over_source` map holds only `payload_key` — so requiring both made a keyless
+    # node look keyed from the propagation path, which then filtered a cell key
+    # against a `:key` column the resource does not have.
+    (meta[:declared_payload_key] == false or meta[:payload_key] == false) and
+      (is_list(meta[:row_key]) or is_nil(meta[:row_key]))
   end
 
   @versions __MODULE__.Versions

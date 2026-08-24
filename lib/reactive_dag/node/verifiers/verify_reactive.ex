@@ -870,6 +870,13 @@ defmodule ReactiveDag.Node.Verifiers.VerifyReactive do
             "`#{which}: [key: :acct, where: [kind: :budget]]` — got #{inspect(side)}"
         )
 
+      not valid_side_key?(side[:key]) ->
+        error(
+          dsl,
+          "`#{which}: [key: …]` takes an attribute or a non-empty list of them " <>
+            "(the join key is their tuple) — got #{inspect(side[:key])}"
+        )
+
       not (side |> Keyword.get(:where, []) |> Keyword.keyword?()) ->
         error(dsl, "`#{which}: [where: …]` takes attribute-value pairs, got #{inspect(side[:where])}")
 
@@ -877,6 +884,10 @@ defmodule ReactiveDag.Node.Verifiers.VerifyReactive do
         :ok
     end
   end
+
+  defp valid_side_key?(key) when is_atom(key) and not is_nil(key), do: true
+  defp valid_side_key?([_ | _] = keys), do: Enum.all?(keys, &(is_atom(&1) and not is_nil(&1)))
+  defp valid_side_key?(_), do: false
 
   defp verify_join_into(_dsl, into) when is_function(into) or is_nil(into), do: :ok
 
