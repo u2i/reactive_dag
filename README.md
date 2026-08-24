@@ -618,6 +618,28 @@ and nothing to wedge — the row is already in the database, and only the cascad
 waits. The command frontier would still be the answer if a host needed the write
 itself deferred.
 
+## Running the tests
+
+    mix test
+
+The suite hands the frontier an in-memory repo
+(`ReactiveDag.Test.FakeFrontierRepo`), which covers the library's logic and
+deliberately does not cover the SQL — it matches on statements rather than
+executing them.
+
+The SQL itself has its own file, opt-in because it needs a database:
+
+    createdb reactive_dag_test
+    REACTIVE_DAG_TEST_DATABASE_URL=postgres://user:pass@localhost/reactive_dag_test \
+      mix test test/real_postgres_frontier_test.exs
+
+Worth running before changing anything in `Frontier`'s statements. Three bugs have
+shipped past a green suite because a fake cannot see inside SQL — `?` being both
+Postgres's jsonb-exists operator and Postgrex's parameter marker, `||` being
+right-biased so a merge kept the wrong end, and a column dropped from the schema
+but still named in an INSERT. Each is the kind that file catches: reversing the
+`COALESCE` in the ON CONFLICT clause fails it and passes all 846 of the others.
+
 ## Status
 
 Both hosts run on this substrate — a per-key Elixir recompute that calls LLMs and

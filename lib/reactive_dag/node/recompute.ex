@@ -695,7 +695,15 @@ defmodule ReactiveDag.Node.Recompute do
   end
 
   defp join_key_attr(attr) when is_atom(attr) and not is_nil(attr), do: attr
-  defp join_key_attr(spec) when is_list(spec), do: Keyword.get(spec, :key)
+  # nil for a MULTI-column key: this is used to scope a read by the join key's
+  # column, and a tuple key has no single column to filter. The read stays whole
+  # (or `query:`-scoped), which is what a fn-keyed side already does.
+  defp join_key_attr(spec) when is_list(spec) do
+    case Keyword.get(spec, :key) do
+      key when is_list(key) -> nil
+      key -> key
+    end
+  end
   defp join_key_attr(_fn_or_nil), do: nil
 
   # What this pass may reconcile: its claim, both forms alike. A two-input pass
