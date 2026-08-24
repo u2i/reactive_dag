@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.17.0-rc.53](https://github.com/u2i/reactive_dag/compare/v0.17.0-rc.52...v0.17.0-rc.53) (2026-08-24)
+
+
+### Features
+
+* calculation grains, and folds that need no key column ([#218](https://github.com/u2i/reactive_dag/issues/218)) ([d33e981](https://github.com/u2i/reactive_dag/commit/d33e981613730c5f18a3170ad6ae917f3cddca99))
+
 ## [0.17.0-rc.52](https://github.com/u2i/reactive_dag/compare/v0.17.0-rc.51...v0.17.0-rc.52) (2026-08-23)
 
 
