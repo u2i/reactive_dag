@@ -95,8 +95,23 @@ defmodule ReactiveDag.Node.Diff do
       iex> groups(%{"f" => %{"unchanged" => "A"}, "y" => %{"to" => "25"}}, [:f, :y])
       [{"A", "25"}]
   """
-  @spec groups(changes(), term()) :: [term()]
-  def groups(changes, grain) do
+  @spec groups(changes(), term(), module() | nil) :: [term()]
+  def groups(changes, grain, resource \\ nil)
+
+  # An assembled GROUP PLAN — `{:attr, name, string?}` / `{:calc, name}` entries —
+  # rather than a bare field list. A calculation is evaluated on the change itself
+  # (`CalcGrain`), so a fold grouping by one derives its units like any other
+  # instead of falling back to a live read.
+  def groups(changes, [{tag, _, _} | _] = plan, resource)
+      when tag in [:attr, :calc] and not is_nil(resource) do
+    plan_groups(changes, plan, resource)
+  end
+
+  def groups(changes, [{:calc, _} | _] = plan, resource) when not is_nil(resource) do
+    plan_groups(changes, plan, resource)
+  end
+
+  def groups(changes, grain, _resource) do
     group = Declarative.group_fn(grain)
 
     [before(changes), after_(changes)]
@@ -107,6 +122,22 @@ defmodule ReactiveDag.Node.Diff do
     # A composite grain is a tuple, so a nil in one position is checked too: a row
     # missing part of its own grain does not belong to a unit.
     |> Enum.reject(&nil_group?/1)
+    |> Enum.uniq()
+  end
+
+  # Both sides of the change, each projected through the plan — attributes read
+  # off the diff, calculations evaluated on it. A side that cannot be resolved
+  # (a relationship-traversing calculation, a nil in the grain) contributes no
+  # unit, so the caller falls back rather than claiming a partial set.
+  defp plan_groups(changes, plan, resource) do
+    [before(changes), after_(changes)]
+    |> Enum.reject(&is_nil/1)
+    |> Enum.map(&ReactiveDag.Node.CalcGrain.values(plan, &1, resource))
+    |> Enum.reject(&is_nil/1)
+    |> Enum.map(fn
+      [single] -> single
+      several -> List.to_tuple(several)
+    end)
     |> Enum.uniq()
   end
 
