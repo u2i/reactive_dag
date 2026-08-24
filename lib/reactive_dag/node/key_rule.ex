@@ -260,9 +260,39 @@ defmodule ReactiveDag.Node.KeyRule do
   defp group_claims(spec, source, changed) do
     alias ReactiveDag.Node.Recompute.Declarative
 
+    # A key column to filter by, or `:all`.
+    #
+    # `payload_key` is not enough on its own: it falls back to the resource's
+    # single primary key, so a node identified by `row_key` COLUMNS rather than a
+    # key column yields `:id` — and filtering a UUID column by a composite cell
+    # key raises `InvalidFilterValue` (`id == "|FY25/26||"`). A host's reprocess
+    # found exactly that.
+    #
+    # Such a node degrades to `:all` here rather than reading: this path is the
+    # LIVE-READ fallback, and the precise answer for these nodes comes from the
+    # diff path (`rule/4`), which needs no key column at all.
+    case lookup_key(source) do
+      nil ->
+        :all
+
+      key_attr ->
+        group_claims_by_key(spec, source, changed, key_attr)
+    end
+  end
+
+  defp lookup_key(source) do
+    case ReactiveDag.Node.Payload.lookup(Map.to_list(source)) do
+      {:key, attr} -> attr
+      {:identity, _fields} -> nil
+    end
+  end
+
+  defp group_claims_by_key(spec, source, changed, key_attr) do
+    alias ReactiveDag.Node.Recompute.Declarative
+
     rows =
       source.resource
-      |> Ash.Query.do_filter([{source.payload_key, [in: changed]}])
+      |> Ash.Query.do_filter([{key_attr, [in: changed]}])
       |> load_calcs(Map.get(source, :load, []))
       |> Ash.read!(scope())
 

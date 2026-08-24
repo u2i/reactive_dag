@@ -586,13 +586,13 @@ defmodule ReactiveDag.Drain do
       nil ->
         {keys, %{}}
 
-      grain ->
+      {plan, resource} ->
         key_fn = unit_key_fn(cell)
 
         derived =
           for k <- keys,
               d = diffs[k],
-              group <- ReactiveDag.Node.Diff.groups(d, grain),
+              group <- ReactiveDag.Node.Diff.groups(d, plan, resource),
               reduce: %{} do
             acc -> Map.update(acc, key_fn.(group), [group], &[group | &1])
           end
@@ -613,17 +613,22 @@ defmodule ReactiveDag.Drain do
     end
   end
 
-  # The cell's grain as a plain field list, or nil when it cannot be projected
-  # onto a map — a `{:calc, _}` the datastore evaluates, or a `%Join{}` whose
-  # sides are picked rather than grouped.
+  # The cell's grain as `{plan, resource}`, or nil when it cannot be resolved from
+  # a change at all — a `%Join{}` whose sides are picked rather than grouped, or a
+  # cell with no assembled group plan.
+  #
+  # A `{:calc, _}` entry no longer disqualifies the grain: a calculation over the
+  # row's own attributes is a function of values the change carries, and
+  # `CalcGrain` evaluates it in the BEAM. One that needs a relationship fails there
+  # and the claim falls back, so the decision is per change rather than per cell.
   defp grain_of(nil), do: nil
 
   defp grain_of(%Cell{meta: meta}) do
     with :group <- meta[:key_rule],
          %{} = src <- meta[:over_source],
          plan when is_list(plan) <- src[:group_key_plan],
-         true <- Enum.all?(plan, &match?({:attr, _, _}, &1)) do
-      Enum.map(plan, fn {:attr, name, _string?} -> name end)
+         resource when not is_nil(resource) <- src[:resource] do
+      {plan, resource}
     else
       _ -> nil
     end

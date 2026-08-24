@@ -263,6 +263,49 @@ defmodule ReactiveDag.Node.Payload do
   end
 
   @diffs __MODULE__.Diffs
+  @doc """
+  WHICH LOOKUP identifies a node's row, from its declarations.
+
+  One function because there were three copies of this decision —
+  `Recompute.writer_fn/2`, `Rows.write/3` and `retire/6` — each dispatching on
+  `identity_fields` alone. A node identified by `row_key` COLUMNS rather than a key
+  column then fell through to `payload_key`, whose default is the resource's single
+  primary key: a surrogate UUID. The write put the unit's name into `:id` and the
+  lookup filtered a UUID column by `"|FY25/26||"`.
+
+  Returns:
+
+    * `{:identity, fields}` — find by those columns' values, taken off the row.
+      Either a composite primary key (`identity_fields`) or a `row_key` column list
+      on a node with no key column of its own.
+    * `{:key, attr}` — find by that column, which holds the cell key.
+  """
+  @spec lookup(map()) :: {:identity, [atom()]} | {:key, atom()}
+  def lookup(meta) do
+    cond do
+      is_list(meta[:identity_fields]) ->
+        {:identity, meta[:identity_fields]}
+
+      keyless_row_key?(meta) ->
+        {:identity, meta[:row_key]}
+
+      true ->
+        {:key, meta[:payload_key] || :key}
+    end
+  end
+
+  # A node that DECLARED it has no key column (`payload_key false`), and named the
+  # columns its row is identified by instead.
+  #
+  # Declared, not inferred. Deducing it from "has a `row_key` and a surrogate
+  # primary key" reclassified an existing node the moment it declared a `row_key`
+  # — its writes went from the key column to identity, and its lookups filtered a
+  # composite cell key against a UUID. `row_key` says how to FIND a row; whether a
+  # key column exists is a separate fact only the node can state.
+  defp keyless_row_key?(meta) do
+    meta[:declared_payload_key] == false and is_list(meta[:row_key])
+  end
+
   @versions __MODULE__.Versions
 
   @doc """
@@ -613,13 +656,25 @@ defmodule ReactiveDag.Node.Payload do
   def retire(resource, key_attr, identity_fields, keys, action, opts) do
     ensure_destroy!(resource, action)
 
+    # `groups:` — the unit's own column VALUES, when the caller derived them from a
+    # change (`Drain.derive_units/4`). With them a row is found by its columns and
+    # needs no key column at all, which is what lets a node drop the stored
+    # `"|"`-joined key it used to be found by.
+    #
+    # Without them the lookup falls back to `key_attr`/`identity_fields` below —
+    # the pre-existing behaviour for a node that still stores its key.
+    groups = opts[:groups] || %{}
+    fields = opts[:row_key_fields]
+
     Enum.filter(keys, fn key ->
       # The lookup is TENANT-SCOPED, and that is the whole safety of this
       # function under tenancy: an unscoped find would hand back another
       # tenant's row for the same key and destroy it. Reconciling a partial read
       # against a total baseline is the shape that produced the two-node join
       # bug; here it deletes rather than nils.
-      case find_row(resource, key_attr, identity_fields, key, opts) do
+      case find_by_group(resource, fields, groups[key], opts) ||
+             find_by_key_fields(resource, fields, key, opts) ||
+             find_row(resource, key_attr, identity_fields, key, opts) do
         nil ->
           false
 
@@ -628,6 +683,46 @@ defmodule ReactiveDag.Node.Payload do
           true
       end
     end)
+  end
+
+  # Find a row by the unit's own column values — no key column, no `"|"` split.
+  #
+  # `fields` is the node's `row_key` minus the tenant column (which travels in
+  # opts, not in the grain), and `values` is one group tuple. A mismatch in arity
+  # means these are not this node's fields, so it declines rather than guessing.
+  defp find_by_group(_resource, nil, _values, _opts), do: nil
+  defp find_by_group(_resource, _fields, nil, _opts), do: nil
+  defp find_by_group(_resource, _fields, [], _opts), do: nil
+
+  defp find_by_group(resource, fields, [group | _], opts) do
+    values = if is_tuple(group), do: Tuple.to_list(group), else: [group]
+
+    if length(values) == length(fields) do
+      existing_by(resource, fields |> Enum.zip(values) |> Map.new(), opts)
+    else
+      nil
+    end
+  end
+
+  # A keyless node with NO group values to hand — a whole-cell pass, or a claim
+  # whose change carried no version. The unit's name is still the join of its
+  # `row_key` columns, so it splits back across them.
+  #
+  # This is the one place the `"|"` form survives, and it survives as a FALLBACK
+  # rather than as storage: nothing writes it, nothing reads it off a row. Without
+  # it the lookup fell through to filtering the whole composite against the
+  # surrogate primary key — `id == "|FY25/26||"` — which raised
+  # `InvalidFilterValue` on a UUID column. A host's reprocess found that.
+  defp find_by_key_fields(_resource, nil, _key, _opts), do: nil
+
+  defp find_by_key_fields(resource, fields, key, opts) do
+    values = String.split(key, "|")
+
+    if length(values) == length(fields) do
+      existing_by(resource, fields |> Enum.zip(values) |> Map.new(), opts)
+    else
+      nil
+    end
   end
 
   defp find_row(resource, _key_attr, fields, key, opts) when is_list(fields) do
