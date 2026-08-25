@@ -1920,6 +1920,14 @@ defmodule ReactiveDag.Node do
     %{
       resource: resource,
       payload_key: over.meta[:payload_key],
+      # …and how the side is IDENTIFIED when it has no key column. Carried for the
+      # same reason `over_source` carries them: a consumer reads THIS map, not the
+      # over's cell meta, and without them a keyless side looked keyed — the join's
+      # lookup then filtered on the literal `false` ("No such field false for
+      # resource …", #223).
+      declared_payload_key: over.meta[:declared_payload_key],
+      row_key: over.meta[:row_key],
+      identity_fields: over.meta[:identity_fields],
       read_action: nil,
       # ONLY this side's attrs, against THIS side's resource. The one-input
       # clause validates `left ++ right` against a single resource, which is
