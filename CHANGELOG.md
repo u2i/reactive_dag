@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.17.0-rc.55](https://github.com/u2i/reactive_dag/compare/v0.17.0-rc.54...v0.17.0-rc.55) (2026-08-25)
+
+
+### Bug Fixes
+
+* a join side with no key column filters on its columns, not on `false` ([#223](https://github.com/u2i/reactive_dag/issues/223)) ([5c34bf5](https://github.com/u2i/reactive_dag/commit/5c34bf5e3ad71a50a4ad15403002b4110f74c772))
+
 ## [0.17.0-rc.54](https://github.com/u2i/reactive_dag/compare/v0.17.0-rc.53...v0.17.0-rc.54) (2026-08-24)
 
 
