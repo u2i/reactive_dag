@@ -198,10 +198,16 @@ defmodule ReactiveDag.Node.KeyRule do
         spec = if side == :left, do: j.left, else: j.right
         source = sides[side]
 
-        if is_nil(source) or is_nil(source[:payload_key]) do
-          :all
-        else
-          side_join_keys(spec, source, j, changed)
+        # `Payload.lookup/1`, not `payload_key` directly. A keyless node's
+        # `payload_key` is `false`, not nil — so a nil check passed it through and
+        # the read built a filter from the literal `false`
+        # ("No such field false for resource …", #223). This was the LAST place
+        # consulting `payload_key` without the `false` case; every other path
+        # already asked `lookup/1`.
+        case source && ReactiveDag.Node.Payload.lookup(Map.to_list(source)) do
+          nil -> :all
+          {:key, attr} -> side_join_keys(spec, source, j, changed, attr)
+          {:identity, fields} -> side_join_keys_by_fields(spec, source, j, changed, fields)
         end
     end
   end
@@ -225,14 +231,44 @@ defmodule ReactiveDag.Node.KeyRule do
   # lookup cannot find is a DELETED row, and a vanished row must reprice
   # everything it might have left — the same `:all` degradation `group_claims/3`
   # makes, for the same reason.
-  defp side_join_keys(spec, source, j, changed) do
-    alias ReactiveDag.Node.Recompute.Declarative
+  defp side_join_keys(spec, source, j, changed, key_attr) do
+    source.resource
+    |> Ash.Query.do_filter([{key_attr, [in: changed]}])
+    |> read_side(source)
+    |> side_claims(spec, j, changed)
+  end
 
-    rows =
+  # A KEYLESS side: no key column, so the changed keys are read back through the
+  # columns that identify the row — the same decomposition `group_claims_by_fields/4`
+  # performs, and the inverse of the join that built the key.
+  #
+  # Degrading to `:all` here would be sound and is what #223 proposed as the minimal
+  # fix, but it reprices the whole cell because one row moved. A join side that
+  # declares `row_key` has said exactly how to find its rows; this uses it.
+  defp side_join_keys_by_fields(spec, source, j, changed, fields) do
+    cols = Enum.reject(fields, &(&1 == tenant_attribute(source)))
+    decoded = Enum.map(changed, &decode_key(&1, cols))
+
+    if Enum.any?(decoded, &is_nil/1) do
+      :all
+    else
+      filter = Enum.map(decoded, fn pairs -> [and: Enum.map(pairs, &[&1])] end)
+
       source.resource
-      |> Ash.Query.do_filter([{source.payload_key, [in: changed]}])
-      |> load_calcs(Map.get(source, :load, []))
-      |> Ash.read!(scope())
+      |> Ash.Query.do_filter(or: filter)
+      |> read_side(source)
+      |> side_claims(spec, j, changed)
+    end
+  end
+
+  defp read_side(query, source) do
+    query
+    |> load_calcs(Map.get(source, :load, []))
+    |> Ash.read!(scope())
+  end
+
+  defp side_claims(rows, spec, j, changed) do
+    alias ReactiveDag.Node.Recompute.Declarative
 
     if length(rows) < length(changed) do
       :all
