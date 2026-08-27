@@ -186,7 +186,12 @@ defmodule ReactiveDag.TenantPlanTest do
   end
 
   setup do
-    {:ok, _} = FakeRepo.start_link()
+    # `start_supervised!`, not `start_link`: the agent is registered under a global
+    # name and linked to the test process, so it exits ASYNCHRONOUSLY when a test
+    # ends — and the next test can call `start_link` before the name is released,
+    # failing setup with `{:error, {:already_started, …}}`. ExUnit's supervisor waits
+    # for the exit, so the name is free by the time the next test starts.
+    start_supervised!(%{id: FakeRepo, start: {FakeRepo, :start_link, []}})
     prev_repo = Application.get_env(:reactive_dag, :repo)
     prev_writer = Application.get_env(:reactive_dag, :coordination_writer)
     Application.put_env(:reactive_dag, :repo, FakeRepo)
