@@ -50,6 +50,26 @@ defmodule ReactiveDag.SourceProgressTest do
     assert_receive {:progress, _, %{cell: "wwtp_docs"}}
   end
 
+  test "a PHASE reports without a count — the label is the whole message" do
+    # The parts of a poll with no denominator: a crawl counts documents while it
+    # fetches, then reclassifies and writes each leaf with nothing to count.
+    #
+    # Reporting only the countable part leaves a page holding a frozen `34/34`
+    # through the slowest phase, which reads as a hang — the number says the work is
+    # finished and the poll is plainly still running.
+    Source.progress(nil, nil, cell: "meeting_docs", label: "writing 3 leaves")
+
+    assert_receive {:progress, %{done: nil, total: nil},
+                    %{cell: "meeting_docs", label: "writing 3 leaves"}}
+  end
+
+  test "a label rides with a counted event too" do
+    # So a consumer can say "34/721 documents" rather than "34/721".
+    Source.progress(34, 721, cell: "meeting_docs", label: "documents")
+
+    assert_receive {:progress, %{done: 34, total: 721}, %{label: "documents"}}
+  end
+
   test "emitting with no handler attached is not an error" do
     # Per DOCUMENT, not per batch — so this runs 700 times in a real crawl and
     # must cost nothing when nobody is listening.
