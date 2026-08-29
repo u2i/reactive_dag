@@ -103,4 +103,47 @@ defmodule ReactiveDag.Op do
               {:ok, [key()]} | {:ok, [key()], meta()} | {:error, term()}
 
   @optional_callbacks recompute: 2, recompute: 3
+
+  @doc """
+  Report progress from inside a recompute — `[:reactive_dag, :drain, :progress]`.
+
+      Op.progress(done, total, cell: cell.id, label: "meetings")
+
+  The drain-side counterpart to `ReactiveDag.Source.progress/3`, and it exists for
+  the same reason. An op is opaque to the library: it is handed keys and returns
+  changed ones, and everything between is the host's. So a cell extracting 34
+  meetings through an LLM emits ONE `:drain, :step`, and it fires when the work is
+  already over.
+
+  `:cell_start` says a cell BEGAN, which is enough to name the slow cell. This is
+  for saying how far through it is — the difference between "recomputing
+  meeting_events" for four minutes and "meeting_events · 12/34 meetings".
+
+  ## Emit per unit, not per batch
+
+  One event per meeting, not per ten. Batching pushes an arbitrary N into every op,
+  each host picks a different one, and a cell with fewer than N keys reports nothing
+  at all. Coalescing is the CONSUMER's job — `ReactiveDagDashboard` already throttles
+  progress to one render per 150ms.
+
+  `total` may be nil when it is not yet known; the label then stands alone, which is
+  how an op names a PHASE rather than a count (see `Source.progress/3`).
+
+  The cost with no handler attached is an ETS lookup, so an op may call it freely.
+
+  ## Options
+
+    * `:cell` — which cell is recomputing. A drain runs many, so a consumer showing
+      per-row progress needs to know whose progress this is.
+    * `:label` — what the number counts, for a UI that says "12/34 meetings" rather
+      than "12/34".
+  """
+  @spec progress(non_neg_integer() | nil, non_neg_integer() | nil, keyword()) :: :ok
+  def progress(done, total \\ nil, opts \\ []) do
+    :telemetry.execute(
+      [:reactive_dag, :drain, :progress],
+      %{done: done, total: total},
+      %{cell: opts[:cell], label: opts[:label]}
+    )
+  end
 end
