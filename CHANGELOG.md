@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.17.0-rc.57](https://github.com/u2i/reactive_dag/compare/v0.17.0-rc.56...v0.17.0-rc.57) (2026-08-29)
+
+
+### Features
+
+* say what the drain is DOING — `:cell_start` and `Op.progress/3` ([#229](https://github.com/u2i/reactive_dag/issues/229)) ([2ebfa43](https://github.com/u2i/reactive_dag/commit/2ebfa43d2d0723d1ebd1be363c43e55b5702a18c))
+
 ## [0.17.0-rc.56](https://github.com/u2i/reactive_dag/compare/v0.17.0-rc.55...v0.17.0-rc.56) (2026-08-29)
 
 
