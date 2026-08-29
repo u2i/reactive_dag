@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.17.0-rc.56](https://github.com/u2i/reactive_dag/compare/v0.17.0-rc.55...v0.17.0-rc.56) (2026-08-29)
+
+
+### Features
+
+* a scanner can report a PHASE, not only a count ([#227](https://github.com/u2i/reactive_dag/issues/227)) ([c8c5b02](https://github.com/u2i/reactive_dag/commit/c8c5b02ef2968d7311754d1e82c94852b41fdb73))
+
 ## [0.17.0-rc.55](https://github.com/u2i/reactive_dag/compare/v0.17.0-rc.54...v0.17.0-rc.55) (2026-08-25)
 
 
