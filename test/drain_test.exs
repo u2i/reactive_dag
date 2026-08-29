@@ -98,6 +98,55 @@ defmodule ReactiveDag.DrainTest do
     ])
   end
 
+  describe "cell_start" do
+    test "fires BEFORE the cell recomputes, so a slow cell is visible while it runs" do
+      # `:step` reports what a cell DID; a cell that spends minutes in an LLM call
+      # emits nothing until it is over, and a page watching only steps shows the
+      # previous phase frozen — which reads as a hang, and is what a host reported.
+      parent = self()
+
+      :telemetry.attach_many(
+        "cell-start-test",
+        [[:reactive_dag, :drain, :cell_start], [:reactive_dag, :drain, :step]],
+        fn [_, _, event], measurements, meta, _ ->
+          send(parent, {event, meta.cell, measurements})
+        end,
+        nil
+      )
+
+      on_exit(fn -> :telemetry.detach("cell-start-test") end)
+
+      Frontier.mark_dirty("a", ["k1"], "seed")
+      {:ok, _report} = Drain.run(plan())
+
+      # ORDER matters: a consumer seeing the step first would render "ran" and then
+      # replace it with "running", which is worse than silence. Both cells, each
+      # starting before it steps.
+      assert_receive {:cell_start, "a", %{claimed: 1}}
+      assert_receive {:step, "a", _}
+      assert_receive {:cell_start, "b", %{claimed: 1}}
+      assert_receive {:step, "b", _}
+    end
+
+    test "carries the claimed keys, so a consumer can say what is being worked on" do
+      parent = self()
+
+      :telemetry.attach(
+        "cell-start-keys",
+        [:reactive_dag, :drain, :cell_start],
+        fn _e, _m, meta, _ -> send(parent, {:start, meta.cell, meta.claimed_keys}) end,
+        nil
+      )
+
+      on_exit(fn -> :telemetry.detach("cell-start-keys") end)
+
+      Frontier.mark_dirty("a", ["k1"], "seed")
+      {:ok, _} = Drain.run(plan())
+
+      assert_receive {:start, "a", ["k1"]}
+    end
+  end
+
   test "drains leaf → parent in depth order, recording the causal trace" do
     Frontier.mark_dirty("a", ["k1"], "seed")
 

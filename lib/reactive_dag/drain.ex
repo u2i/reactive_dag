@@ -118,10 +118,26 @@ defmodule ReactiveDag.Drain do
   | event | measurements | metadata |
   |---|---|---|
   | `[:reactive_dag, :drain, :start]` | `system_time` | `cells` (count in the plan) |
+  | `[:reactive_dag, :drain, :cell_start]` | `claimed`, `system_time` | `cell`, `pass`, `claimed_keys` |
+  | `[:reactive_dag, :drain, :progress]` | `done`, `total` | `cell`, `label` |
   | `[:reactive_dag, :drain, :step]` | `duration_us`, `claimed`, `changed` | `cell`, `pass`, `changed_keys`, `triggered_by`, `step` |
   | `[:reactive_dag, :drain, :stop]` | `duration_us`, `passes`, `steps`, `changed` | `report`, `cells_touched` |
   | `[:reactive_dag, :drain, :cell_failed]` | `duration_us` | `cell`, `pass`, `reason`, `claimed` |
   | `[:reactive_dag, :drain, :exception]` | `duration_us` | `kind`, `reason`, `report` |
+
+  `:cell_start` fires BEFORE a cell recomputes, `:step` after it. Both exist because
+  they answer different questions: `:step` reports what a cell DID, and
+  `:cell_start` reports what is happening NOW.
+
+  A cell whose recompute calls an LLM runs for minutes, and until it finishes it
+  emits nothing — so a consumer watching only `:step` shows whatever it last heard
+  about, frozen, for the whole time the slowest cell in the graph is working. That
+  reads as a hang, and a poll's final progress label sitting there while the drain
+  runs is exactly the shape a host reported.
+
+  `:progress` comes from an OP, via `ReactiveDag.Op.progress/3`, and is the only
+  signal from inside one recompute — `:cell_start` says a cell began, and this says
+  how far through it is. Nothing emits it unless an op chooses to.
 
   `:step` carries the changed KEYS, not just their count, because that is what
   makes a consumer incremental: a dashboard that knows which cells moved reads
@@ -343,6 +359,17 @@ defmodule ReactiveDag.Drain do
         # mechanism cover every rung: a declarative fold, a `per_key` action and a
         # `compute` op writing its own rows all reach the same payload write, so
         # all three yield diffs without any of them knowing.
+        # BEFORE the recompute, not after it. `:step` fires when a cell FINISHES,
+        # so a cell that spends four minutes calling an LLM emits nothing at all
+        # until it is done — and a page watching only steps shows the previous
+        # phase frozen, which reads as a hang. This is the event that names the
+        # cell while it is the one running.
+        :telemetry.execute(
+          [:reactive_dag, :drain, :cell_start],
+          %{claimed: length(keys), system_time: System.system_time()},
+          %{cell: cell_id, pass: passes, claimed_keys: keys}
+        )
+
         {{outcome, diffs, versions}, us} =
           timed(fn ->
             ReactiveDag.Node.Payload.collecting_diffs_and_versions(fn ->
