@@ -215,9 +215,26 @@ defmodule ReactiveDag.Source do
     * `:cell` — which cell is being polled. A sweep polls several sources, so a
       consumer showing per-row progress needs to know whose progress this is.
     * `:label` — what the number counts, for a UI that says "34/721 documents"
-      rather than "34/721".
+      rather than "34/721". With `done` and `total` both nil it is the whole
+      message, which is how a scanner names a PHASE — see below.
+
+  ## Phases: progress without a count
+
+  `done` may be nil too. Then the label stands alone, and a consumer shows the work
+  rather than a ratio:
+
+      Source.progress(nil, nil, cell: "meeting_docs", label: "writing 3 leaves")
+
+  This is for the parts of a poll that have no denominator. A crawl counts documents
+  while it fetches, and then reclassifies, writes each leaf and reconciles — often
+  the slowest part, and with nothing to count. Reporting only the fetch leaves a
+  page holding a frozen `34/34` through all of it, which reads as a hang: the number
+  says the work is done and the poll is plainly still running.
+
+  A count and a phase are the same event because they answer the same question at
+  different moments, and a consumer that renders one renders the other.
   """
-  @spec progress(non_neg_integer(), non_neg_integer() | nil, keyword()) :: :ok
+  @spec progress(non_neg_integer() | nil, non_neg_integer() | nil, keyword()) :: :ok
   def progress(done, total \\ nil, opts \\ []) do
     :telemetry.execute(
       [:reactive_dag, :scan, :progress],
