@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.17.0-rc.58](https://github.com/u2i/reactive_dag/compare/v0.17.0-rc.57...v0.17.0-rc.58) (2026-08-30)
+
+
+### Bug Fixes
+
+* a rollback that is not `:cell_failed` is contained, not raised ([#231](https://github.com/u2i/reactive_dag/issues/231)) ([76e8caf](https://github.com/u2i/reactive_dag/commit/76e8caf54b2d2155c96782c8391c1bef6370d673))
+
 ## [0.17.0-rc.57](https://github.com/u2i/reactive_dag/compare/v0.17.0-rc.56...v0.17.0-rc.57) (2026-08-29)
 
 
