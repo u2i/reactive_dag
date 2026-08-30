@@ -281,6 +281,35 @@ defmodule ReactiveDag.Drain do
           {:error, {:cell_failed, id}} ->
             do_run(plan, opts, passes + 1, cause, steps, t0, [id | failed])
 
+          # ANY OTHER ROLLBACK, contained the same way.
+          #
+          # `Frontier.savepoint/1` returns `{:error, reason}` for whatever the
+          # transaction rolled back with, and only the `:cell_failed` shape was
+          # matched here — so a payload write failing for any other reason (a lost
+          # connection, a constraint) crashed the whole drain with a
+          # `CaseClauseError` naming this line, and every cell already recomputed
+          # this run was lost with it.
+          #
+          # The cell is excluded for the rest of the run exactly as above: its
+          # keys were never claimed, so the next drain retries them. Logged
+          # because an unexpected rollback is worth seeing, and the reason is
+          # `inspect`ed at a bounded length — the changeset that surfaced this
+          # carried an entire LLM extraction, and an 8KB line to report a dropped
+          # socket is its own defect.
+          {:error, reason} ->
+            Logger.warning(
+              "reactive_dag: #{cell_id} rolled back (#{brief(reason)}); " <>
+                "its keys stay dirty for the next drain"
+            )
+
+            :telemetry.execute(
+              [:reactive_dag, :drain, :cell_failed],
+              %{duration_us: 0},
+              %{cell: cell_id, pass: passes, reason: reason, claimed: []}
+            )
+
+            do_run(plan, opts, passes + 1, cause, steps, t0, [cell_id | failed])
+
           {next_cause, next_steps, next_failed} ->
             do_run(plan, opts, passes + 1, next_cause, next_steps, t0, next_failed)
         end
@@ -529,6 +558,24 @@ defmodule ReactiveDag.Drain do
   # whole-cell pass discovering a new one), and dropping that would be a
   # regression.
   defp forced_prop(keys, changed), do: Enum.uniq(keys ++ changed)
+
+  # A reason at a length a person can read.
+  #
+  # An Ash changeset renders its whole `attributes` map, and for an LLM node that is
+  # the entire extraction — kilobytes of transcript to say "ssl send: closed". The
+  # useful part of any error is its front, so this keeps that and says how much it
+  # dropped rather than pretending the message was short.
+  @brief_limit 400
+
+  defp brief(reason) do
+    text = inspect(reason, limit: 8, printable_limit: 200)
+
+    if String.length(text) > @brief_limit do
+      String.slice(text, 0, @brief_limit) <> "… (truncated)"
+    else
+      text
+    end
+  end
 
   defp timed(fun) do
     t0 = System.monotonic_time(:microsecond)
