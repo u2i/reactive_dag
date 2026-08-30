@@ -98,6 +98,51 @@ defmodule ReactiveDag.DrainTest do
     ])
   end
 
+  describe "a rollback that is not `:cell_failed`" do
+    # A payload write can fail for a reason that has nothing to do with the op —
+    # a lost connection, a constraint. `Frontier.savepoint/1` returns
+    # `{:error, reason}` for whatever the transaction rolled back with, and the
+    # drain matched only the `{:error, {:cell_failed, id}}` shape.
+    #
+    # So a dropped socket crashed the WHOLE drain with a `CaseClauseError` naming
+    # `drain.ex`, and every cell already recomputed that run was lost with it.
+    # Five consecutive scans failed this way in production before it was found.
+    defmodule RollsBackOddly do
+      @behaviour ReactiveDag.Op
+
+      @impl true
+      def recompute(_cell, _keys, _opts \\ []) do
+        # The transaction rolling back UNDERNEATH the op, which is what a failed
+        # payload write does — not `{:error, ...}`, which is the reported-failure
+        # path the drain already contains.
+        Application.get_env(:reactive_dag, :repo).rollback(
+          {:some_other_reason, "ssl send: closed"}
+        )
+      end
+    end
+
+    test "is contained, not raised — the drain finishes and the keys stay dirty" do
+      Frontier.mark_dirty("a", ["k1"], "seed")
+
+      # The drain COMPLETES. Before the fix this raised `CaseClauseError`.
+      assert {:ok, report} = Drain.run(plan(RollsBackOddly))
+
+      # …and the cell that rolled back — "b", which carries the op; "a" is a leaf
+      # that passes its keys through before the op is ever reached — is not
+      # reported as having run.
+      refute "b" in Enum.map(report.steps, & &1.cell)
+      assert "a" in Enum.map(report.steps, & &1.cell), "the leaf ahead of it still ran"
+    end
+
+    test "the keys are still dirty, so the next drain retries them" do
+      Frontier.mark_dirty("a", ["k1"], "seed")
+      {:ok, _} = Drain.run(plan(RollsBackOddly))
+
+      # "b"'s claim was rolled back with its recompute, so it is still dirty.
+      refute Frontier.empty?(), "a rolled-back claim must survive for the retry"
+    end
+  end
+
   describe "cell_start" do
     test "fires BEFORE the cell recomputes, so a slow cell is visible while it runs" do
       # `:step` reports what a cell DID; a cell that spends minutes in an LLM call
