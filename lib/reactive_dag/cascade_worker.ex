@@ -70,7 +70,13 @@ if Code.ensure_loaded?(Oban.Worker) do
         "cell" => to_string(cell),
         "keys" => keys,
         "versions" => Keyword.get(opts, :versions, %{}),
-        "tenant" => Keyword.get(opts, :tenant),
+        # NORMALISED HERE, because the two origination paths disagree: a
+        # `Source` poll passes the plan's tenant verbatim (already `"*"` when
+        # untenanted), while a `dirties_on` write takes it off the changeset and
+        # has `nil`. Both mean "not scoped to one tenant", and letting both
+        # shapes reach the job would make the args — which are the uniqueness
+        # key — differ for identical work.
+        "tenant" => ReactiveDag.Suspension.tenant(opts),
         # The gate decision, made at the write because that is the only moment
         # the ACTOR exists. `gated human?:` says a person's own edit propagates
         # immediately; by the time this job runs there is nobody left to ask.

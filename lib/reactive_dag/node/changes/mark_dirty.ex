@@ -93,7 +93,12 @@ defmodule ReactiveDag.Node.Changes.MarkDirty do
   # rejection, and the staleness is visible in the log while a rejected write is
   # the user's problem.
   defp enqueue(cell, keys, opts) do
-    case enqueuer().(cell, keys, opts) do
+    # RESCUED, not just matched on `{:error, _}`. `Oban.insert/3` RAISES when no
+    # instance is running rather than returning an error tuple — so a promise
+    # not to fail the host's write has to cover the raising path too, or the
+    # promise is only true when the queue is healthy, which is exactly when it
+    # does not matter.
+    case safe_enqueue(cell, keys, opts) do
       {:ok, _job} ->
         :ok
 
@@ -108,6 +113,14 @@ defmodule ReactiveDag.Node.Changes.MarkDirty do
 
         :ok
     end
+  end
+
+  defp safe_enqueue(cell, keys, opts) do
+    enqueuer().(cell, keys, opts)
+  rescue
+    e -> {:error, e}
+  catch
+    :exit, reason -> {:error, {:exit, reason}}
   end
 
   # Overridable so a host can queue the cascade its own way — a different queue,

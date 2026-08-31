@@ -284,20 +284,30 @@ defmodule ReactiveDag.InsightsTest do
       assert ReactiveDag.Test.FakeSuspensionRepo.any?()
     end
 
-    # DELETED: "pending/1 ignores dirty cells this plan doesn't know".
-    #
-    # It marked a cell no plan knew and asserted `pending/1` filtered it out —
-    # meaningful when the frontier was one shared table that every plan read,
-    # where leaking another graph's cells into a dashboard was a real risk.
-    #
-    # `pending/1` deliberately does not do this any more. Its docstring says it
-    # lists "resources with work SUSPENDED", scoped by TENANT and nothing else,
-    # and it maps suspension points straight through without consulting
-    # `plan.cells`. That is a defensible choice — a suspension that no plan
-    # claims is exactly the thing an operator most wants to see, not hide — but
-    # it means the assertion is now false by design rather than by accident, so
-    # the test is removed rather than inverted into a guard on behaviour nobody
-    # has decided to keep.
+    test "pending/1 ignores suspensions this plan does not know" do
+      # The suspension table is ONE table serving every graph a host assembles,
+      # so an unfiltered read reports another graph's stopped work as this
+      # plan's — a dashboard for the finance graph showing the crawler's
+      # backlog, with no way for a reader to tell.
+      #
+      # This was briefly true during the rewrite, which is how it was caught.
+      p = plan()
+
+      ReactiveDag.Suspension.record(
+        %{
+          tenant: "*",
+          waiting: "some_other_graph",
+          resource: "some_other_graph",
+          row_uuid: "x"
+        },
+        "v1",
+        :expensive
+      )
+
+      assert Insights.pending(p) == [],
+             "a suspension belonging to a cell this plan has never heard of " <>
+               "must not appear in its pending list"
+    end
 
     test "status reads degrade rather than crash when a node's rows are unreadable" do
       # a dashboard should render STRUCTURE even where a read fails — a resource
