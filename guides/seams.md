@@ -11,7 +11,7 @@ call site:
 
 ```elixir
 plan = ReactiveDag.Node.graph([MyApp.FiscalLines, MyApp.BudgetRollups])
-{:ok, report} = ReactiveDag.Drain.run(plan)
+{:ok, report} = ReactiveDag.Cascade.run(plan, [%{cell: "expenses", keys: ["e1"]}])
 ```
 
 `run/2`'s only option is `:max_passes`, a runaway guard. Everything else the
@@ -143,7 +143,7 @@ cells = [
 ]
 
 plan = ReactiveDag.Graph.build(cells)
-ReactiveDag.Drain.run(plan)
+ReactiveDag.Cascade.run(plan, origins)
 ```
 
 The cells are hand-built; the engine is the same one. `meta.compute` is where

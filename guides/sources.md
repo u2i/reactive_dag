@@ -366,7 +366,7 @@ def refresh(source, plan) do
     ReactiveDag.Graph.dirty_parents(plan, leaf, result.changed)
   end
 
-  ReactiveDag.Drain.run(plan)
+  ReactiveDag.Cascade.run(plan)
   {:ok, result}
 end
 ```
@@ -605,7 +605,7 @@ than extending this one:
 def perform(%Oban.Job{args: %{"cell" => cell, "run_id" => run}}) do
   MyApp.Audit.with_audit(cell, run, fn ->
     {:ok, result} = ReactiveDag.Source.refresh(plan(), cell, reason: "scan:#{run}")
-    {:ok, report} = ReactiveDag.Drain.run(plan())
+    {:ok, report} = ReactiveDag.Cascade.run(plan())
     MyApp.Runs.record(run, result, report)
   end)
 end
@@ -721,7 +721,7 @@ That makes the source **a node in the graph**, which buys three things:
 ```elixir
 plan = MyApp.Dag.plan()
 {:ok, _results} = ReactiveDag.Source.poll_all(plan)   # poll phase
-{:ok, report} = ReactiveDag.Drain.run(plan)           # then drain
+{:ok, report} = ReactiveDag.Cascade.run(plan, [%{cell: "expenses", keys: ["e1"]}])           # then drain
 ```
 
 - **Everything downstream is an ordinary edge.** A node reading `over:
@@ -811,7 +811,7 @@ end
 
 A create/update/destroy marks that record's key dirty on its own cell, so the
 next drain picks it up. Without it, a host must call
-`ReactiveDag.Frontier.mark_dirty/3` at every write site — and a missed call is
+`ReactiveDag.CascadeWorker.enqueue/3` at every write site — and a missed call is
 silent staleness, which is the failure this removes.
 
 **The mark is inside the write's transaction.** It runs as an `after_action`

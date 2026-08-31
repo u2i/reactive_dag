@@ -176,7 +176,7 @@ node shape.
 ```elixir
 plan = ReactiveDag.Node.graph([MyApp.FiscalLines, MyApp.BudgetRollups])
 
-{:ok, report} = ReactiveDag.Drain.run(plan)
+{:ok, report} = ReactiveDag.Cascade.run(plan, [%{cell: "expenses", keys: ["e1"]}])
 
 report.steps
 # one entry per cell recompute, in execution order:
@@ -184,7 +184,7 @@ report.steps
 #   claimed: ["fy24"], changed: ["fy24"], pass: 1, duration_us: 812}
 ```
 
-The `%ReactiveDag.Drain.Report{}` is the drain's processing trace — what ran,
+The `%ReactiveDag.Report{}` is the processing trace — what ran,
 why (`triggered_by` reconstructs the causal tree), what actually changed, and
 how long each step took. Persist it wherever your runs live (a job's meta, a
 run table): the library reports, the host records. For progress *during* a long
@@ -228,7 +228,7 @@ drains, and `dirties_on` alone schedules nothing:
 
 ```elixir
 MyApp.FiscalLines |> Ash.Changeset.for_create(:create, attrs) |> Ash.create!()
-ReactiveDag.Drain.run(plan)                                  # ← still yours
+ReactiveDag.Cascade.run(plan, origins)                       # ← still yours
 ```
 
 For a graph with a polling source that is fine — the next sweep picks it up. For
@@ -262,7 +262,7 @@ the leaf's rows, then mark what changed:
 # 2. mark the changed keys dirty upward
 ReactiveDag.Graph.dirty_parents(plan, "fiscal_lines", changed)
 # 3. drain
-ReactiveDag.Drain.run(plan)
+ReactiveDag.Cascade.run(plan, origins)
 ```
 
 For a scanner with a real contract (id, leaf binding, failure containment),

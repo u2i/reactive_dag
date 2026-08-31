@@ -40,7 +40,7 @@ defmodule ReactiveDag.Op do
   and never interpreted by the library.
 
   Tokens, cache hits, retries, rows scanned are all just keys.
-  `ReactiveDag.Drain.Report.total/2` sums one across the run; `by/2` breaks it
+  `ReactiveDag.Report.total/2` sums one across the run; `by/2` breaks it
   down when the value is a `%{bucket => number}` map rather than a bare number,
   which is how a graph running several models reports per-model cost.
   """

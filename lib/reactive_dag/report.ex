@@ -1,7 +1,7 @@
-defmodule ReactiveDag.Drain.Report do
+defmodule ReactiveDag.Report do
   @moduledoc """
   What a drain ACTUALLY did — the processing trace, returned by
-  `ReactiveDag.Drain.run/2`.
+  `ReactiveDag.Cascade.run/3`.
 
   The drain already knows everything worth recording as it works: which cell
   it claimed, what the recompute reported changed, which cell's propagation

@@ -70,7 +70,11 @@ if Code.ensure_loaded?(Oban.Worker) do
         "cell" => to_string(cell),
         "keys" => keys,
         "versions" => Keyword.get(opts, :versions, %{}),
-        "tenant" => Keyword.get(opts, :tenant)
+        "tenant" => Keyword.get(opts, :tenant),
+        # The gate decision, made at the write because that is the only moment
+        # the ACTOR exists. `gated human?:` says a person's own edit propagates
+        # immediately; by the time this job runs there is nobody left to ask.
+        "skip_gate" => Keyword.get(opts, :skip_gate, false)
       }
       |> then(&if opts[:plan_mfa], do: Map.put(&1, "plan_mfa", opts[:plan_mfa]), else: &1)
       |> __MODULE__.new(Keyword.take(opts, [:schedule_in, :priority, :queue]))
@@ -92,6 +96,11 @@ if Code.ensure_loaded?(Oban.Worker) do
           nil -> []
           tenant -> [tenant: tenant]
         end
+
+      opts =
+        if Map.get(args, "skip_gate", false),
+          do: Keyword.put(opts, :skip_gate, Map.fetch!(args, "cell")),
+          else: opts
 
       {:ok, report} = Cascade.run(plan, [origin], opts)
 

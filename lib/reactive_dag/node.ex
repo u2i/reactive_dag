@@ -103,7 +103,7 @@ defmodule ReactiveDag.Node do
   resources; the substrate reads only the `reactive` block. Then:
 
       plan = ReactiveDag.Node.graph([FlowMonth, FiscalLines, …], for_each: &fetch/1)
-      ReactiveDag.Drain.run(plan)
+      ReactiveDag.Cascade.run(plan, origins)
 
   Nothing else to wire: the drain reads what each node declared.
 
@@ -1377,7 +1377,7 @@ defmodule ReactiveDag.Node do
           "make ordinary Ash writes trigger the cascade: a `:create`/`:update`/`:destroy` " <>
             "on THIS resource marks the written record's key dirty on this cell, so the " <>
             "next drain picks it up. Without it a host must call " <>
-            "`ReactiveDag.Frontier.mark_dirty/3` at every write site, and a missed call " <>
+            "`ReactiveDag.CascadeWorker.enqueue/3` at every write site, and a missed call " <>
             "is silent staleness. Wired as an `after_action` change, so the mark runs " <>
             "INSIDE the write's transaction — a rolled-back write leaves no dirty key, " <>
             "and a committed one always leaves one. (A NOTIFIER cannot promise that: " <>
@@ -1418,7 +1418,7 @@ defmodule ReactiveDag.Node do
         required: false,
         default: false,
         doc:
-          "with `dirties_on` or `augmented_by`, enqueue a `ReactiveDag.DrainWorker` job in the SAME " <>
+          "with `dirties_on` or `augmented_by`, enqueue a `ReactiveDag.CascadeWorker` job in the SAME " <>
             "transaction as the mark — so a write is promptly reflected rather than " <>
             "merely durable. Without it the mark waits for whatever drains next (in " <>
             "practice the hourly sweep), which for a write-fed leaf with no polling " <>
@@ -1651,7 +1651,7 @@ defmodule ReactiveDag.Node do
   defp with_tenant(%ReactiveDag.Plan{} = plan, opts) do
     case Keyword.get(opts, :tenant) do
       nil -> plan
-      tenant -> %{plan | tenant: ReactiveDag.Frontier.tenant(tenant: tenant)}
+      tenant -> %{plan | tenant: ReactiveDag.Suspension.tenant(tenant: tenant)}
     end
   end
 

@@ -66,7 +66,7 @@ defmodule ReactiveDag.Cascade do
 
   require Logger
 
-  alias ReactiveDag.{Cell, Drain.Report, Graph, Plan, Suspension}
+  alias ReactiveDag.{Cell, Report, Graph, Plan, Suspension}
 
   @max_steps 100_000
 
@@ -325,7 +325,7 @@ defmodule ReactiveDag.Cascade do
 
         do_walk(plan, pending, opts, cause, steps, suspended, n + 1, t0)
 
-      reason = suspends_for(cell) ->
+      reason = suspends_for(cell, opts) ->
         points = suspend(plan, cell_id, work, reason)
         do_walk(plan, pending, opts, cause, steps, points ++ suspended, n + 1, t0)
 
@@ -494,6 +494,20 @@ defmodule ReactiveDag.Cascade do
 
   # `:expensive` wins when a node declares both: there is no point asking a
   # person to approve work that has not been done yet.
+  #
+  # `opts[:skip_gate]` names a cell whose APPROVAL gate this cascade clears —
+  # the origin of a change a person made themselves. It never clears
+  # `:expensive`: who wrote the row has no bearing on how long the work takes.
+  defp suspends_for(cell, opts) do
+    case suspends_for(cell) do
+      :approval ->
+        if Keyword.get(opts, :skip_gate) == cell.id, do: nil, else: :approval
+
+      other ->
+        other
+    end
+  end
+
   defp suspends_for(%Cell{meta: %{suspends: reasons}}) when is_map(reasons) do
     cond do
       Map.has_key?(reasons, :expensive) -> :expensive

@@ -59,7 +59,7 @@ if Code.ensure_loaded?(Oban.Worker) do
     looks inside.
 
     Where that is not enough, call `ReactiveDag.Source.refresh/3` and
-    `ReactiveDag.Drain.run/2` directly: that is all this module does. It exists
+    `ReactiveDag.Cascade.run/3` directly: that is all this module does. It exists
     to save you writing the loop, not to stop you writing a different one.
 
     ## Watching a sweep
@@ -153,7 +153,7 @@ if Code.ensure_loaded?(Oban.Worker) do
 
     require Logger
 
-    alias ReactiveDag.{Drain, Source}
+    alias ReactiveDag.Source
 
     @impl Oban.Worker
     def perform(%Oban.Job{args: %{"sweep" => true} = args}) do
@@ -180,7 +180,7 @@ if Code.ensure_loaded?(Oban.Worker) do
       # two different tenants polling their own upstreams is not that, and one
       # global lock would make them queue behind each other — the opposite of
       # why a graph is per tenant.
-      case ReactiveDag.Frontier.with_lock(fn -> sweep(plan, opts, args) end,
+      case ReactiveDag.Lock.with_lock(fn -> sweep(plan, opts, args) end,
              scope: lock_scope(plan)
            ) do
         {:ok, result} ->
@@ -223,17 +223,25 @@ if Code.ensure_loaded?(Oban.Worker) do
 
         case polled do
           {:ok, result} ->
-            # Drain even when nothing changed: another source may have marked
-            # cells this job is now the first to reach, and an empty frontier is
-            # a no-op anyway.
-            {:ok, report} = Drain.run(plan)
+            # NO DRAIN HERE. `Source.refresh/3` enqueues a cascade per changed
+            # leaf, in the poll's own transaction — so the propagation is
+            # already scheduled by the time this returns, and running a second
+            # engine over the same graph would duplicate it.
+            #
+            # This also removes the old "drain even when nothing changed" step:
+            # there is no shared queue left for another source to have filled,
+            # so an unchanged poll now costs nothing at all.
 
             :telemetry.execute(
               [:reactive_dag, :scan, :stop],
               %{
                 duration_us: System.monotonic_time(:microsecond) - t0,
                 changed: length(result.changed),
-                passes: report.passes
+                # `passes: 0` — a scan no longer drains. It observes and
+                # enqueues; the cascades it started report themselves under
+                # `[:reactive_dag, :cascade, :stop]`. Reporting a borrowed
+                # number here would say this job did work it did not do.
+                passes: 0
               },
               # `args` verbatim: a scan is often one leg of a RUN whose id the
               # enqueuer chose, and only the job carries it. Without this a
@@ -257,7 +265,7 @@ if Code.ensure_loaded?(Oban.Worker) do
                 tenant: plan.tenant,
                 unreachable: result.unreachable,
                 detail: result[:detail] || %{},
-                report: report,
+                report: nil,
                 # The poll and the drain as ONE value — see `ReactiveDag.ScanRun`.
                 # The flat keys above stay for handlers written before it; this
                 # is what a new one should read, and it is the only thing that
@@ -268,7 +276,7 @@ if Code.ensure_loaded?(Oban.Worker) do
                   changed: result.changed,
                   unreachable: result.unreachable,
                   detail: result[:detail] || %{},
-                  report: report,
+                  report: nil,
                   duration_us: System.monotonic_time(:microsecond) - t0
                 }
               }
@@ -379,8 +387,8 @@ if Code.ensure_loaded?(Oban.Worker) do
 
       case polled do
         {:ok, results} ->
-          {:ok, report} = Drain.run(plan)
-
+          # As above: `poll_all/2` has already enqueued a cascade per changed
+          # leaf.
           changed =
             results |> Map.values() |> Enum.flat_map(&Map.get(&1, :changed, [])) |> Enum.uniq()
 
@@ -389,7 +397,7 @@ if Code.ensure_loaded?(Oban.Worker) do
             %{
               duration_us: System.monotonic_time(:microsecond) - t0,
               changed: length(changed),
-              passes: report.passes
+              passes: 0
             },
             # `results` in full, not just its keys. It is `%{module => result}`
             # — each source's own `changed`, `unreachable` and whatever else it
@@ -406,7 +414,7 @@ if Code.ensure_loaded?(Oban.Worker) do
               tenant: plan.tenant,
               sources: Map.keys(results),
               results: results,
-              report: report
+              report: nil
             }
           )
 

@@ -15,13 +15,13 @@ config :reactive_dag, repo: MyApp.Repo
 
 | key | default | required? | read by |
 |---|---|---|---|
-| [`:repo`](#repo) | — | **yes** | `Frontier` |
-| [`:dirty_table`](#dirty_table) | `"reactive_dag_dirty"` | no | `Frontier` |
+| [`:repo`](#repo) | — | **yes** | `Suspension` |
 | [`:suspension_table`](#suspension_table) | `"reactive_dag_suspension"` | no | `Suspension`, `Migration` |
 | [`:cascade_timeout`](#cascade_timeout) | `30_000` | no | `Suspension` |
+| [`:dirty_table`](#dirty_table) | `"reactive_dag_dirty"` | no | `Migration.drop_dirty/1` |
 | [`:plan_mfa`](#plan_mfa) | — | only with `ScanWorker` | `ScanWorker` |
 | [`:insights_keep`](#insights_keep) | `20` | no | `Insights` |
-| [`:drain_enqueuer`](#drain_enqueuer) | `DrainWorker.enqueue/0` | no | `dirties_on schedule_drain:` |
+| [`:cascade_enqueuer`](#cascade_enqueuer) | `CascadeWorker.enqueue/3` | no | `dirties_on`, `augmented_by`, `Source` |
 | [`:around_poll`](#around_poll) | — | no | `ScanWorker` |
 
 ---
@@ -29,8 +29,8 @@ config :reactive_dag, repo: MyApp.Repo
 ### `:repo`
 
 Your AshPostgres repo. The library goes through it with raw SQL for the one
-table it owns — the dirty frontier — because claim-as-delete
-(`DELETE … RETURNING`) and the coalescing upserts don't express cleanly as Ash
+table it owns — the suspension table — because the reads and writes there are
+small, hot and shaped for a queue-like access pattern rather than for Ash
 actions.
 
 ```elixir
@@ -39,22 +39,6 @@ config :reactive_dag, repo: MyApp.Repo
 
 **The only required key.** Omitting it raises on the *first query* — which may
 be a long way into a deploy — so validate at boot instead (below).
-
-### `:dirty_table`
-
-The physical table name for the frontier.
-
-```elixir
-config :reactive_dag, dirty_table: "my_existing_dirty"
-```
-
-This exists so **a host adopting the library keeps its table without a
-rename** — both current hosts grew their own frontier table before the library
-existed. On a green-field app, leave it alone.
-
-The name is the one identifier SQL cannot parameterise, so it is validated
-against an identifier grammar at read time: a typo fails loudly rather than as
-a syntax error deep inside a query.
 
 ### `:suspension_table`
 
@@ -88,6 +72,22 @@ legitimately runs for minutes". That is exactly the condition that let a
 nine-minute extraction hold a connection until the database closed it. Raising
 this back to `:infinity` restores that failure.
 
+### `:dirty_table`
+
+The OLD queue table, kept only so a host upgrading can drop it.
+
+```elixir
+config :reactive_dag, dirty_table: "my_existing_dirty"
+```
+
+Read by nothing at runtime — `ReactiveDag.Migration.drop_dirty/1` is its only
+consumer. Set it if your queue table was not called `reactive_dag_dirty`;
+otherwise ignore it and it disappears once you have dropped the table.
+
+Sequence the drop deliberately: drain the old queue to empty on the old code,
+deploy, then drop. An undrained mark is outstanding work, and the queue was the
+only record that it was pending.
+
 ### `:plan_mfa`
 
 How `ReactiveDag.ScanWorker` builds the plan it scans.
@@ -103,25 +103,30 @@ one app schedule scans over more than one graph.
 
 Only read by `ScanWorker`. A host scheduling its own polls never needs it.
 
-### `:drain_enqueuer`
+### `:cascade_enqueuer`
 
-How `schedule_drain: true` queues the drain that consumes a `dirties_on` mark.
+How a write queues the cascade that propagates it.
 
 ```elixir
-config :reactive_dag, drain_enqueuer: fn -> MyApp.DrainJob.enqueue() end
+config :reactive_dag, cascade_enqueuer: fn cell, keys, opts -> MyApp.Job.enqueue(cell, keys) end
 ```
 
-The default enqueues `ReactiveDag.DrainWorker` on its `:drain` queue, which is
-almost always what you want. Override it when the drain needs to be YOUR job —
-a different queue, a longer debounce, or a wrapper that records the run id your
-activity page groups by.
+The default enqueues `ReactiveDag.CascadeWorker`, which is almost always what
+you want. Override it when the cascade needs to be YOUR job — a different
+queue, a longer debounce, or a wrapper that records the run id your activity
+page groups by.
 
 Called from inside the write's transaction, so it must be cheap: an INSERT, not
-the drain itself. Must return `{:ok, term}` or `{:error, term}`; an error is
-logged and swallowed, because the mark is already durable and a queue being down
-should not fail a user's write.
+the cascade itself. Must return `{:ok, term}` or `{:error, term}`.
 
-Only read when a node declares `dirties_on … schedule_drain: true`.
+An error is logged and swallowed rather than raised, because a queue being down
+should not fail a user's write. **This is a real change from the mark it
+replaced**: a mark was durable on its own, so a failed enqueue only delayed
+propagation. A failed enqueue now means nothing downstream recomputes until
+that row is written again or a scan re-observes it. The log line says so
+explicitly.
+
+Read by `dirties_on`, `augmented_by`, and `ReactiveDag.Source` polls.
 
 ### `:insights_keep`
 
@@ -132,12 +137,11 @@ window.
 config :reactive_dag, insights_keep: 50
 ```
 
-Only relevant if you call `Insights.record/1` (neither the scan nor the drain
+Only relevant if you call `Insights.record/1` (neither a scan nor a cascade
 persists anything on its own — the library reports, the host records). It takes
-a `%ReactiveDag.ScanRun{}` (a scan: the poll AND the drain it triggered) or a
-bare `%ReactiveDag.Drain.Report{}` (a drain triggered directly), and retains a
-run either way — so a log line can show the poll's duration, changed keys, cost
-and `unreachable` list rather than only the drain's much smaller share.
+a `%ReactiveDag.ScanRun{}` or a bare `%ReactiveDag.Report{}`, and retains a run
+either way — so a log line can show the poll's duration, changed keys, cost and
+`unreachable` list rather than only the propagation's much smaller share.
 
 The buffer is per-BEAM-node, in memory, and lost on restart; it exists so a
 dashboard has something to show without the host building storage. A host
@@ -159,7 +163,7 @@ end
 ** (ReactiveDag.Config.Error) reactive_dag is misconfigured:
 
   * `:repo` is not set (required) — add `config :reactive_dag, repo: MyApp.Repo`
-  * `:dirty_table` "my dirty" is not a valid SQL identifier
+  * `:suspension_table` "my suspensions" is not a valid SQL identifier
 ```
 
 It reports **every** problem, not the first — a config with two mistakes
@@ -177,11 +181,12 @@ queried would make booting depend on the database being reachable.
 
 ## What is *not* configured here
 
-- **Scheduling** — when to call `Drain.run/2` is the host's. See
+- **Scheduling** — when to cascade is the host's, though `dirties_on`,
+  `augmented_by` and a `Source` poll all enqueue one for you. See
   [Getting started](getting-started.html).
 - **How a node recomputes, and how its changes propagate** — declared in the
   node's `reactive` block and read off the plan, not configured and not passed
-  per call. `run/2`'s only option is `:max_passes`.
+  per call.
 - **Per-node behaviour** — `payload_key`, `payload_action`, `key_rule`,
   `recompute_by` and the rest are declared in a resource's `reactive` block, not
   in application config. See [Authoring nodes](authoring-nodes.html).

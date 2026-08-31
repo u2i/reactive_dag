@@ -663,7 +663,7 @@ defmodule ReactiveDag.Node.Payload do
     ensure_destroy!(resource, action)
 
     # `groups:` — the unit's own column VALUES, when the caller derived them from a
-    # change (`Drain.derive_units/4`). With them a row is found by its columns and
+    # change (`Cascade.derive_units/4`). With them a row is found by its columns and
     # needs no key column at all, which is what lets a node drop the stored
     # `"|"`-joined key it used to be found by.
     #

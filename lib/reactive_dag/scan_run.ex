@@ -4,7 +4,7 @@ defmodule ReactiveDag.ScanRun do
 
   A scan is two phases that always happen together and were reported
   separately. The poll says what it fetched, what it could not reach and what it
-  cost; the drain returns a `ReactiveDag.Drain.Report` saying what recomputed
+  cost; the drain returns a `ReactiveDag.Report` saying what recomputed
   downstream. A host wanting "what happened when this ran" had to collect both
   from one telemetry payload and know which half answered which question.
 
@@ -34,7 +34,7 @@ defmodule ReactiveDag.ScanRun do
   which, rather than making every caller test for nil.
   """
 
-  alias ReactiveDag.Drain.Report
+  alias ReactiveDag.Report
 
   @typedoc """
   The poll half — what `ReactiveDag.Source.refresh/3` returned, plus the cell it
