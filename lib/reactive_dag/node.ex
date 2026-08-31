@@ -1269,7 +1269,18 @@ defmodule ReactiveDag.Node do
           "how a child key maps to this cell's key on propagation: `:identity` (same " <>
             "key) or `:all` (whole-cell). Group-grain claims (`:group`, " <>
             "`{:group, from: :key}`) are declared ON the combinator — the claim grain " <>
-            "and the computation it must agree with belong in one unit."
+            "and the computation it must agree with belong in one unit.\n\n" <>
+            "`:identity` is the DEFAULT and it is an assertion, not a neutral " <>
+            "setting: it says a child's key names a row of THIS cell. That is false " <>
+            "wherever a node re-keys — a `union` whose output is keyed by something " <>
+            "other than its inputs' keys, or a fold grouping on a column its own " <>
+            "computation derives. Such a cell receives claims naming rows it does not " <>
+            "have, recomputes nothing, and leaves stale rows behind.\n\n" <>
+            "The old drain hid this by reaching those cells with whole-cell claims " <>
+            "often enough to paper over it; a cascade propagates the actual keys, so " <>
+            "the declaration now has to be honest. A re-keying node wants `:all` " <>
+            "(correct, coarse) or a `:group` grain on its combinator (correct, " <>
+            "precise) — never the `:identity` default it gets by saying nothing."
       ],
       leaf?: [type: :boolean, default: false, doc: "true for a source-fed leaf (no compute)"],
       retain_if_vanished: [

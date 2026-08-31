@@ -79,6 +79,12 @@ defmodule ReactiveDag.ScanRun do
   `false` for an unscannable source, which completes without draining. A host
   rendering "0 passes" for that would be reporting a drain that never happened.
   """
+  # `@deprecated`, not just `@doc deprecated:` — the latter only marks the docs,
+  # and what matters here is that a HOST compiling against this gets told. Its
+  # "did the work propagate?" check silently became a constant `false` when
+  # scans stopped propagating, and a constant that reads as a question is worse
+  # than a missing function.
+  @deprecated "A scan no longer propagates; read the cascade's own report instead"
   @doc deprecated: "A scan no longer propagates; this is false for any run the library builds."
   @spec drained?(t()) :: boolean()
   def drained?(%__MODULE__{report: %Report{}}), do: true

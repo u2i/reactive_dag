@@ -24,6 +24,18 @@ defmodule ReactiveDag.Test.FakeSuspensionRepo do
   no-transaction path, and a test asserting anything about transaction
   boundaries passes for the wrong reason.
 
+  ## Why this ships in `lib/` rather than `test/support/`
+
+  Because it is for HOSTS, and Hex does not package `test/support`. A dependent
+  that wanted it had to hand-copy the file — which is exactly what makes a copy
+  drift, and one already did: the frontier's INSERT grew a column and the
+  copies broke three releases later, in a repo whose own tests had passed the
+  whole time.
+
+  Shipping it costs a module in the compiled artifact and removes a recurring
+  failure mode for every dependent. It has no runtime callers and pulls in
+  nothing.
+
   ## Use
 
       setup do
