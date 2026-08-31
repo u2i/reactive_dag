@@ -191,6 +191,10 @@ defmodule ReactiveDag.Cascade do
     keys = Enum.sort(Map.get(origin, :keys, []))
     versions = Map.get(origin, :versions, %{})
 
+    # Same resolution the in-walk path does: a resumption is handed the versions
+    # its suspensions recorded, and they are references until read.
+    origin_diffs = Map.merge(resolve_versions(plan, cell, versions), Map.get(origin, :diffs, %{}))
+
     :telemetry.execute(
       [:reactive_dag, :cascade, :cell_start],
       %{claimed: length(keys), system_time: System.system_time()},
@@ -200,7 +204,15 @@ defmodule ReactiveDag.Cascade do
     {{outcome, diffs, new_versions}, us} =
       timed(fn ->
         ReactiveDag.Node.Payload.collecting_diffs_and_versions(fn ->
-          recompute(cell, keys, Keyword.merge(opts, Plan.frontier_opts(plan)))
+          {narrowed, claimed_groups} = derive_units(plan, cell_id, keys, origin_diffs)
+
+          recompute(
+            cell,
+            narrowed,
+            opts
+            |> Keyword.merge(Plan.frontier_opts(plan))
+            |> Keyword.put(:claimed_groups, claimed_groups)
+          )
         end)
       end)
 
@@ -261,7 +273,7 @@ defmodule ReactiveDag.Cascade do
 
             changed ->
               plan
-              |> Graph.dirty_parents(cell_id, changed, ReactiveDag.Node.KeyRule, diffs)
+              |> Graph.dirty_parents(cell_id, changed, ReactiveDag.Node.KeyRule, Map.merge(origin_diffs, diffs))
               |> Enum.map(fn {parent_id, mapped} ->
                 %{
                   cell: parent_id,
@@ -341,7 +353,16 @@ defmodule ReactiveDag.Cascade do
 
   defp recompute_and_queue(plan, cell_id, cell, work, opts, pending, steps, cause, n) do
     keys = Enum.sort(work.keys)
-    diffs = work.diffs
+
+    # A version REFERENCE has to become a diff before this cell can narrow by
+    # it. The reference travels through the walk because it is small and
+    # durable; the diff is read here, once, at the moment the cell needs it.
+    #
+    # Missing this was a silent bug: a parent handed a version but no diff falls
+    # straight through `derive_units/4`'s `map_size(diffs) == 0` clause and
+    # recomputes its claimed keys — which for a fold means claiming the CHILD's
+    # row key as if it were a unit, and producing nothing.
+    diffs = Map.merge(resolve_versions(plan, cell, work.versions), work.diffs)
 
     {keys, claimed_groups} = derive_units(plan, cell_id, keys, diffs)
 
@@ -630,6 +651,55 @@ defmodule ReactiveDag.Cascade do
           units -> {units, derived}
         end
     end
+  end
+
+  # A version reference was written by the cell whose ROW changed, so the reader
+  # that resolves it is that cell's — this cell for its own write, one of its
+  # INPUTS for a propagated change. Try this cell first, then its inputs; a
+  # reference nothing can read leaves the claim un-narrowed rather than failing
+  # it.
+  defp resolve_versions(_plan, nil, _versions), do: %{}
+
+  defp resolve_versions(plan, cell, versions) when map_size(versions) > 0 do
+    readers =
+      [cell.meta[:version_diff] | Enum.map(cell.inputs, &input_reader(plan, &1))]
+      |> Enum.reject(&is_nil/1)
+      |> Enum.uniq()
+
+    if readers == [] do
+      %{}
+    else
+      for {k, vid} <- versions,
+          is_binary(vid),
+          diff = Enum.find_value(readers, &read_version(&1, vid)),
+          into: %{} do
+        {k, diff}
+      end
+    end
+  end
+
+  defp resolve_versions(_plan, _cell, _versions), do: %{}
+
+  defp input_reader(plan, input_id) do
+    case Map.get(plan.cells, input_id) do
+      nil -> nil
+      input -> input.meta[:version_diff]
+    end
+  end
+
+  defp read_version(reader, version_id) do
+    case reader do
+      {m, f, a} -> apply(m, f, [version_id | a])
+      fun when is_function(fun, 1) -> fun.(version_id)
+    end
+  rescue
+    e ->
+      Logger.warning(
+        "reactive_dag: version_diff reader failed for #{inspect(version_id)} " <>
+          "(#{Exception.message(e)}); this claim will not be narrowed"
+      )
+
+      nil
   end
 
   defp grain_of(nil), do: nil

@@ -235,13 +235,29 @@ defmodule ReactiveDag.Insights do
   `ReactiveDag.Suspension.points/1` carries the counts and ages behind these.
   """
   @spec pending(Plan.t()) :: [String.t()]
-  def pending(%Plan{} = plan) do
+  def pending(%Plan{cells: cells} = plan) do
     safe(
       fn ->
+        # FILTERED TO THIS PLAN. The suspension table is shared — one database
+        # serves every graph a host assembles — so an unfiltered read reports
+        # another graph's stopped work as this one's. Matching on both the cell
+        # id and the resource name because `waiting` holds whichever of the two
+        # identified the node.
+        known =
+          cells
+          |> Enum.flat_map(fn {id, cell} ->
+            case cell.meta[:resource] do
+              nil -> [to_string(id)]
+              resource -> [to_string(id), inspect(resource)]
+            end
+          end)
+          |> MapSet.new()
+
         plan
         |> Plan.frontier_opts()
         |> ReactiveDag.Suspension.points()
         |> Enum.map(& &1.point.waiting)
+        |> Enum.filter(&MapSet.member?(known, &1))
         |> Enum.uniq()
         |> Enum.sort()
       end,

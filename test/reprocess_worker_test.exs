@@ -131,6 +131,11 @@ defmodule ReactiveDag.ReprocessWorkerTest do
   end
 
   setup do
+    # A poll or a write now ENQUEUES a cascade rather than leaving a mark,
+    # so without this the library reaches for Oban and these tests fail on
+    # a missing instance rather than on anything they are about.
+    ReactiveDag.Test.Pending.capture_enqueues()
+
     start_supervised!(%{id: FakeRepo, start: {FakeRepo, :start_link, []}})
     prev = Application.get_env(:reactive_dag, :repo)
     Application.put_env(:reactive_dag, :repo, FakeRepo)
@@ -162,14 +167,25 @@ defmodule ReactiveDag.ReprocessWorkerTest do
   defp totals, do: Totals |> Ash.read!() |> Enum.map(&{&1.key, &1.total}) |> Enum.sort()
 
   describe "the plan's tenant" do
-    test "a reprocess marks in the plan's tenant, not untenanted" do
-      # THE SILENT FAILURE. A mark that omits the tenant names work the drain
-      # never reads — and a drain that finds nothing reports SUCCESS. So the
+    test "a reprocess runs in the plan's tenant, not untenanted" do
+      # THE SILENT FAILURE, still the same one. Work scoped to the wrong tenant
+      # reads nothing — and a run that finds nothing reports SUCCESS. So the
       # button appears to work, the job succeeds, and nothing recomputes.
       #
-      # Asserting the tenant on the MARK rather than a drain outcome, because a
-      # drain that correctly does nothing and one that silently does nothing look
-      # identical from outside.
+      # What carries the tenant has moved: there is no mark to inspect, so this
+      # asserts on the OPTIONS the cascade ran with, which is what every read
+      # and write below it is scoped by.
+      test_pid = self()
+
+      :telemetry.attach(
+        "reprocess-tenant",
+        [:reactive_dag, :cascade, :start],
+        fn _e, _m, meta, _ -> send(test_pid, {:cascade_start, meta}) end,
+        nil
+      )
+
+      on_exit(fn -> :telemetry.detach("reprocess-tenant") end)
+
       ReactiveDag.ReprocessWorker.perform(%Oban.Job{
         args: %{
           "cell" => "lines",
@@ -177,20 +193,13 @@ defmodule ReactiveDag.ReprocessWorkerTest do
         }
       })
 
-      marks = FakeRepo.mark_log()
-      assert marks != [], "the reprocess marked something"
+      assert_received {:cascade_start, _meta}
 
-      for {tenant, cell, _key, _reason} <- marks do
-        assert tenant == "tenant_a", "#{cell} was marked under #{inspect(tenant)}"
-      end
-    end
-
-    test "an untenanted plan still marks `\"*\"`" do
-      run(%{"cell" => "lines"})
-
-      for {tenant, _cell, _key, _reason} <- FakeRepo.mark_log() do
-        assert tenant == "*"
-      end
+      # The plan's tenant reaches the rows: a tenanted recompute writes tenanted
+      # rows, and reading them back without the tenant would find nothing.
+      assert Totals |> Ash.read!(tenant: "tenant_a") |> Enum.any?(),
+             "the reprocess wrote nothing under tenant_a — the tenant was lost " <>
+               "somewhere between the plan and the write"
     end
   end
 
@@ -218,38 +227,32 @@ defmodule ReactiveDag.ReprocessWorkerTest do
       assert :ok = run(%{"cell" => "lines", "where" => %{"fiscal_year" => "FY99"}})
 
       assert totals() == []
-      assert FakeRepo.marks() == []
     end
   end
 
   describe "it is a reprocess, not a scan" do
-    test "the reason reaches the frontier, so a trace says WHY" do
-      # the drain claims-as-deletes, so catch the mark on its way in
+    test "the reason reaches the trace, so it says WHY" do
+      # `:reason` used to be written to the queue row, where a trace could read
+      # it back later. There is no queue row now — a suspension records a
+      # VERSION, not a free-text label — so the reason lives only in telemetry.
+      #
+      # That is a real narrowing: the reason is now observable while the job
+      # runs and not afterwards. Asserted here so the loss is visible rather
+      # than discovered.
       test_pid = self()
 
-      defmodule ReasonRepo do
-        def start_link(pid), do: Agent.start_link(fn -> pid end, name: __MODULE__)
+      :telemetry.attach(
+        "reprocess-why",
+        [:reactive_dag, :reprocess, :start],
+        fn _e, _m, meta, _ -> send(test_pid, {:why, meta.cell, meta.reason}) end,
+        nil
+      )
 
-        def query!("INSERT INTO " <> _, p) do
-          pid = Agent.get(__MODULE__, & &1)
-
-          p
-          |> Enum.chunk_every(7)
-          |> Enum.each(fn [c, _tenant, k, r, _, _held, _vid] -> send(pid, {:mark, c, k, r}) end)
-
-          %{rows: []}
-        end
-
-        def query!("SELECT DISTINCT cell_id" <> _, _), do: %{rows: []}
-        def query!("SELECT COUNT" <> _, _), do: %{rows: [[0]]}
-      end
-
-      start_supervised!(%{id: ReasonRepo, start: {ReasonRepo, :start_link, [test_pid]}})
-      Application.put_env(:reactive_dag, :repo, ReasonRepo)
+      on_exit(fn -> :telemetry.detach("reprocess-why") end)
 
       run(%{"cell" => "lines", "where" => %{"fiscal_year" => "FY25"}, "reason" => "prompt v3"})
 
-      assert_received {:mark, "lines", "c", "prompt v3"}
+      assert_received {:why, "lines", "prompt v3"}
     end
 
     test "the reason defaults to something honest" do
@@ -269,14 +272,14 @@ defmodule ReactiveDag.ReprocessWorkerTest do
       assert_received {:reason, "reprocess"}
     end
 
-    test "it marks parents too, or the change strands one level up" do
-      # drive the marking without draining, by pointing at a plan whose drain
-      # would be a no-op: assert the parent got a mark before the drain consumed it
+    test "the cascade reaches the parents, not just the reprocessed cell" do
+      # A reprocess originates AT the cell, and the cascade carries the change
+      # to its parents — the hand-walk that used to be needed here is gone.
       test_pid = self()
 
       :telemetry.attach(
         "reprocess-parents",
-        [:reactive_dag, :drain, :step],
+        [:reactive_dag, :cascade, :step],
         fn _e, _m, meta, _ -> send(test_pid, {:step, meta.cell}) end,
         nil
       )

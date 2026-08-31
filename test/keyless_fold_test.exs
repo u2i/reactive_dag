@@ -15,7 +15,7 @@ defmodule ReactiveDag.KeylessFoldTest do
   """
   use ExUnit.Case, async: false
 
-  alias ReactiveDag.{Drain, Frontier}
+  alias ReactiveDag.{Cascade}
 
   defmodule Versions do
     def start_link, do: Agent.start_link(fn -> %{} end, name: __MODULE__)
@@ -166,23 +166,23 @@ defmodule ReactiveDag.KeylessFoldTest do
   defp plan, do: ReactiveDag.Node.graph([Lines, Projected, Rollup])
 
   defp drain,
-    do: Drain.run(plan(), recompute: ReactiveDag.Node.Recompute, key_rule: ReactiveDag.Node.KeyRule)
+    do: ReactiveDag.Test.Pending.cascade(plan(), recompute: ReactiveDag.Node.Recompute, key_rule: ReactiveDag.Node.KeyRule)
 
   defp put_line(key, fund, year, amount) do
     Ash.create!(Lines, %{key: key, fund: fund, year: year, amount: amount}, action: :upsert)
-    Frontier.mark_dirty("lines", [key], "test")
+    ReactiveDag.Test.Pending.add("lines", [key])
   end
 
   defp unit(fund, year),
     do: Ash.read!(Rollup) |> Enum.find(&(&1.fund == fund and &1.year == year))
 
   setup do
-    start_supervised!(ReactiveDag.Test.FakeFrontierRepo)
-    ReactiveDag.Test.FakeFrontierRepo.install()
+    start_supervised!(ReactiveDag.Test.FakeSuspensionRepo)
+    ReactiveDag.Test.FakeSuspensionRepo.install()
     start_supervised!(%{id: Versions, start: {Versions, :start_link, []}})
 
     for m <- [Lines, Projected, Rollup], r <- Ash.read!(m), do: Ash.destroy!(r)
-    for cell <- ["lines", "projected", "rollup"], do: Frontier.claim(cell)
+    ReactiveDag.Test.Pending.reset()
     :ok
   end
 

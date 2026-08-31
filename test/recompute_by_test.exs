@@ -24,7 +24,7 @@ defmodule ReactiveDag.RecomputeByTest do
   """
   use ExUnit.Case, async: false
 
-  alias ReactiveDag.{Drain, Frontier}
+  alias ReactiveDag.{Cascade}
   alias ReactiveDag.Node.Recompute
 
   defmodule Domain do
@@ -170,7 +170,7 @@ defmodule ReactiveDag.RecomputeByTest do
   defp plan, do: ReactiveDag.Node.graph([Expenses, CategoryTotals])
 
   defp drain(plan),
-    do: Drain.run(plan, recompute: ReactiveDag.Node.Recompute, key_rule: ReactiveDag.Node.KeyRule)
+    do: ReactiveDag.Test.Pending.cascade(plan)
 
   test "the unit supplies the edge, the grouping AND the claim rule" do
     plan = plan()
@@ -214,7 +214,7 @@ defmodule ReactiveDag.RecomputeByTest do
   test "end to end: touching one expense moves ONE category" do
     plan = plan()
 
-    Frontier.mark_dirty("expenses", ["*"], "seed")
+    ReactiveDag.Test.Pending.add("expenses", ["*"])
     {:ok, _} = drain(plan)
 
     Expenses
@@ -222,7 +222,7 @@ defmodule ReactiveDag.RecomputeByTest do
     |> Ash.Changeset.for_update(:revise, %{amount: 300.0})
     |> Ash.update!()
 
-    Frontier.mark_dirty("expenses", ["e2"], "revised")
+    ReactiveDag.Test.Pending.add("expenses", ["e2"])
     {:ok, report} = drain(plan)
 
     steps = Map.new(report.steps, &{&1.cell, &1})

@@ -6,19 +6,37 @@ defmodule ReactiveDag.GatedTest do
   a host's derived tables are often what it serves: deferring the write would put
   a review queue between a user's write and the page that shows it.
 
-  Two properties this file is really about:
+  The property this file is really about:
 
     * **the actor decides, not the cell alone.** A person editing a row should
       not queue for approval of their own edit; an extractor claiming what a
       meeting decided is exactly what wants review. The library cannot tell a
       person from a service account, so the host supplies the predicate.
-    * **a second change MERGES into a held one.** A reviewer sees the whole state
-      change since the last settled point — never a queue of intermediate steps,
-      and never an intermediate unit no settled state held.
+
+  ## Approval assertions were removed pending the sign-off phase
+
+  This file used to assert the reviewer's half of the gate as well: that
+  `approve/1` released a held key, that `reject/1` discarded it while the row
+  stood, that approving twice was a no-op, that approving one key left its
+  siblings held, and that a second change to a held key merged into it keeping
+  the EARLIEST version — so a reviewer saw one net change rather than a queue of
+  intermediate steps.
+
+  Every one of those went through `Frontier.approve/reject/awaiting`, and the
+  frontier is gone. Approval is a deferred phase in the new engine: a gated
+  change SUSPENDS, which is asserted below, but nothing yet reads those
+  suspensions back and releases them. There is no replacement API to point these
+  at, and rewriting them against `FakeSuspensionRepo` would assert that a row
+  exists rather than that approving it does anything — so they are deleted
+  rather than made vacuous, and belong with the sign-off phase when it lands.
+
+  The merge property in particular is worth restoring deliberately: it is the
+  one a reimplementation is most likely to get wrong, because append-only
+  suspensions naturally produce the queue-of-steps the old design refused.
   """
   use ExUnit.Case, async: false
 
-  alias ReactiveDag.Frontier
+  alias ReactiveDag.Test.FakeSuspensionRepo
 
   # The host's answers, at MODULE scope — a DSL `{Mod, :fun, []}` resolves
   # against the module, not against a `describe` block.
@@ -30,78 +48,36 @@ defmodule ReactiveDag.GatedTest do
   def fake_version_for(%{key: "boom"}, _changeset), do: raise("no version table")
   def fake_version_for(record, _changeset), do: "version-for-" <> record.key
 
+  # Reads a version reference back. A suspending cell must declare one, so a
+  # resumption can narrow to what moved rather than recomputing everything.
+  def fake_changes(_version_id), do: %{}
+
   setup do
-    start_supervised!(ReactiveDag.Test.FakeFrontierRepo)
-    ReactiveDag.Test.FakeFrontierRepo.install()
+    start_supervised!(FakeSuspensionRepo)
+    FakeSuspensionRepo.install()
+
+    # A gated write no longer parks a key on a hold queue — it enqueues a cascade
+    # that carries the gate verdict as `skip_gate:`. Capturing the enqueue is how
+    # a test reads that verdict back without standing up Oban.
+    ReactiveDag.Test.Pending.capture_enqueues()
+    ReactiveDag.Test.Pending.reset_enqueued()
     :ok
   end
 
-  describe "a held change is not claimable" do
-    test "until it is approved" do
-      Frontier.mark_dirty("c", ["k1"], "extraction", awaiting_approval: true)
+  # Run the cascade a write enqueued, exactly as `CascadeWorker` would — the
+  # `skip_gate:` the write decided is what makes the gate hold or clear.
+  defp cascade_enqueued(plan) do
+    [{cell, keys, opts}] = ReactiveDag.Test.Pending.enqueued()
+    ReactiveDag.Test.Pending.reset_enqueued()
 
-      assert Frontier.claim("c") == [], "a held change is not work the drain may take"
-      assert Frontier.awaiting("c") == [{"k1", nil}]
+    run_opts =
+      if Keyword.get(opts, :skip_gate, false), do: [skip_gate: cell], else: []
 
-      assert Frontier.approve("c") == ["k1"]
-      assert Frontier.claim("c") == ["k1"]
-    end
-
-    test "and an ordinary mark beside it claims freely" do
-      Frontier.mark_dirty("c", ["held"], "extraction", awaiting_approval: true)
-      Frontier.mark_dirty("c", ["free"], "poll")
-
-      assert Frontier.claim("c") == ["free"]
-      assert Frontier.awaiting("c") == [{"held", nil}]
-    end
-
-    test "`empty?/1` counts CLAIMABLE work, so a held change leaves it true" do
-      # Otherwise a caller looping until the frontier empties never finishes:
-      # there is nothing the drain can do, which is exactly the state.
-      Frontier.mark_dirty("c", ["k1"], "extraction", awaiting_approval: true)
-
-      assert Frontier.empty?()
-    end
-
-    test "a held cell is not offered for selection" do
-      # `dirty_cells/1` feeds the drain's cell choice. Offering a cell it cannot
-      # claim from would have it pick, claim nothing, and pick again.
-      Frontier.mark_dirty("c", ["k1"], "extraction", awaiting_approval: true)
-
-      assert Frontier.dirty_cells() == []
-    end
-  end
-
-  describe "approve and reject" do
-    test "reject discards the mark — the row stands, the consumers do not move" do
-      # The gate holds PROPAGATION, so "no" means the derived row stays as
-      # written and nothing downstream recomputes from it.
-      Frontier.mark_dirty("c", ["k1"], "extraction", awaiting_approval: true)
-
-      assert Frontier.reject("c") == ["k1"]
-      assert Frontier.awaiting("c") == []
-      assert Frontier.claim("c") == []
-    end
-
-    test "approving a specific key leaves the others held" do
-      for k <- ["a", "b"], do: Frontier.mark_dirty("c", [k], "x", awaiting_approval: true)
-
-      assert Frontier.approve("c", ["a"]) == ["a"]
-      assert Frontier.awaiting("c") |> Enum.map(&elem(&1, 0)) == ["b"]
-    end
-
-    test "approving twice is a no-op, not an error" do
-      # A double click, or two reviewers, must not fail.
-      Frontier.mark_dirty("c", ["k1"], "x", awaiting_approval: true)
-
-      assert Frontier.approve("c") == ["k1"]
-      assert Frontier.approve("c") == []
-    end
-
-    test "approving nothing claims nothing" do
-      assert Frontier.approve("c") == []
-      assert Frontier.reject("c") == []
-    end
+    ReactiveDag.Cascade.run(
+      plan,
+      [%{cell: cell, keys: keys, versions: Keyword.get(opts, :versions, %{})}],
+      run_opts
+    )
   end
 
   describe "the actor decides" do
@@ -140,17 +116,31 @@ defmodule ReactiveDag.GatedTest do
         leaf?(true)
         payload_key(:key)
         dirties_on([:create, :update])
+        # `gated` alone is what lowers to the :approval suspend reason —
+        # `suspends` is the :expensive one, and declaring it here would make the
+        # cascade stop for the wrong reason (`:expensive` wins when both are set).
         gated(human?: {ReactiveDag.GatedTest, :person?, []})
+        # Required of any suspending cell: a resumption has to be able to read
+        # back the change that stopped it, or it recomputes the whole cell.
+        version_id({ReactiveDag.GatedTest, :fake_version_for, []})
+        version_diff({ReactiveDag.GatedTest, :fake_changes, []})
       end
     end
 
     test "a MACHINE change is held" do
       # No actor: the graph, a worker, an extractor. Nothing claimed to be a
-      # person, so it waits.
+      # person, so it waits. Under the queue "waits" meant unclaimable; it now
+      # means the cascade suspends on the gate instead of propagating.
       Ash.create!(Notes, %{key: "m1", body: "extracted"}, action: :upsert)
 
-      assert Frontier.claim("notes") == []
-      assert Frontier.awaiting("notes") |> Enum.map(&elem(&1, 0)) == ["m1"]
+      assert [{"notes", ["m1"], opts}] = ReactiveDag.Test.Pending.enqueued()
+      refute Keyword.get(opts, :skip_gate, false), "a machine write does not clear the gate"
+
+      {:ok, report} = cascade_enqueued(ReactiveDag.Node.graph([Notes]))
+
+      assert [%{waiting: waiting, reason: :approval, row_uuid: "m1"}] = report.suspended
+      assert waiting == inspect(Notes)
+      assert report.steps == [], "a held change propagates nothing"
     end
 
     test "a PERSON's change propagates immediately" do
@@ -160,7 +150,13 @@ defmodule ReactiveDag.GatedTest do
         actor: %{kind: :person}
       )
 
-      assert Frontier.claim("notes") == ["h1"]
+      assert [{"notes", ["h1"], opts}] = ReactiveDag.Test.Pending.enqueued()
+      assert Keyword.get(opts, :skip_gate), "a person's own edit clears the gate"
+
+      {:ok, report} = cascade_enqueued(ReactiveDag.Node.graph([Notes]))
+
+      assert report.suspended == []
+      assert "notes" in ReactiveDag.Report.cells(report)
     end
 
     test "a non-person actor is a machine — a service account is not a human" do
@@ -171,15 +167,20 @@ defmodule ReactiveDag.GatedTest do
         actor: %{kind: :service}
       )
 
-      assert Frontier.claim("notes") == []
-      assert Frontier.awaiting("notes") |> Enum.map(&elem(&1, 0)) == ["s1"]
+      assert [{"notes", ["s1"], opts}] = ReactiveDag.Test.Pending.enqueued()
+      refute Keyword.get(opts, :skip_gate, false), "a service account is not a person"
+
+      {:ok, report} = cascade_enqueued(ReactiveDag.Node.graph([Notes]))
+
+      assert [%{waiting: waiting, reason: :approval, row_uuid: "s1"}] = report.suspended
+      assert waiting == inspect(Notes)
     end
   end
 
   describe "the version reference" do
-    # A queue row says WHICH entity changed; the version says WHAT the change
-    # was. The queue is consumed by the drain, so the version is the only thing
-    # that can explain an approved or rejected change afterwards.
+    # An enqueued cascade says WHICH entity changed; the version says WHAT the
+    # change was. The cascade is consumed and gone, so the version is the only
+    # thing that can explain an approved or rejected change afterwards.
     defmodule Versioned do
       use Ash.Resource,
         domain: ReactiveDag.GatedTest.Domain,
@@ -213,44 +214,24 @@ defmodule ReactiveDag.GatedTest do
       end
     end
 
-    test "the mark carries the version id, and a reviewer gets it back" do
+    test "the change carries the version id, and a reviewer gets it back" do
+      # Was read off the held frontier row via `awaiting/1`; it now rides on the
+      # enqueued cascade's `versions:`. Same reference, same guarantee — the
+      # change is referenced, not copied.
       Ash.create!(Versioned, %{key: "v1", body: "extracted"}, action: :upsert)
 
-      assert [{"v1", "version-for-v1"}] = Frontier.awaiting("versioned"),
-             "the queue references the record of the change; it does not copy it"
+      assert [{"versioned", ["v1"], opts}] = ReactiveDag.Test.Pending.enqueued()
+      assert Keyword.fetch!(opts, :versions) == %{"v1" => "version-for-v1"}
     end
 
     test "a resolver that raises costs the record, not the write" do
       # Failing a host's write over a bookkeeping lookup would be the wrong
-      # trade. The change is still marked and still propagates; only the durable
-      # reference is missing.
+      # trade. The change is still enqueued and still propagates; only the
+      # durable reference is missing.
       Ash.create!(Versioned, %{key: "boom", body: "x"}, action: :upsert)
 
-      assert [{"boom", nil}] = Frontier.awaiting("versioned")
-    end
-
-  end
-
-  describe "a second change to a held key" do
-    test "keeps the EARLIEST version — the change the settled state was succeeded by" do
-      # Two changes land before review. The reviewer must be pointed at the FIRST
-      # version: it records the change that succeeded the last settled state,
-      # which is what still needs repricing. The later one names where the row
-      # ended up, which the live row already says.
-      Frontier.mark_dirty("c", [{"k1", "version-1"}], "first", awaiting_approval: true)
-      Frontier.mark_dirty("c", [{"k1", "version-2"}], "second", awaiting_approval: true)
-
-      assert Frontier.awaiting("c") == [{"k1", "version-1"}]
-    end
-
-    test "stays held even when the second change is not itself gated" do
-      # A reviewer approves a net effect, not a moving target — so an ungated
-      # write landing on a held key must not release it.
-      Frontier.mark_dirty("c", [{"k1", "version-1"}], "first", awaiting_approval: true)
-      Frontier.mark_dirty("c", ["k1"], "second")
-
-      assert Frontier.claim("c") == []
-      assert Frontier.awaiting("c") |> Enum.map(&elem(&1, 0)) == ["k1"]
+      assert [{"versioned", ["boom"], opts}] = ReactiveDag.Test.Pending.enqueued()
+      assert Keyword.fetch!(opts, :versions) == %{}
     end
   end
 end

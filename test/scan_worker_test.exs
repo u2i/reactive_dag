@@ -13,7 +13,7 @@ defmodule ReactiveDag.ScanWorkerTest do
   """
   use ExUnit.Case, async: false
 
-  alias ReactiveDag.{Frontier, Source}
+  alias ReactiveDag.{Cascade, Source}
 
   defmodule Domain do
     use Ash.Domain, validate_config_inclusion?: false
@@ -173,6 +173,11 @@ defmodule ReactiveDag.ScanWorkerTest do
   end
 
   setup do
+    # A poll or a write now ENQUEUES a cascade rather than leaving a mark,
+    # so without this the library reaches for Oban and these tests fail on
+    # a missing instance rather than on anything they are about.
+    ReactiveDag.Test.Pending.capture_enqueues()
+
     start_supervised!(%{id: Crawler, start: {Crawler, :start_link, []}})
     start_supervised!(%{id: FakeRepo, start: {FakeRepo, :start_link, []}})
 
@@ -201,18 +206,21 @@ defmodule ReactiveDag.ScanWorkerTest do
       assert Enum.sort(result.changed) == ["d1", "n1"]
     end
 
-    test "and the reason rides through to every one of them" do
-      # this is what makes a run id work without any library support for run ids:
-      # `:reason` is a free string, so the frontier rows say which run dirtied
-      # them, across every leaf the one poll touched
+    test "every leaf the poll named gets its own cascade" do
+      # `:reason` used to ride through to the frontier rows, which is what made
+      # a run id work without any library support for run ids. There are no
+      # frontier rows now, and a suspension records a VERSION rather than a
+      # free-text reason — so that particular thread is gone.
+      #
+      # What is asserted instead is the property the reason existed to make
+      # visible: one poll naming two leaves enqueues two cascades, not one.
+      # A host wanting a run id threads it through `cascade_enqueuer`.
       Crawler.returns(%{changed: %{"docs" => ["d1"], "notices" => ["n1"]}})
 
       {:ok, _} = Source.refresh(plan(), "docs", reason: "scan:run-42")
 
-      marks = FakeRepo.marks()
-
-      assert {"docs", "d1", "scan:run-42"} in marks
-      assert {"notices", "n1", "scan:run-42"} in marks
+      assert [{"docs", ["d1"]}, {"notices", ["n1"]}] =
+               ReactiveDag.Test.Pending.enqueued_work()
     end
 
     test "a leaf the poll did not name is not marked" do
@@ -243,21 +251,26 @@ defmodule ReactiveDag.ScanWorkerTest do
       assert result.marked == %{"docs" => ["a", "b"]}
     end
 
-    test "the frontier actually has the keys, labelled with a reason" do
+    test "a cascade is enqueued for what the poll changed" do
       Crawler.returns(%{changed: ["a"]})
 
       {:ok, _} = Source.refresh(plan(), "docs", reason: "nightly")
 
-      assert {"docs", "a", "nightly"} in FakeRepo.marks()
+      assert [{"docs", ["a"]}] = ReactiveDag.Test.Pending.enqueued_work()
     end
 
-    test "parents are marked too, so the cascade reaches them" do
+    test "the poll enqueues only the LEAF — the cascade finds the parents" do
       Crawler.returns(%{changed: ["a"]})
 
       {:ok, _} = Source.refresh(plan(), "docs")
 
-      assert Enum.any?(FakeRepo.marks(), fn {cell, _, _} -> cell == "totals" end),
-             "marking a leaf without its parents would strand the change"
+      # This used to assert the opposite: that the poll also marked `totals`,
+      # because a mark named one cell and something had to name the next.
+      # Hand-walking the parents here would now DOUBLE-propagate — the cascade
+      # follows the graph itself. The property that mattered ("the change
+      # reaches the parents") is unchanged and covered by cascade_test.exs.
+      assert [{"docs", ["a"]}] = ReactiveDag.Test.Pending.enqueued_work(),
+             "one enqueue, for the leaf that actually changed"
     end
 
     test "a fan-out source's %{leaf => keys} is normalised, not rejected" do
@@ -297,7 +310,9 @@ defmodule ReactiveDag.ScanWorkerTest do
       {:ok, result} = Source.refresh(plan(), "docs")
 
       assert result.unreachable == [{"api", :timeout}]
-      assert FakeRepo.marks() == [], "an outage propagates nothing, by construction"
+
+      assert ReactiveDag.Test.Pending.enqueued_work() == [],
+             "an outage propagates nothing, by construction"
     end
 
     test "a cell with no scanner is reported rather than raising" do
@@ -306,7 +321,7 @@ defmodule ReactiveDag.ScanWorkerTest do
   end
 
   describe "the worker" do
-    test "polls, marks and drains in one job" do
+    test "polls and enqueues; the cascade it enqueued produces the derived rows" do
       Docs |> Ash.Changeset.for_create(:upsert, %{key: "a", category: "x"}) |> Ash.create!()
       Crawler.returns(%{changed: ["a"]})
 
@@ -316,7 +331,18 @@ defmodule ReactiveDag.ScanWorkerTest do
                  "plan_mfa" => ["ReactiveDag.ScanWorkerTest", "plan_for_worker", []]
                })
 
-      # the drain ran: the derived cell was recomputed from the marked leaf
+      # The scan no longer propagates in its own job — it enqueues. So this
+      # runs what it enqueued, which is what the CascadeWorker would do.
+      assert [{"docs", ["a"]}] = ReactiveDag.Test.Pending.enqueued_work()
+
+      for {cell, keys, _opts} <- ReactiveDag.Test.Pending.enqueued() do
+        {:ok, _} =
+          ReactiveDag.Cascade.run(plan_for_worker(), [
+            %{cell: cell, keys: keys, versions: %{}}
+          ])
+      end
+
+      # end to end: the derived cell recomputed from what the scan observed
       assert [%{key: "x", n: 1}] = Ash.read!(Totals)
     end
 
@@ -466,7 +492,7 @@ defmodule ReactiveDag.ScanWorkerTest do
       refute Keyword.has_key?(opts, :collector)
     end
 
-    test "the poll and its drain arrive as one `%ScanRun{}`" do
+    test "the poll arrives as a `%ScanRun{}`, without a propagation report" do
       test_pid = self()
 
       :telemetry.attach(
@@ -491,12 +517,17 @@ defmodule ReactiveDag.ScanWorkerTest do
       assert run.cell == "docs"
       assert run.changed == ["a"]
       assert run.detail == %{tokens_in: 900}
-      assert %ReactiveDag.Drain.Report{} = run.report
 
-      # The point of the pairing: one call for what the RUN cost, rather than
-      # the caller adding the poll's spend to the drain's.
+      # `report` is nil, and this is the change worth seeing: a scan used to
+      # drain in the same job, so a run really was two phases. It now enqueues
+      # a cascade and returns — the propagation reports itself separately, and
+      # cannot reach back into the scan that started it.
+      assert is_nil(run.report)
+      refute ReactiveDag.ScanRun.drained?(run)
+
+      # The poll's own spend is still reported, which is what a cost line
+      # actually reads.
       assert ReactiveDag.ScanRun.total(run, :tokens_in) >= 900
-      assert ReactiveDag.ScanRun.drained?(run)
       assert ReactiveDag.ScanRun.complete?(run)
     end
 
@@ -923,12 +954,12 @@ defmodule ReactiveDag.ScanWorkerTest do
       assert result.marked == %{"docs" => ["d1", "d2"]}
     end
 
-    test "and reaches the frontier, not just the return value" do
+    test "and enqueues a cascade, not just a return value" do
       Crawler.returns(["d1"])
 
       {:ok, _} = Source.refresh(plan(), "docs", reason: "flat")
 
-      assert {"docs", "d1", "flat"} in FakeRepo.marks()
+      assert {"docs", ["d1"]} in ReactiveDag.Test.Pending.enqueued_work()
     end
 
     test "an empty bare list marks nothing, rather than crashing" do

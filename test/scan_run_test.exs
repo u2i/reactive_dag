@@ -13,7 +13,7 @@ defmodule ReactiveDag.ScanRunTest do
   """
   use ExUnit.Case, async: true
 
-  alias ReactiveDag.{Drain.Report, ScanRun}
+  alias ReactiveDag.{Report, ScanRun}
 
   defp step(meta) do
     %{

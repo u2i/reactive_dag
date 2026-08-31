@@ -395,7 +395,7 @@ defmodule ReactiveDag.CascadeTest do
       assert length(report.steps) == 2
       assert length(report.suspended) == 1
       assert report.duration_us >= 0
-      assert "leaf" in ReactiveDag.Drain.Report.cells(report)
+      assert "leaf" in ReactiveDag.Report.cells(report)
     end
   end
 

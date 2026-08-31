@@ -14,7 +14,7 @@ defmodule ReactiveDag.PerKeyTest do
   """
   use ExUnit.Case, async: false
 
-  alias ReactiveDag.{Drain, Frontier}
+  alias ReactiveDag.{Cascade}
   alias ReactiveDag.Node.Recompute
 
   # counts calls so the tests can assert on what was actually PAID FOR
@@ -177,7 +177,7 @@ defmodule ReactiveDag.PerKeyTest do
   defp cell, do: plan().cells["summaries"]
 
   defp drain(plan),
-    do: Drain.run(plan, recompute: ReactiveDag.Node.Recompute, key_rule: ReactiveDag.Node.KeyRule)
+    do: ReactiveDag.Test.Pending.cascade(plan)
 
   test "one call per claimed row; the structured output lands in this node's attributes" do
     {:ok, changed} = Recompute.recompute(cell(), ["*"]) |> normalise()
@@ -254,17 +254,17 @@ defmodule ReactiveDag.PerKeyTest do
 
   test "the skip count rides on the drain's Report step" do
     p = plan()
-    Frontier.mark_dirty("transcripts", ["*"], "seed")
+    ReactiveDag.Test.Pending.add("transcripts", ["*"])
     {:ok, _} = drain(p)
 
-    Frontier.mark_dirty("transcripts", ["*"], "again")
+    ReactiveDag.Test.Pending.add("transcripts", ["*"])
     {:ok, report} = drain(p)
 
     step = Enum.find(report.steps, &(&1.cell == "summaries"))
     assert step.meta == %{called: 0, skipped: 2}
 
     # ...and rolls up, so a cost line can show what was avoided
-    assert Drain.Report.total(report, :skipped) == 2
+    assert ReactiveDag.Report.total(report, :skipped) == 2
   end
 
   test "without `fingerprint:` every recompute calls — the opt-in is explicit" do

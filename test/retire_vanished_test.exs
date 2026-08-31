@@ -22,7 +22,7 @@ defmodule ReactiveDag.RetireVanishedTest do
   """
   use ExUnit.Case, async: false
 
-  alias ReactiveDag.{Drain, Frontier}
+  alias ReactiveDag.{Cascade}
   alias ReactiveDag.Node.Recompute
 
   defmodule Domain do
@@ -163,7 +163,7 @@ defmodule ReactiveDag.RetireVanishedTest do
   defp rows, do: CategoryTotals |> Ash.read!() |> Enum.map(&{&1.key, &1.total, &1.n}) |> Enum.sort()
 
   defp drain(plan),
-    do: Drain.run(plan, recompute: ReactiveDag.Node.Recompute, key_rule: ReactiveDag.Node.KeyRule)
+    do: ReactiveDag.Test.Pending.cascade(plan)
 
   test "a DELETED input retires its unit — the row goes, and the retirement propagates" do
     c = cell()
@@ -212,7 +212,7 @@ defmodule ReactiveDag.RetireVanishedTest do
   test "an input MOVING between units: the destination is exact, the ORIGIN needs a whole-cell pass" do
     p = plan()
 
-    Frontier.mark_dirty("expenses", ["*"], "seed")
+    ReactiveDag.Test.Pending.add("expenses", ["*"])
     {:ok, _} = drain(p)
     assert rows() == [{"meals", 40.0, 1}, {"travel", 100.0, 1}]
 
@@ -222,7 +222,7 @@ defmodule ReactiveDag.RetireVanishedTest do
     |> Ash.Changeset.for_update(:recategorise, %{category: "travel"})
     |> Ash.update!()
 
-    Frontier.mark_dirty("expenses", ["e2"], "recategorised")
+    ReactiveDag.Test.Pending.add("expenses", ["e2"])
     {:ok, report} = drain(p)
 
     steps = Map.new(report.steps, &{&1.cell, &1})

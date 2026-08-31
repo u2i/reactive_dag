@@ -219,6 +219,34 @@ defmodule ReactiveDag.SuspendsTest do
     end
   end
 
+  # A leaf that suspends: gated at the source, before anything downstream sees
+  # its rows. It has NO inputs, so there is no upstream change to read back.
+  defmodule GatedLeaf do
+    use Ash.Resource,
+      domain: ReactiveDag.SuspendsTest.Domain,
+      data_layer: Ash.DataLayer.Ets,
+      extensions: [ReactiveDag.Node]
+
+    ets do
+      private?(true)
+    end
+
+    attributes do
+      attribute :key, :string, primary_key?: true, allow_nil?: false, public?: true
+    end
+
+    actions do
+      defaults [:read, :destroy]
+      create :upsert, upsert?: true, accept: [:key]
+    end
+
+    reactive do
+      id :gated_leaf
+      leaf? true
+      gated true
+    end
+  end
+
   describe "the declaration reaches the plan" do
     test "suspends true lowers to an :expensive reason" do
       plan = ReactiveDag.Node.graph([VersionedLeaf, SlowOk])
@@ -275,6 +303,20 @@ defmodule ReactiveDag.SuspendsTest do
       assert_raise ArgumentError, ~r/its input "bare_leaf" must declare `version_id`/, fn ->
         ReactiveDag.Node.graph([BareLeaf, SlowBareInput])
       end
+    end
+
+    test "a suspendable LEAF needs no version_diff" do
+      # The reader half of the rule says how to read back the change that
+      # stopped a cascade. A leaf has no inputs, so there is no upstream change
+      # to read: the thing that stopped IS the thing that changed, and its own
+      # key names it exactly. Demanding a reader here asks for something with
+      # nothing to read.
+      #
+      # This is a real shape, not a loophole — a gated source-fed leaf holds a
+      # crawler's rows for review before anything downstream sees them.
+      plan = ReactiveDag.Node.graph([GatedLeaf])
+
+      assert %{approval: []} = plan.cells["gated_leaf"].meta[:suspends]
     end
 
     test "a graph with versions everywhere assembles" do

@@ -17,7 +17,7 @@ defmodule ReactiveDag.LlmNodeTest do
   """
   use ExUnit.Case, async: false
 
-  alias ReactiveDag.{Drain, Frontier}
+  alias ReactiveDag.{Cascade}
 
   # ── the injected model ──────────────────────────────────────────────────────
   #
@@ -241,7 +241,7 @@ defmodule ReactiveDag.LlmNodeTest do
   defp plan, do: ReactiveDag.Node.graph([Transcripts, People, Events])
 
   defp drain(plan),
-    do: Drain.run(plan, recompute: ReactiveDag.Node.Recompute, key_rule: ReactiveDag.Node.KeyRule)
+    do: ReactiveDag.Test.Pending.cascade(plan)
 
   test "an LLM node is the `run` rung — the graph wires it with no new library code" do
     p = plan()
@@ -260,7 +260,7 @@ defmodule ReactiveDag.LlmNodeTest do
   test "it runs end to end, and the prompt carries the context edge's data" do
     p = plan()
 
-    Frontier.mark_dirty("transcripts", ["*"], "seed")
+    ReactiveDag.Test.Pending.add("transcripts", ["*"])
     {:ok, report} = drain(p)
 
     steps = Map.new(report.steps, &{&1.cell, &1})
@@ -278,14 +278,14 @@ defmodule ReactiveDag.LlmNodeTest do
   test "DIRTY-KEY SCOPING is what stops a whole-cell claim re-billing every key" do
     p = plan()
 
-    Frontier.mark_dirty("transcripts", ["*"], "seed")
+    ReactiveDag.Test.Pending.add("transcripts", ["*"])
     {:ok, _} = drain(p)
     assert length(FakeLLM.calls()) == 2
 
     # touch ONE transcript: the action receives just that key, so exactly one
     # model call is made. This is the cost discipline LLM nodes live or die by.
     before = length(FakeLLM.calls())
-    Frontier.mark_dirty("transcripts", ["t2"], "revised")
+    ReactiveDag.Test.Pending.add("transcripts", ["t2"])
     {:ok, report} = drain(p)
 
     steps = Map.new(report.steps, &{&1.cell, &1})
@@ -296,12 +296,12 @@ defmodule ReactiveDag.LlmNodeTest do
   test "a `context` change does NOT re-trigger the model" do
     p = plan()
 
-    Frontier.mark_dirty("transcripts", ["*"], "seed")
+    ReactiveDag.Test.Pending.add("transcripts", ["*"])
     {:ok, _} = drain(p)
     before = length(FakeLLM.calls())
 
     # people is a context edge: settled data, read at recompute, never a trigger
-    Frontier.mark_dirty("people", ["p1"], "renamed")
+    ReactiveDag.Test.Pending.add("people", ["p1"])
     {:ok, report} = drain(p)
 
     refute Map.has_key?(Map.new(report.steps, &{&1.cell, &1}), "events")

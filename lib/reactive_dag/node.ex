@@ -1713,17 +1713,30 @@ defmodule ReactiveDag.Node do
   # over every row of a table instead of the three that moved. Nothing reports
   # it. The cost shows up as a bill.
   #
-  # Leaves are NOT exempt, and that is deliberate: a source-fed leaf is exactly
-  # where the expensive nodes tend to sit, one hop downstream. Exempting them
-  # would let the check pass while delivering none of the precision it exists to
-  # guarantee. `Payload.upsert_row/5` already records versions, so a leaf needs
-  # only the declaration.
+  # A leaf as an INPUT is not exempt, and that is deliberate: a source-fed leaf
+  # is exactly where the expensive nodes tend to sit, one hop downstream.
+  # Exempting them would let the check pass while delivering none of the
+  # precision it exists to guarantee. `Payload.upsert_row/5` already records
+  # versions, so a leaf needs only the declaration.
+  #
+  # A leaf that SUSPENDS is a different case — see below.
   #
   # Context inputs are excluded, matching `Graph.build_parents/1`: a context edge
   # is read but never propagates, so it can never be the change a suspension
   # names.
   defp verify_suspension_versions!(%ReactiveDag.Plan{} = plan) do
-    for {id, cell} <- plan.cells, suspends?(cell) do
+    # A suspendable LEAF is exempt from the reader half, and only that half.
+    #
+    # `version_diff` says how to read back a version a suspension references,
+    # so a resumption can narrow to the rows that moved. A leaf has no inputs,
+    # so there is no upstream change to read: the thing that stopped IS the
+    # thing that changed, and its own key already names it exactly. Demanding a
+    # reader here asks for something with nothing to read.
+    #
+    # This is the shape a gated source-fed leaf takes — a crawler's rows held
+    # for review before anything downstream sees them — so it is a real case,
+    # not a loophole.
+    for {id, cell} <- plan.cells, suspends?(cell), not cell.leaf? do
       unless cell.meta[:version_diff] do
         raise ArgumentError,
               "reactive_dag: cell #{inspect(id)} suspends, but declares no " <>

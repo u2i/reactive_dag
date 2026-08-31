@@ -28,7 +28,7 @@ defmodule ReactiveDag.TwoNodeJoinTest do
   """
   use ExUnit.Case, async: false
 
-  alias ReactiveDag.{Drain, Frontier}
+  alias ReactiveDag.{Cascade}
   alias ReactiveDag.Node.Recompute
 
   defmodule Domain do
@@ -446,9 +446,9 @@ defmodule ReactiveDag.TwoNodeJoinTest do
     test "either side's change propagates through its own edge" do
       p = plan()
 
-      Frontier.mark_dirty("budgets", ["*"], "seed")
-      Frontier.mark_dirty("actuals", ["*"], "seed")
-      {:ok, _} = Drain.run(p)
+      ReactiveDag.Test.Pending.add("budgets", ["*"])
+      ReactiveDag.Test.Pending.add("actuals", ["*"])
+      {:ok, _} = ReactiveDag.Test.Pending.cascade(p)
 
       assert %{budget: 100.0, actual: 90.0} = rows()["5000"]
 
@@ -458,8 +458,8 @@ defmodule ReactiveDag.TwoNodeJoinTest do
       |> Ash.Changeset.for_update(:revise, %{amount: 95.0})
       |> Ash.update!()
 
-      Frontier.mark_dirty("actuals", ["a1"], "revised")
-      {:ok, report} = Drain.run(p)
+      ReactiveDag.Test.Pending.add("actuals", ["a1"])
+      {:ok, report} = ReactiveDag.Test.Pending.cascade(p)
 
       steps = Map.new(report.steps, &{&1.cell, &1})
       assert steps["variance"].triggered_by == "actuals"

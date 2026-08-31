@@ -13,7 +13,7 @@ defmodule ReactiveDag.OpTenantTest do
   """
   use ExUnit.Case, async: false
 
-  alias ReactiveDag.{Cell, Node.Recompute}
+  alias ReactiveDag.{Cascade, Cell, Node.Recompute}
 
   defmodule TwoArity do
     @behaviour ReactiveDag.Op
@@ -143,7 +143,7 @@ defmodule ReactiveDag.OpTenantTest do
     Application.put_env(:reactive_dag, :repo, FakeRepo)
     on_exit(fn -> Application.put_env(:reactive_dag, :repo, prev) end)
 
-    ReactiveDag.Frontier.mark_dirty("c", keys, "seed", tenant: plan.tenant)
-    ReactiveDag.Drain.run(plan)
+    ReactiveDag.Test.Pending.add("c", keys)
+    ReactiveDag.Test.Pending.cascade(plan)
   end
 end

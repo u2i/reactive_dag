@@ -50,7 +50,7 @@ defmodule ReactiveDag.SourceAsNodeTest do
   """
   use ExUnit.Case, async: false
 
-  alias ReactiveDag.{Drain, Frontier}
+  alias ReactiveDag.{Cascade}
 
   defmodule Domain do
     use Ash.Domain, validate_config_inclusion?: false
@@ -194,9 +194,14 @@ defmodule ReactiveDag.SourceAsNodeTest do
   end
 
   setup do
+    # A poll or a write now ENQUEUES a cascade rather than leaving a mark,
+    # so without this the library reaches for Oban and these tests fail on
+    # a missing instance rather than on anything they are about.
+    ReactiveDag.Test.Pending.capture_enqueues()
+
     start_supervised!(%{id: Fetches, start: {Fetches, :start_link, []}})
-    start_supervised!(ReactiveDag.Test.FakeFrontierRepo)
-    ReactiveDag.Test.FakeFrontierRepo.install()
+    start_supervised!(ReactiveDag.Test.FakeSuspensionRepo)
+    ReactiveDag.Test.FakeSuspensionRepo.install()
 
 
     for r <- [Documents, AgendaDocs, MinutesDocs], row <- Ash.read!(r), do: Ash.destroy!(row)
@@ -207,10 +212,7 @@ defmodule ReactiveDag.SourceAsNodeTest do
   defp plan_a, do: ReactiveDag.Node.graph([Documents, AgendaDocs, MinutesDocs])
 
   defp drain(plan) do
-    Drain.run(plan,
-      recompute: ReactiveDag.Node.Recompute,
-      key_rule: ReactiveDag.Node.KeyRule
-    )
+    ReactiveDag.Test.Pending.cascade(plan)
   end
 
   # The poll, with the source holding rows: reconcile what the crawl found into
@@ -231,7 +233,15 @@ defmodule ReactiveDag.SourceAsNodeTest do
         upsert: fn key -> Map.fetch!(by_key, key) end
       )
 
-    Frontier.mark_dirty("documents", changed, "scan")
+    # ONLY when the reconcile actually changed something. Marking zero keys was
+    # harmless under the queue — an empty mark left nothing for a drain to
+    # claim — but an origin is not a mark: a cascade runs every origin it is
+    # handed, so an empty one still produces a step for `documents` and the
+    # "nothing churns" assertion below would see work that did not happen.
+    # A real poll enqueues nothing when it finds nothing, which is what this
+    # mirrors (see `Source.refresh/3`: `for {leaf, keys} <- by_leaf, keys != []`).
+    if changed != [], do: ReactiveDag.Test.Pending.add("documents", changed)
+
     drain(plan)
   end
 
@@ -279,7 +289,7 @@ defmodule ReactiveDag.SourceAsNodeTest do
       # the payload loop read "claimed but nothing written" as a vanished unit —
       # a retirement, and therefore a change. Forever, on every poll.
       assert report.steps == []
-      assert ReactiveDag.Drain.Report.changed_total(report) == 0
+      assert ReactiveDag.Report.changed_total(report) == 0
     end
 
     test "declining a key does not destroy a row that IS the other leaf's" do
@@ -343,7 +353,7 @@ defmodule ReactiveDag.SourceAsNodeTest do
       })
       |> Ash.create!()
 
-      Frontier.mark_dirty("documents", ["a1"], "scan")
+      ReactiveDag.Test.Pending.add("documents", ["a1"])
       {:ok, report} = drain(plan_a())
 
       minutes = Enum.find(report.steps, &(&1.cell == "minutes_docs"))
@@ -361,7 +371,7 @@ defmodule ReactiveDag.SourceAsNodeTest do
       {:ok, _} = poll_into_source()
 
       Ash.read!(Documents) |> Enum.find(&(&1.key == "m1")) |> Ash.destroy!()
-      Frontier.mark_dirty("documents", ["m1"], "scan")
+      ReactiveDag.Test.Pending.add("documents", ["m1"])
       {:ok, report} = drain(plan_a())
 
       minutes = Enum.find(report.steps, &(&1.cell == "minutes_docs"))

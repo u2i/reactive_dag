@@ -8,7 +8,7 @@ defmodule ReactiveDag.PayloadDiffPropagationTest do
   collects and the drain hands to the key rule.
 
   Written because a mutation exposed the gap: removing the payload-diff channel
-  from `Drain.propagate/5` failed **nothing**. The external path had tests and
+  from the drain's propagation failed **nothing**. The external path had tests and
   the internal one did not, which is the wrong way round — a real host writes
   every one of its cells through the payload loop.
 
@@ -18,7 +18,7 @@ defmodule ReactiveDag.PayloadDiffPropagationTest do
   """
   use ExUnit.Case, async: false
 
-  alias ReactiveDag.{Drain, Frontier}
+  alias ReactiveDag.{Cascade}
 
   # The frontier's repo. Mirrors `dirties_on_test`'s: it must retain the DIFF a
   # mark carried, since that is half of what this file is about.
@@ -153,22 +153,22 @@ defmodule ReactiveDag.PayloadDiffPropagationTest do
   defp plan, do: ReactiveDag.Node.graph([Lines, Projected, Rollup])
 
   defp drain do
-    Drain.run(plan(), recompute: ReactiveDag.Node.Recompute, key_rule: ReactiveDag.Node.KeyRule)
+    ReactiveDag.Test.Pending.cascade(plan(), recompute: ReactiveDag.Node.Recompute, key_rule: ReactiveDag.Node.KeyRule)
   end
 
   defp put_line(key, fund, amount) do
     Ash.create!(Lines, %{key: key, fund: fund, amount: amount}, action: :upsert)
-    Frontier.mark_dirty("lines", [key], "test")
+    ReactiveDag.Test.Pending.add("lines", [key])
   end
 
   setup do
-    start_supervised!(ReactiveDag.Test.FakeFrontierRepo)
-    ReactiveDag.Test.FakeFrontierRepo.install()
+    start_supervised!(ReactiveDag.Test.FakeSuspensionRepo)
+    ReactiveDag.Test.FakeSuspensionRepo.install()
 
     # The ETS tables are shared, so start from a known-empty state — and drain
     # the frontier the destroys above just dirtied.
     for m <- [Lines, Projected, Rollup], r <- Ash.read!(m), do: Ash.destroy!(r)
-    for cell <- ["lines", "projected", "rollup"], do: Frontier.claim(cell)
+    ReactiveDag.Test.Pending.reset()
     :ok
   end
 
