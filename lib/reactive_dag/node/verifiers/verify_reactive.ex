@@ -669,8 +669,6 @@ defmodule ReactiveDag.Node.Verifiers.VerifyReactive do
     end
   end
 
-  defp verify_over(_dsl, _r), do: :ok
-
   # `recompute_by` sets the claim rule, so a block-level `key_rule` alongside it
   # is the same fact stated twice — and they can disagree.
   defp verify_unit_vs_key_rule(dsl) do

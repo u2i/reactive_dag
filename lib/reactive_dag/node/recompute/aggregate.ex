@@ -17,7 +17,6 @@ defmodule ReactiveDag.Node.Recompute.Aggregate do
   set is every group whose aggregate value actually moved (Payload's change-
   detection filters the no-ops).
   """
-  require Ash.Query
 
   @doc "Recompute an aggregate node; returns the changed keys."
   @spec recompute(ReactiveDag.Cell.t(), module(), map()) :: [String.t()]

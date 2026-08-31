@@ -40,7 +40,6 @@ defmodule ReactiveDag.Node.Payload do
   recomputes with no declaration at all.
   """
 
-  require Ash.Query
 
   alias ReactiveDag.Node.Fingerprint
 

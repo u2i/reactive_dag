@@ -48,7 +48,6 @@ if Code.ensure_loaded?(Oban.Worker) do
         states: :incomplete
       ]
 
-    require Logger
 
     alias ReactiveDag.{Cascade, Job}
 
