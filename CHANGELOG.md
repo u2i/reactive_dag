@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.17.0-rc.60](https://github.com/u2i/reactive_dag/compare/v0.17.0-rc.59...v0.17.0-rc.60) (2026-08-31)
+
+
+### Bug Fixes
+
+* a poll's versions reach the cascade it originates ([#235](https://github.com/u2i/reactive_dag/issues/235)) ([9420ce0](https://github.com/u2i/reactive_dag/commit/9420ce0b0b12c3da048b702b663b85ccef5c7991))
+
 ## [0.17.0-rc.59](https://github.com/u2i/reactive_dag/compare/v0.17.0-rc.58...v0.17.0-rc.59) (2026-08-31)
 
 
