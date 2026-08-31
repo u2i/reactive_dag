@@ -188,7 +188,7 @@ if Code.ensure_loaded?(Oban.Worker) do
 
           {:error, reason}
 
-        {:ok, report} ->
+        {:ok, _report} ->
           Suspension.transaction(fn -> Suspension.discharge(ids) end)
 
           :telemetry.execute(
@@ -197,12 +197,11 @@ if Code.ensure_loaded?(Oban.Worker) do
             %{waiting: point.waiting, cell: cell_id, tenant: point.tenant}
           )
 
-          if report.suspended != [] do
-            report.suspended
-            |> Enum.uniq_by(&Map.take(&1, [:tenant, :waiting, :resource, :row_uuid]))
-            |> Enum.each(&enqueue(&1, plan_mfa: Map.get(args, "plan_mfa")))
-          end
-
+          # A cascade that stops AGAIN downstream — one slow cell feeding
+          # another — schedules its own resumption from inside `Cascade.run/3`.
+          # Doing it here as well would enqueue each point twice: harmless,
+          # because the second job finds the suspensions already discharged and
+          # exits, but wasteful and misleading in the queue.
           :ok
       end
     end

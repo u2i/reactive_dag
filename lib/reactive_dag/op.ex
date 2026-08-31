@@ -105,14 +105,14 @@ defmodule ReactiveDag.Op do
   @optional_callbacks recompute: 2, recompute: 3
 
   @doc """
-  Report progress from inside a recompute — `[:reactive_dag, :drain, :progress]`.
+  Report progress from inside a recompute — `[:reactive_dag, :cascade, :progress]`.
 
       Op.progress(done, total, cell: cell.id, label: "meetings")
 
   The drain-side counterpart to `ReactiveDag.Source.progress/3`, and it exists for
   the same reason. An op is opaque to the library: it is handed keys and returns
   changed ones, and everything between is the host's. So a cell extracting 34
-  meetings through an LLM emits ONE `:drain, :step`, and it fires when the work is
+  meetings through an LLM emits ONE `:cascade, :step`, and it fires when the work is
   already over.
 
   `:cell_start` says a cell BEGAN, which is enough to name the slow cell. This is
@@ -141,7 +141,7 @@ defmodule ReactiveDag.Op do
   @spec progress(non_neg_integer() | nil, non_neg_integer() | nil, keyword()) :: :ok
   def progress(done, total \\ nil, opts \\ []) do
     :telemetry.execute(
-      [:reactive_dag, :drain, :progress],
+      [:reactive_dag, :cascade, :progress],
       %{done: done, total: total},
       %{cell: opts[:cell], label: opts[:label]}
     )

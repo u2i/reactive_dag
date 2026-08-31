@@ -127,6 +127,7 @@ defmodule ReactiveDag.Cascade do
         Suspension.transaction(fn -> walk(plan, origins, opts, t0, pre_steps) end)
 
       emit_stop(result, t0)
+      schedule_resumptions(result, opts)
       result
     catch
       # A resumption's own recompute failed, before any transaction opened.
@@ -812,6 +813,60 @@ defmodule ReactiveDag.Cascade do
   end
 
   defp emit_stop(_other, _t0), do: :ok
+
+  # A suspension nobody resumes is a cascade that silently stopped forever.
+  #
+  # This lives HERE rather than in `CascadeWorker` because a cascade has more
+  # than one caller — a source poll and a reprocess both run one directly — and
+  # a suspension recorded by any of them needs the same job. Leaving it to the
+  # caller meant exactly one of three paths scheduled anything, and the other
+  # two wrote rows that would never be read.
+  #
+  # AFTER the transaction commits, which the `try` block's ordering guarantees:
+  # a job that started first would read no suspensions and exit as an ordinary
+  # duplicate, while the real work sat unclaimed.
+  #
+  # Failure is logged, not raised. The suspensions are already durable, so the
+  # cost of a queue being down is a delay someone must notice — which is what
+  # `Suspension.points/1` is for — rather than a lost cascade.
+  defp schedule_resumptions({:ok, %Report{suspended: [_ | _] = points}}, opts) do
+    scheduler = Keyword.get(opts, :resumption_scheduler) || default_scheduler()
+
+    if scheduler do
+      # DEFENSIVE, not load-bearing: the walk merges everything queued for a
+      # cell before it runs, so one cascade cannot currently reach one stopping
+      # point twice. Kept because the scheduler must be idempotent per point
+      # regardless of how the walk happens to batch — and because a mutation
+      # removing this line passes the suite, which is worth saying out loud
+      # rather than leaving as apparent coverage.
+      points
+      |> Enum.uniq_by(&Map.take(&1, [:tenant, :waiting, :resource, :row_uuid]))
+      |> Enum.each(fn point ->
+        try do
+          scheduler.(point, Keyword.take(opts, [:plan_mfa]))
+        rescue
+          e ->
+            Logger.warning(
+              "reactive_dag: #{point.waiting} suspended but its resumption could not " <>
+                "be enqueued (#{Exception.message(e)}). The suspension stands; " <>
+                "nothing will resume it until something enqueues one."
+            )
+        end
+      end)
+    end
+
+    :ok
+  end
+
+  defp schedule_resumptions(_result, _opts), do: :ok
+
+  # nil when Oban is absent — the library works without it, and a host that
+  # drives resumptions itself passes `resumption_scheduler:`.
+  defp default_scheduler do
+    if Code.ensure_loaded?(ReactiveDag.ResumptionWorker) do
+      &ReactiveDag.ResumptionWorker.enqueue/2
+    end
+  end
 
   defp partial_report(%RunawayError{report: report}), do: report
   defp partial_report(_reason), do: nil

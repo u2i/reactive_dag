@@ -108,25 +108,18 @@ if Code.ensure_loaded?(Oban.Worker) do
           do: Keyword.put(opts, :skip_gate, Map.fetch!(args, "cell")),
           else: opts
 
-      {:ok, report} = Cascade.run(plan, [origin], opts)
+      # Resumptions are scheduled by `Cascade.run/3` itself, not here: a source
+      # poll and a reprocess also run cascades directly, and leaving it to each
+      # caller meant one of three paths scheduled anything.
+      opts =
+        case Map.get(args, "plan_mfa") do
+          nil -> opts
+          mfa -> Keyword.put(opts, :plan_mfa, mfa)
+        end
 
-      if report.suspended != [] do
-        enqueue_resumptions(report.suspended, args)
-      end
+      {:ok, _report} = Cascade.run(plan, [origin], opts)
 
       :ok
-    end
-
-    # Every point the cascade stopped at gets a job. Enqueued AFTER the
-    # cascade's transaction commits, so a job cannot start before the suspension
-    # it reads is visible — the ordering that would otherwise produce a
-    # resumption finding nothing and exiting as a no-op while real work waits.
-    defp enqueue_resumptions(suspended, args) do
-      suspended
-      |> Enum.uniq_by(&Map.take(&1, [:tenant, :waiting, :resource, :row_uuid]))
-      |> Enum.each(fn point ->
-        ReactiveDag.ResumptionWorker.enqueue(point, plan_mfa: Map.get(args, "plan_mfa"))
-      end)
     end
   end
 end

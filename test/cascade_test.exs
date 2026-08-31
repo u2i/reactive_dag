@@ -491,4 +491,97 @@ defmodule ReactiveDag.CascadeTest do
       assert report.suspended == []
     end
   end
+
+  describe "scheduling the resumption" do
+    test "every distinct stopping point is scheduled, once" do
+      # A suspension nobody resumes is a cascade that stopped forever. This
+      # lives in `Cascade.run/3` rather than in a worker because a poll and a
+      # reprocess also run cascades directly — leaving it to the caller meant
+      # one of three paths scheduled anything and the other two wrote rows that
+      # would never be read.
+      test_pid = self()
+
+      plan =
+        plan_of([
+          cell("leaf", []),
+          compute("slow", ["leaf"], PassThrough, %{suspends: %{expensive: []}})
+        ])
+
+      {:ok, _} =
+        Cascade.run(plan, [%{cell: "leaf", keys: ["a", "b"]}],
+          resumption_scheduler: fn point, _opts ->
+            send(test_pid, {:scheduled, point.waiting, point.row_uuid})
+            {:ok, :fake}
+          end
+        )
+
+      assert_received {:scheduled, "slow", "a"}
+      assert_received {:scheduled, "slow", "b"}
+    end
+
+    test "several suspensions at ONE point schedule one job" do
+      # A stopping point is `(tenant, waiting, resource, row_uuid)`, so two
+      # DIFFERENT rows reaching one slow cell are two points and two jobs — that
+      # is correct, and covered above.
+      #
+      # The dedup matters when one point is reached more than once in a single
+      # cascade: two inputs of the same slow cell both carrying the same changed
+      # row. The pending job reads every suspension there when it runs, so a
+      # second job would find nothing and exit.
+      test_pid = self()
+
+      plan =
+        plan_of([
+          cell("leaf", []),
+          compute("via_a", ["leaf"]),
+          compute("via_b", ["leaf"]),
+          compute("slow", ["via_a", "via_b"], PassThrough, %{suspends: %{expensive: []}})
+        ])
+
+      {:ok, report} =
+        Cascade.run(plan, [%{cell: "leaf", keys: ["k1"]}],
+          resumption_scheduler: fn point, _ ->
+            send(test_pid, {:scheduled, point.waiting, point.row_uuid})
+            {:ok, :fake}
+          end
+        )
+
+      # One suspension, because the walk merges both arrivals before `slow`
+      # runs — the same property that makes a diamond recompute its apex once.
+      assert length(report.suspended) == 1
+
+      assert_received {:scheduled, "slow", "k1"}
+      refute_received {:scheduled, "slow", _}
+    end
+
+    test "a scheduler that raises does not lose the cascade" do
+      # The suspensions are already durable, so a queue being down costs a delay
+      # someone must notice — not the work.
+      plan =
+        plan_of([
+          cell("leaf", []),
+          compute("slow", ["leaf"], PassThrough, %{suspends: %{expensive: []}})
+        ])
+
+      assert {:ok, report} =
+               Cascade.run(plan, [%{cell: "leaf", keys: ["a"]}],
+                 resumption_scheduler: fn _point, _ -> raise "queue is down" end
+               )
+
+      assert [%{waiting: "slow"}] = report.suspended
+      assert length(FakeRepo.recorded()) == 1, "the suspension is still recorded"
+    end
+
+    test "a cascade that suspends nothing schedules nothing" do
+      test_pid = self()
+      plan = plan_of([cell("leaf", []), compute("fast", ["leaf"])])
+
+      {:ok, _} =
+        Cascade.run(plan, [%{cell: "leaf", keys: ["a"]}],
+          resumption_scheduler: fn _p, _o -> send(test_pid, :scheduled) end
+        )
+
+      refute_received :scheduled
+    end
+  end
 end

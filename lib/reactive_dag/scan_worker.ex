@@ -125,7 +125,7 @@ if Code.ensure_loaded?(Oban.Worker) do
     worker instead of attaching to it.
 
     The drain inside emits its own events, so a host attaching to
-    `[:reactive_dag, :drain, :stop]` sees the recompute trace without attaching
+    `[:reactive_dag, :cascade, :stop]` sees the recompute trace without attaching
     here at all.
     """
     # UNIQUE per (args, queue, worker) while a job is available or executing.
