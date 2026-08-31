@@ -16,7 +16,9 @@ config :reactive_dag, repo: MyApp.Repo
 | key | default | required? | read by |
 |---|---|---|---|
 | [`:repo`](#repo) | — | **yes** | `Frontier` |
-| [`:dirty_table`](#dirty_table) | `"reactive_dag_dirty"` | no | `Frontier`, `Migration` |
+| [`:dirty_table`](#dirty_table) | `"reactive_dag_dirty"` | no | `Frontier` |
+| [`:suspension_table`](#suspension_table) | `"reactive_dag_suspension"` | no | `Suspension`, `Migration` |
+| [`:cascade_timeout`](#cascade_timeout) | `30_000` | no | `Suspension` |
 | [`:plan_mfa`](#plan_mfa) | — | only with `ScanWorker` | `ScanWorker` |
 | [`:insights_keep`](#insights_keep) | `20` | no | `Insights` |
 | [`:drain_enqueuer`](#drain_enqueuer) | `DrainWorker.enqueue/0` | no | `dirties_on schedule_drain:` |
@@ -54,9 +56,37 @@ The name is the one identifier SQL cannot parameterise, so it is validated
 against an identifier grammar at read time: a typo fails loudly rather than as
 a syntax error deep inside a query.
 
-`ReactiveDag.Migration` resolves `:dirty_table` exactly as `Frontier` does, so
-a host that sets the config gets a migration matching the table the runtime
-queries — there is no second place to keep in sync.
+### `:suspension_table`
+
+The physical table name for suspensions — where a cascade records that it
+stopped, and the successor to the dirty frontier.
+
+```elixir
+config :reactive_dag, suspension_table: "my_suspensions"
+```
+
+Resolved identically by `ReactiveDag.Suspension` and `ReactiveDag.Migration`,
+and validated against an identifier grammar at read time, so a typo fails
+loudly rather than as a syntax error deep inside a query.
+
+### `:cascade_timeout`
+
+How long a cascade's transaction may run, in milliseconds.
+
+```elixir
+config :reactive_dag, cascade_timeout: 30_000
+```
+
+A cascade contains only fast work by construction: anything slow declares
+itself so and becomes a suspension instead of running inline. So this is a
+**diagnostic**, not a capacity dial — if a cascade transaction is hitting 30
+seconds, a cell declared cheap is not, and you want to find out rather than
+wait longer.
+
+The drain this replaced used `timeout: :infinity`, justified by "a recompute
+legitimately runs for minutes". That is exactly the condition that let a
+nine-minute extraction hold a connection until the database closed it. Raising
+this back to `:infinity` restores that failure.
 
 ### `:plan_mfa`
 
