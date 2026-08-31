@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.17.0-rc.59](https://github.com/u2i/reactive_dag/compare/v0.17.0-rc.58...v0.17.0-rc.59) (2026-08-31)
+
+
+### ⚠ BREAKING CHANGES
+
+* suspension points — a cascade that runs to completion and records where it stopped ([#233](https://github.com/u2i/reactive_dag/issues/233))
+
+### Features
+
+* suspension points — a cascade that runs to completion and records where it stopped ([#233](https://github.com/u2i/reactive_dag/issues/233)) ([67840bb](https://github.com/u2i/reactive_dag/commit/67840bb9e1e189892f56b92c4ee80c9d396e89db))
+
 ## [0.17.0-rc.58](https://github.com/u2i/reactive_dag/compare/v0.17.0-rc.57...v0.17.0-rc.58) (2026-08-30)
 
 
