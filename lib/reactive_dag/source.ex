@@ -413,14 +413,25 @@ defmodule ReactiveDag.Source do
     key_rule = Keyword.get(poll_opts, :key_rule, ReactiveDag.Node.KeyRule)
     poll_opts = Keyword.delete(poll_opts, :key_rule)
 
-    case poll_cell(graph, cell_id, poll_opts) do
+    # COLLECTING, so a version a leaf's write recorded reaches the cascade it
+    # originates. A poll writes its rows through the host's own code — which is
+    # why `Payload`'s upsert is not on this path — and a host that records a
+    # version there has nowhere to put it otherwise. Without this the enqueue
+    # carries bare keys, every suspension downstream carries `"*"`, and every
+    # resumption recomputes a whole cell.
+    {polled, _diffs, versions} =
+      ReactiveDag.Node.Payload.collecting_diffs_and_versions(fn ->
+        poll_cell(graph, cell_id, poll_opts)
+      end)
+
+    case polled do
       {:ok, raw} ->
         # ONE normalisation, at the boundary. A bare list is a documented shape
         # and three separate `Map.get(result, …)` calls downstream each raised
         # on it — the reported crash was only the first of them, so fixing that
         # site alone would have moved the failure rather than removed it.
         result = normalise(raw)
-        marked = mark(graph, cell_id, result, reason, key_rule)
+        marked = mark(graph, cell_id, result, reason, key_rule, versions)
 
         {:ok,
          %{
@@ -475,7 +486,7 @@ defmodule ReactiveDag.Source do
   end
 
   # A flat list belongs to the cell that was polled; a map names its own leaves.
-  defp mark(graph, cell_id, result, _reason, _key_rule) do
+  defp mark(graph, cell_id, result, _reason, _key_rule, versions) do
     by_leaf = by_leaf(result, cell_id)
 
     # A poll originates THIS graph's cascade. Without the tenant a tenanted scan
@@ -488,7 +499,11 @@ defmodule ReactiveDag.Source do
     # named one cell and something had to name the next; a cascade follows the
     # graph itself, so handing it the changed leaf keys is the whole job.
     for {leaf, keys} <- by_leaf, keys != [], into: %{} do
-      enqueue_cascade(leaf, keys, opts)
+      # Only this leaf's versions: the collector is per-process and a fan-out
+      # poll feeds several leaves, so handing every leaf the whole map would
+      # attach another leaf's version to this one's key — a version describes
+      # one row, and the wrong one derives the wrong unit.
+      enqueue_cascade(leaf, keys, Keyword.put(opts, :versions, Map.take(versions, keys)))
       {leaf, keys}
     end
   end
