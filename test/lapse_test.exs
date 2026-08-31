@@ -29,7 +29,7 @@ defmodule ReactiveDag.LapseTest do
   """
   use ExUnit.Case, async: false
 
-  alias ReactiveDag.{Drain, Frontier}
+  alias ReactiveDag.{Cascade}
 
   defmodule Domain do
     use Ash.Domain, validate_config_inclusion?: false
@@ -500,6 +500,13 @@ defmodule ReactiveDag.LapseTest do
 
     on_exit(fn -> Application.put_env(:reactive_dag, :repo, prev_repo) end)
 
+    # Every `Ash.create!`/`destroy!` below goes through a `dirties_on` resource,
+    # and originating is now ENQUEUING — so without a capture seam each write
+    # reaches for an Oban that this test never starts. These tests are about what
+    # a lapse does to a mark, not about the queue, so the enqueues are absorbed
+    # and the cascades are driven explicitly through `Pending`.
+    ReactiveDag.Test.Pending.capture_enqueues()
+
     for r <- [
           Lines,
           Survives,
@@ -514,12 +521,26 @@ defmodule ReactiveDag.LapseTest do
       r |> Ash.read!() |> Enum.each(&Ash.destroy!/1)
     end
 
-    for cell <- @cells, do: Frontier.claim(cell)
+    # AFTER the cleanup destroys: those destroys enqueue too, and a test must not
+    # start life cascading from the previous test's teardown.
+    ReactiveDag.Test.Pending.reset_enqueued()
+    ReactiveDag.Test.Pending.reset()
     :ok
   end
 
-  defp drain(plan),
-    do: Drain.run(plan, recompute: ReactiveDag.Node.Recompute, key_rule: ReactiveDag.Node.KeyRule)
+  # These tests write through `dirties_on` and then expect the graph to
+  # recompute — under the queue the write left a mark and `Drain.run` found it.
+  # A write now ENQUEUES its own cascade, so the faithful translation is to
+  # cascade from what the writes enqueued: `CascadeWorker` does exactly this,
+  # turning one enqueued `{cell, keys, versions}` into one origin.
+  defp drain(plan) do
+    for {cell, keys, opts} <- ReactiveDag.Test.Pending.enqueued() do
+      ReactiveDag.Test.Pending.add(cell, keys, versions: Keyword.get(opts, :versions, %{}))
+    end
+
+    ReactiveDag.Test.Pending.reset_enqueued()
+    ReactiveDag.Test.Pending.cascade(plan)
+  end
 
   defp line!(key, fy, amount, label \\ "a") do
     Lines

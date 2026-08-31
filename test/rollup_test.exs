@@ -2,7 +2,7 @@ defmodule ReactiveDag.RollupTest do
   @moduledoc """
   The one fold both phases use.
 
-  `Drain.Report.total/2` and `Source.detail_total/2` were two implementations of
+  `Report.total/2` and `Source.detail_total/2` were two implementations of
   the same arithmetic over different containers — they had to agree, and nothing
   made them. They now both delegate here.
 
@@ -94,7 +94,7 @@ defmodule ReactiveDag.RollupTest do
     test "a report and a sweep carrying identical meta total identically" do
       meta = %{tokens_in: %{"haiku" => 900, "luna" => 100}}
 
-      report = %ReactiveDag.Drain.Report{
+      report = %ReactiveDag.Report{
         passes: 1,
         duration_us: 1,
         steps: [
@@ -113,10 +113,10 @@ defmodule ReactiveDag.RollupTest do
 
       sweep = %{SomeCrawler => %{changed: ["k"], detail: meta}}
 
-      assert ReactiveDag.Drain.Report.total(report, :tokens_in) ==
+      assert ReactiveDag.Report.total(report, :tokens_in) ==
                ReactiveDag.Source.detail_total(sweep, :tokens_in)
 
-      assert ReactiveDag.Drain.Report.by(report, :tokens_in) ==
+      assert ReactiveDag.Report.by(report, :tokens_in) ==
                ReactiveDag.Source.detail_by(sweep, :tokens_in)
     end
   end

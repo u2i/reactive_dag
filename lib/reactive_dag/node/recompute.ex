@@ -2,7 +2,7 @@ defmodule ReactiveDag.Node.Recompute do
   @moduledoc """
   THE engine: how a cell recomputes, decided by what its node DECLARED.
 
-  `ReactiveDag.Drain` calls this — there is nothing to configure and no strategy
+  `ReactiveDag.Cascade` calls this — there is nothing to configure and no strategy
   to pass. Dispatch reads the `reactive` block's own shape, in this order:
 
   | the node declares | this runs |
@@ -266,7 +266,7 @@ defmodule ReactiveDag.Node.Recompute do
 
   @doc false
   # `auto_scope/2` with the claimed units' own group VALUES, when the drain could
-  # derive them from the version (`Drain.claimed_groups/3`).
+  # derive them from the version (`Cascade.derive_units/4`).
   #
   # Preferred over inverting the `"|"`-joined label, and not merely tidier: the
   # label can only be split per-column, so two claims admit their cross-product

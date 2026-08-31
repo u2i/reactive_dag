@@ -4,7 +4,7 @@ defmodule ReactiveDag.ScanRun do
 
   A scan is two phases that always happen together and were reported
   separately. The poll says what it fetched, what it could not reach and what it
-  cost; the drain returns a `ReactiveDag.Drain.Report` saying what recomputed
+  cost; the drain returns a `ReactiveDag.Report` saying what recomputed
   downstream. A host wanting "what happened when this ran" had to collect both
   from one telemetry payload and know which half answered which question.
 
@@ -26,15 +26,21 @@ defmodule ReactiveDag.ScanRun do
   did this cost", answered by `ReactiveDag.Rollup` for both. This is the same
   move one level up — one value for "what did this run do".
 
-  ## The drain may be absent
+  ## The propagation half is now separate
 
-  `report` is `nil` for a scan that never drained: an unscannable source (no
-  credential, integration not enabled) is a completed scan that found nothing,
-  and a host recording scan results still wants the row. `drained?/1` says
-  which, rather than making every caller test for nil.
+  `report` is `nil` for every scan, and will stay that way. A poll used to drain
+  in the same job, so a run genuinely was two phases; a poll now ENQUEUES a
+  cascade per changed leaf and returns. The propagation happens in its own job,
+  reports itself under `[:reactive_dag, :cascade, :stop]`, and has no way to
+  reach back into the scan that started it.
+
+  The field is kept rather than removed because a host may still populate it —
+  a wrapper that runs a cascade synchronously for a test, say — and because
+  removing it would break every host reading `run.report` for a nil check.
+  `drained?/1` accordingly answers `false` for anything the library produces.
   """
 
-  alias ReactiveDag.Drain.Report
+  alias ReactiveDag.Report
 
   @typedoc """
   The poll half — what `ReactiveDag.Source.refresh/3` returned, plus the cell it
@@ -73,6 +79,13 @@ defmodule ReactiveDag.ScanRun do
   `false` for an unscannable source, which completes without draining. A host
   rendering "0 passes" for that would be reporting a drain that never happened.
   """
+  # `@deprecated`, not just `@doc deprecated:` — the latter only marks the docs,
+  # and what matters here is that a HOST compiling against this gets told. Its
+  # "did the work propagate?" check silently became a constant `false` when
+  # scans stopped propagating, and a constant that reads as a question is worse
+  # than a missing function.
+  @deprecated "A scan no longer propagates; read the cascade's own report instead"
+  @doc deprecated: "A scan no longer propagates; this is false for any run the library builds."
   @spec drained?(t()) :: boolean()
   def drained?(%__MODULE__{report: %Report{}}), do: true
   def drained?(%__MODULE__{}), do: false

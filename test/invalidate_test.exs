@@ -100,8 +100,8 @@ defmodule ReactiveDag.InvalidateTest do
 
   setup do
     start_supervised!(%{id: Calls, start: {Calls, :start_link, []}})
-    start_supervised!(ReactiveDag.Test.FakeFrontierRepo)
-    ReactiveDag.Test.FakeFrontierRepo.install()
+    start_supervised!(ReactiveDag.Test.FakeSuspensionRepo)
+    ReactiveDag.Test.FakeSuspensionRepo.install()
 
     for r <- [Transcripts, Summaries], row <- Ash.read!(r), do: Ash.destroy!(row)
 
@@ -133,10 +133,10 @@ defmodule ReactiveDag.InvalidateTest do
     test "a marked key is skipped without invalidation — the bug" do
       # mark by hand, exactly as a reprocess used to: the fingerprint still
       # matches, so the action never runs
-      ReactiveDag.Frontier.mark_dirty("summaries", ["t1"], "manual")
+      ReactiveDag.Test.Pending.add("summaries", ["t1"])
 
       {:ok, _} =
-        ReactiveDag.Drain.run(plan(),
+        ReactiveDag.Test.Pending.cascade(plan(),
           recompute: ReactiveDag.Node.Recompute,
           key_rule: ReactiveDag.Node.KeyRule
         )
@@ -175,10 +175,10 @@ defmodule ReactiveDag.InvalidateTest do
       Calls.reset()
 
       # an ordinary mark now skips again, because the row was re-fingerprinted
-      ReactiveDag.Frontier.mark_dirty("summaries", ["t1"], "manual")
+      ReactiveDag.Test.Pending.add("summaries", ["t1"])
 
       {:ok, _} =
-        ReactiveDag.Drain.run(plan(),
+        ReactiveDag.Test.Pending.cascade(plan(),
           recompute: ReactiveDag.Node.Recompute,
           key_rule: ReactiveDag.Node.KeyRule
         )

@@ -10,7 +10,7 @@ defmodule ReactiveDag.TenantPlanTest do
   """
   use ExUnit.Case, async: false
 
-  alias ReactiveDag.{Drain, Frontier, Plan}
+  alias ReactiveDag.{Cascade, Plan}
 
   defmodule Domain do
     use Ash.Domain, validate_config_inclusion?: false
@@ -186,6 +186,11 @@ defmodule ReactiveDag.TenantPlanTest do
   end
 
   setup do
+    # A poll or a write now ENQUEUES a cascade rather than leaving a mark,
+    # so without this the library reaches for Oban and these tests fail on
+    # a missing instance rather than on anything they are about.
+    ReactiveDag.Test.Pending.capture_enqueues()
+
     # `start_supervised!`, not `start_link`: the agent is registered under a global
     # name and linked to the test process, so it exits ASYNCHRONOUSLY when a test
     # ends — and the next test can call `start_link` before the name is released,
@@ -236,22 +241,28 @@ defmodule ReactiveDag.TenantPlanTest do
   end
 
   describe "a drain over a tenant plan" do
-    test "claims only its own tenant's keys" do
+    test "runs under its own tenant, and reads only that tenant's rows" do
+      # WHAT THIS USED TO ASSERT, and why the shape changed. Both tenants marked
+      # the same cell id on ONE shared queue, and the risk was that A's drain
+      # claimed B's rows out of it — so the test drained A and checked B's mark
+      # still stood.
+      #
+      # There is no shared queue to claim out of. A cascade is handed its
+      # origins, so a run for A cannot reach work nobody handed it: that
+      # isolation is structural now rather than something a claim has to respect.
+      # What is still worth pinning, and is asserted here, is the half that is
+      # NOT structural — that the tenant the plan carries is the tenant the
+      # cascade reads under. Getting that wrong reads zero rows and reports
+      # success.
       Lines
       |> Ash.Changeset.for_create(:upsert, %{key: "l1", fund: "gf", amount: 10.0})
       |> Ash.create!()
 
-      # both tenants dirty the same cell id
-      Frontier.mark_dirty("lines", ["l1"], "seed", tenant: "tenant_a")
-      Frontier.mark_dirty("lines", ["l1"], "seed", tenant: "tenant_b")
-
-      {:ok, report} = Drain.run(plan("tenant_a"))
+      ReactiveDag.Test.Pending.add("lines", ["l1"])
+      {:ok, report} = ReactiveDag.Test.Pending.cascade(plan("tenant_a"))
 
       assert Enum.any?(report.steps, &(&1.cell == "lines"))
-
-      # B's mark survived A's whole drain
-      refute Frontier.empty?(tenant: "tenant_b")
-      assert Frontier.empty?(tenant: "tenant_a")
+      assert (Rollup |> Ash.read!() |> hd()).total == 10.0
     end
 
     test "propagation marks the parent in the SAME tenant" do
@@ -259,8 +270,8 @@ defmodule ReactiveDag.TenantPlanTest do
       |> Ash.Changeset.for_create(:upsert, %{key: "l1", fund: "gf", amount: 10.0})
       |> Ash.create!()
 
-      Frontier.mark_dirty("lines", ["l1"], "seed", tenant: "tenant_a")
-      {:ok, report} = Drain.run(plan("tenant_a"))
+      ReactiveDag.Test.Pending.add("lines", ["l1"])
+      {:ok, report} = ReactiveDag.Test.Pending.cascade(plan("tenant_a"))
 
       # the cascade reached the rollup, so the propagated mark was readable by
       # this tenant's next pass — under the wrong tenant it would have been
@@ -280,10 +291,10 @@ defmodule ReactiveDag.TenantPlanTest do
       |> Ash.create!()
 
       # A WHOLE-CELL claim ("*") is what makes propagation take the `:all`
-      # branch — see `Drain`: a whole recompute can delete keys, so per-key
+      # branch — see `Cascade`: a whole recompute can delete keys, so per-key
       # propagation would strand a vanished one.
-      Frontier.mark_dirty("lines", ["*"], "seed", tenant: "tenant_a")
-      {:ok, report} = Drain.run(plan("tenant_a"))
+      ReactiveDag.Test.Pending.add("lines", ["*"])
+      {:ok, report} = ReactiveDag.Test.Pending.cascade(plan("tenant_a"))
 
       assert Enum.any?(report.steps, &(&1.cell == "rollup")),
              "the `:all` propagation landed in this tenant"
@@ -292,16 +303,21 @@ defmodule ReactiveDag.TenantPlanTest do
              "...and carried on down the cascade"
 
       assert (Total |> Ash.read!() |> hd()).total == 10.0
-      assert Frontier.empty?(tenant: "tenant_a")
     end
 
-    test "a tenant with nothing dirty drains to empty without touching another's" do
-      Frontier.mark_dirty("lines", ["l1"], "seed", tenant: "tenant_b")
-
-      {:ok, report} = Drain.run(plan("tenant_a"))
+    test "a cascade with no origins does nothing at all" do
+      # Was "tenant A drains to empty without consuming tenant B's marks",
+      # expressed by marking under B and draining under A. `Pending.add` takes no
+      # tenant — a cascade's tenant comes from the plan, not from an origin — so
+      # the cross-tenant half of that is no longer expressible, and is anyway
+      # structural now: a run only ever sees the origins it was handed.
+      #
+      # The remaining half is still worth a guard. A cascade handed nothing must
+      # do nothing, rather than falling back to scanning the cell — which is
+      # exactly what a queue-reading drain would have done.
+      {:ok, report} = ReactiveDag.Test.Pending.cascade(plan("tenant_a"))
 
       assert report.steps == []
-      refute Frontier.empty?(tenant: "tenant_b")
     end
   end
 end

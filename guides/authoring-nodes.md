@@ -531,7 +531,7 @@ With it declared, selection is a read and reprocessing is a mark:
 
 ```elixir
 keys = ReactiveDag.Node.Rows.keys_where(cell, fiscal_year: "FY25")
-ReactiveDag.Frontier.mark_dirty("budget_rollups", keys, "reprocess FY25")
+ReactiveDag.CascadeWorker.enqueue("budget_rollups", keys)
 ```
 
 `values:` is what makes a control a choice rather than a text box — only the host

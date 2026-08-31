@@ -9,7 +9,7 @@ defmodule ReactiveDag.GroupRuleTest do
   """
   use ExUnit.Case, async: false
 
-  alias ReactiveDag.{Drain, Frontier}
+  alias ReactiveDag.{Cascade}
 
   defmodule Domain do
     use Ash.Domain, validate_config_inclusion?: false
@@ -187,7 +187,7 @@ defmodule ReactiveDag.GroupRuleTest do
   defp plan, do: ReactiveDag.Node.graph([Expenses, CategoryTotals, CategoryHealth])
 
   defp drain(plan),
-    do: Drain.run(plan, recompute: ReactiveDag.Node.Recompute, key_rule: ReactiveDag.Node.KeyRule)
+    do: ReactiveDag.Test.Pending.cascade(plan)
 
   test "touching one expense moves ONE category — claim, read, fold, propagation" do
     plan = plan()
@@ -198,7 +198,7 @@ defmodule ReactiveDag.GroupRuleTest do
     assert cell.meta.key_rule == :group
     assert cell.meta.over_source.group_key_plan == [{:attr, :category, true}]
 
-    Frontier.mark_dirty("expenses", ["*"], "seed")
+    ReactiveDag.Test.Pending.add("expenses", ["*"])
     {:ok, _} = drain(plan)
 
     rows = CategoryTotals |> Ash.read!() |> Map.new(&{&1.key, &1})
@@ -211,7 +211,7 @@ defmodule ReactiveDag.GroupRuleTest do
     |> Ash.Changeset.for_update(:revise, %{amount: 300.0})
     |> Ash.update!()
 
-    Frontier.mark_dirty("expenses", ["e2"], "revised")
+    ReactiveDag.Test.Pending.add("expenses", ["e2"])
     {:ok, report} = drain(plan)
 
     steps = Map.new(report.steps, &{&1.cell, &1})
@@ -230,11 +230,11 @@ defmodule ReactiveDag.GroupRuleTest do
 
   test "a DELETED expense degrades the claim to whole-cell (the lookup can't name its group)" do
     plan = plan()
-    Frontier.mark_dirty("expenses", ["*"], "seed")
+    ReactiveDag.Test.Pending.add("expenses", ["*"])
     {:ok, _} = drain(plan)
 
     Expenses |> Ash.get!("e3") |> Ash.destroy!()
-    Frontier.mark_dirty("expenses", ["e3"], "deleted")
+    ReactiveDag.Test.Pending.add("expenses", ["e3"])
     {:ok, report} = drain(plan)
 
     steps = Map.new(report.steps, &{&1.cell, &1})

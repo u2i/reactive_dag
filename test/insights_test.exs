@@ -4,13 +4,13 @@ defmodule ReactiveDag.InsightsTest do
 
   Everything here is a READ over things the library already knows: the plan
   carries structure and depths, the coordination tuple carries per-key status
-  and freshness, and `Drain.Report` is already a causal trace. Insights just
+  and freshness, and `ReactiveDag.Report` is already a causal trace. Insights just
   assembles them into the shape a dashboard, a mix task, or an alerting check
   asks for — deliberately with no UI dependency of any kind.
   """
   use ExUnit.Case, async: false
 
-  alias ReactiveDag.{Drain, Frontier, Insights, ScanRun}
+  alias ReactiveDag.{Cascade, Insights, ScanRun}
 
   defmodule Domain do
     use Ash.Domain, validate_config_inclusion?: false
@@ -183,48 +183,23 @@ defmodule ReactiveDag.InsightsTest do
     end
   end
 
-  defmodule FakeRepo do
-    def start_link, do: Agent.start_link(fn -> MapSet.new() end, name: __MODULE__)
-
-    def query!("INSERT INTO " <> _, params) do
-      params
-      |> Enum.chunk_every(7)
-      |> Enum.each(fn [cell, _tenant, key, _r, _t, _held, vid] ->
-        Agent.update(__MODULE__, &MapSet.put(&1, {cell, key}))
-      end)
-
-      %{rows: []}
-    end
-
-    def query!("SELECT DISTINCT cell_id" <> _, _params) do
-      ids = Agent.get(__MODULE__, & &1) |> Enum.map(&elem(&1, 0)) |> Enum.uniq()
-      %{rows: Enum.map(ids, &[&1])}
-    end
-
-    def query!("DELETE FROM " <> _, [cell | _tenant]) do
-      keys =
-        Agent.get_and_update(__MODULE__, fn set ->
-          {mine, rest} = Enum.split_with(set, fn {c, _} -> c == cell end)
-          {Enum.map(mine, &elem(&1, 1)), MapSet.new(rest)}
-        end)
-
-      %{rows: Enum.map(keys, &[&1, nil])}
-    end
-
-    def query!("SELECT COUNT" <> _, _params),
-      do: %{rows: [[Agent.get(__MODULE__, &MapSet.size/1)]]}
-  end
+  # `FakeRepo` here was a hand-written stand-in for the FRONTIER table — an
+  # insert, a `SELECT DISTINCT cell_id`, a claiming delete. None of those
+  # statements are issued any more, and `Insights.pending/1` reads suspensions
+  # instead, which it had no clause for. `FakeSuspensionRepo` is the shared fake
+  # that does model them, so this file uses it rather than growing a second one.
 
   setup do
-    start_supervised!(%{id: FakeRepo, start: {FakeRepo, :start_link, []}})
-    prev_repo = Application.get_env(:reactive_dag, :repo)
-    Application.put_env(:reactive_dag, :repo, FakeRepo)
+    # A poll or a write now ENQUEUES a cascade rather than leaving a mark,
+    # so without this the library reaches for Oban and these tests fail on
+    # a missing instance rather than on anything they are about.
+    ReactiveDag.Test.Pending.capture_enqueues()
+
+    start_supervised!(ReactiveDag.Test.FakeSuspensionRepo)
+    ReactiveDag.Test.FakeSuspensionRepo.install()
     Insights.forget_runs()
 
-    on_exit(fn ->
-      Application.put_env(:reactive_dag, :repo, prev_repo)
-      Insights.forget_runs()
-    end)
+    on_exit(fn -> Insights.forget_runs() end)
 
     for {k, cat, amt} <- [{"e1", "travel", 100.0}, {"e2", "meals", 40.0}] do
       Expenses
@@ -258,10 +233,10 @@ defmodule ReactiveDag.InsightsTest do
   describe "per-cell state" do
     test "cell_status/2 carries the declaration AND the live coordination state" do
       p = plan()
-      Frontier.mark_dirty("expenses", ["*"], "seed")
+      ReactiveDag.Test.Pending.add("expenses", ["*"])
 
       {:ok, _} =
-        Drain.run(p, recompute: ReactiveDag.Node.Recompute, key_rule: ReactiveDag.Node.KeyRule)
+        ReactiveDag.Test.Pending.cascade(p)
 
       status = Insights.cell_status(p, "category_totals")
 
@@ -284,21 +259,54 @@ defmodule ReactiveDag.InsightsTest do
       assert ids == ["expenses", "category_totals", "category_health"]
     end
 
-    test "pending/1 reports cells the NEXT drain would work on, without consuming them" do
+    test "pending/1 reports cells with SUSPENDED work, without consuming it" do
+      # WHAT `pending/1` MEANS CHANGED, so the test had to. It used to report
+      # cells with dirty keys a drain would claim next, and dirtying a cell was
+      # how a test made it non-empty. There are no dirty keys now: it reports the
+      # cells with SUSPENDED work — a cascade that stopped and has not resumed —
+      # so a suspension is what makes it non-empty.
+      #
+      # The property being pinned is unchanged and is the reason the function
+      # exists: a dashboard calling it must not consume the work it reports.
       p = plan()
       assert Insights.pending(p) == []
 
-      Frontier.mark_dirty("expenses", ["e1"], "seed")
+      ReactiveDag.Suspension.record(
+        %{tenant: "*", waiting: "expenses", resource: "expenses", row_uuid: "e1"},
+        "v1",
+        :expensive
+      )
+
       assert Insights.pending(p) == ["expenses"]
 
-      # a READ: peeking twice leaves the frontier intact for the drain
+      # a READ: peeking twice leaves the suspension standing for its resumption
       assert Insights.pending(p) == ["expenses"]
-      refute Frontier.empty?()
+      assert ReactiveDag.Test.FakeSuspensionRepo.any?()
     end
 
-    test "pending/1 ignores dirty cells this plan doesn't know" do
-      Frontier.mark_dirty("some_other_graph", ["k"], "seed")
-      assert Insights.pending(plan()) == []
+    test "pending/1 ignores suspensions this plan does not know" do
+      # The suspension table is ONE table serving every graph a host assembles,
+      # so an unfiltered read reports another graph's stopped work as this
+      # plan's — a dashboard for the finance graph showing the crawler's
+      # backlog, with no way for a reader to tell.
+      #
+      # This was briefly true during the rewrite, which is how it was caught.
+      p = plan()
+
+      ReactiveDag.Suspension.record(
+        %{
+          tenant: "*",
+          waiting: "some_other_graph",
+          resource: "some_other_graph",
+          row_uuid: "x"
+        },
+        "v1",
+        :expensive
+      )
+
+      assert Insights.pending(p) == [],
+             "a suspension belonging to a cell this plan has never heard of " <>
+               "must not appear in its pending list"
     end
 
     test "status reads degrade rather than crash when a node's rows are unreadable" do
@@ -383,17 +391,17 @@ defmodule ReactiveDag.InsightsTest do
       assert Insights.last_run() == nil
 
       p = plan()
-      Frontier.mark_dirty("expenses", ["*"], "seed")
+      ReactiveDag.Test.Pending.add("expenses", ["*"])
 
       {:ok, first} =
-        Drain.run(p, recompute: ReactiveDag.Node.Recompute, key_rule: ReactiveDag.Node.KeyRule)
+        ReactiveDag.Test.Pending.cascade(p)
 
       assert ^first = Insights.record(first)
 
-      Frontier.mark_dirty("expenses", ["e1"], "again")
+      ReactiveDag.Test.Pending.add("expenses", ["e1"])
 
       {:ok, second} =
-        Drain.run(p, recompute: ReactiveDag.Node.Recompute, key_rule: ReactiveDag.Node.KeyRule)
+        ReactiveDag.Test.Pending.cascade(p)
 
       Insights.record(second)
 
@@ -410,7 +418,7 @@ defmodule ReactiveDag.InsightsTest do
       on_exit(fn -> Application.put_env(:reactive_dag, :insights_keep, prev) end)
 
       for i <- 1..6 do
-        Insights.record(%Drain.Report{passes: i, duration_us: i, steps: []})
+        Insights.record(%ReactiveDag.Report{passes: i, duration_us: i, steps: []})
       end
 
       retained = Insights.recent() |> Enum.map(& &1.run.report.passes)
@@ -430,13 +438,13 @@ defmodule ReactiveDag.InsightsTest do
     end
 
     test "an entry records WHICH GRAPH the run was" do
-      Insights.record(%Drain.Report{passes: 1, steps: []}, tenant: "village")
+      Insights.record(%ReactiveDag.Report{passes: 1, steps: []}, tenant: "village")
 
       assert [%{tenant: "village"}] = Insights.recent()
     end
 
     test "a host with one graph records no tenant" do
-      Insights.record(%Drain.Report{passes: 1, steps: []})
+      Insights.record(%ReactiveDag.Report{passes: 1, steps: []})
 
       assert [%{tenant: nil}] = Insights.recent()
     end
@@ -445,15 +453,15 @@ defmodule ReactiveDag.InsightsTest do
       # `"*"` is the FRONTIER's spelling for "untenanted" and belongs there. An
       # entry says `nil`, which reads correctly in a log line — a host with one
       # graph should not see `*` in a column headed "graph".
-      Insights.record(%Drain.Report{passes: 1, steps: []}, tenant: "*")
+      Insights.record(%ReactiveDag.Report{passes: 1, steps: []}, tenant: "*")
 
       assert [%{tenant: nil}] = Insights.recent()
     end
 
     test "recent/2 returns ONE tenant's runs" do
-      Insights.record(%Drain.Report{passes: 1, steps: []}, tenant: "village")
-      Insights.record(%Drain.Report{passes: 2, steps: []}, tenant: "town")
-      Insights.record(%Drain.Report{passes: 3, steps: []}, tenant: "village")
+      Insights.record(%ReactiveDag.Report{passes: 1, steps: []}, tenant: "village")
+      Insights.record(%ReactiveDag.Report{passes: 2, steps: []}, tenant: "town")
+      Insights.record(%ReactiveDag.Report{passes: 3, steps: []}, tenant: "village")
 
       assert Insights.recent(:all, tenant: "village")
              |> Enum.map(& &1.run.report.passes) == [3, 1]
@@ -463,8 +471,8 @@ defmodule ReactiveDag.InsightsTest do
     end
 
     test "unfiltered still returns every tenant's — one operator, every graph" do
-      Insights.record(%Drain.Report{passes: 1, steps: []}, tenant: "village")
-      Insights.record(%Drain.Report{passes: 2, steps: []}, tenant: "town")
+      Insights.record(%ReactiveDag.Report{passes: 1, steps: []}, tenant: "village")
+      Insights.record(%ReactiveDag.Report{passes: 2, steps: []}, tenant: "town")
 
       assert Insights.recent() |> length() == 2
     end
@@ -474,8 +482,8 @@ defmodule ReactiveDag.InsightsTest do
       # everyone's and then filtering shows a log of two when the tenant has
       # twenty-five — and looks like a quiet graph rather than a truncated list.
       for i <- 1..5 do
-        Insights.record(%Drain.Report{passes: i, steps: []}, tenant: "town")
-        Insights.record(%Drain.Report{passes: i, steps: []}, tenant: "village")
+        Insights.record(%ReactiveDag.Report{passes: i, steps: []}, tenant: "town")
+        Insights.record(%ReactiveDag.Report{passes: i, steps: []}, tenant: "village")
       end
 
       assert Insights.recent(3, tenant: "village")
@@ -485,15 +493,15 @@ defmodule ReactiveDag.InsightsTest do
     test "an untenanted entry is not claimed by a filtered read" do
       # Recorded before its host declared tenants. Showing it as the village's
       # asserts something the recording never said.
-      Insights.record(%Drain.Report{passes: 9, steps: []})
+      Insights.record(%ReactiveDag.Report{passes: 9, steps: []})
 
       assert Insights.recent(:all, tenant: "village") == []
       assert Insights.recent() |> length() == 1
     end
 
     test "last_run/1 is scoped too" do
-      Insights.record(%Drain.Report{passes: 1, steps: []}, tenant: "village")
-      Insights.record(%Drain.Report{passes: 2, steps: []}, tenant: "town")
+      Insights.record(%ReactiveDag.Report{passes: 1, steps: []}, tenant: "village")
+      Insights.record(%ReactiveDag.Report{passes: 2, steps: []}, tenant: "town")
 
       assert Insights.last_run(tenant: "village").run.report.passes == 1
       assert Insights.last_run().run.report.passes == 2
@@ -506,25 +514,25 @@ defmodule ReactiveDag.InsightsTest do
     end
 
     test "recent/1 takes a limit" do
-      for i <- 1..4, do: Insights.record(%Drain.Report{passes: i, steps: []})
+      for i <- 1..4, do: Insights.record(%ReactiveDag.Report{passes: i, steps: []})
       assert Insights.recent(2) |> Enum.map(& &1.run.report.passes) == [4, 3]
     end
 
     test "the retained report IS the causal trace — what ran, and why" do
       p = plan()
-      Frontier.mark_dirty("expenses", ["*"], "seed")
+      ReactiveDag.Test.Pending.add("expenses", ["*"])
 
       {:ok, report} =
-        Drain.run(p, recompute: ReactiveDag.Node.Recompute, key_rule: ReactiveDag.Node.KeyRule)
+        ReactiveDag.Test.Pending.cascade(p)
 
       Insights.record(report)
       %{run: run} = Insights.last_run()
       r = run.report
 
       # the question a dashboard exists to answer: why did this recompute?
-      assert Drain.Report.causes(r)["category_totals"] == "expenses"
-      assert Drain.Report.causes(r)["category_health"] == "category_totals"
-      assert "category_totals" in Drain.Report.cells(r)
+      assert ReactiveDag.Report.causes(r)["category_totals"] == "expenses"
+      assert ReactiveDag.Report.causes(r)["category_health"] == "category_totals"
+      assert "category_totals" in ReactiveDag.Report.cells(r)
     end
   end
 
@@ -541,7 +549,7 @@ defmodule ReactiveDag.InsightsTest do
         unreachable: [{"calendar", :timeout}, {"drive", :econnrefused}],
         detail: %{tokens_in: 4200, llm_calls: 7, cache_hits: 31},
         duration_us: 134_000_000,
-        report: %Drain.Report{passes: 1, duration_us: 6_100, steps: []}
+        report: %ReactiveDag.Report{passes: 1, duration_us: 6_100, steps: []}
       }
 
       Insights.record(run)
@@ -581,10 +589,10 @@ defmodule ReactiveDag.InsightsTest do
         cell: "meeting_docs",
         unreachable: [{"drive", :timeout}],
         duration_us: 134_000_000,
-        report: %Drain.Report{passes: 1, duration_us: 6_100, steps: []}
+        report: %ReactiveDag.Report{passes: 1, duration_us: 6_100, steps: []}
       })
 
-      Insights.record(%Drain.Report{passes: 2, duration_us: 900, steps: []})
+      Insights.record(%ReactiveDag.Report{passes: 2, duration_us: 900, steps: []})
 
       assert [bare, scan] = Insights.recent()
 
@@ -594,7 +602,7 @@ defmodule ReactiveDag.InsightsTest do
 
     test "a bare report is normalised into a run — recent/1 returns ONE shape" do
       Insights.record(%ScanRun{cell: "docs", duration_us: 5})
-      Insights.record(%Drain.Report{passes: 2, duration_us: 900, steps: []})
+      Insights.record(%ReactiveDag.Report{passes: 2, duration_us: 900, steps: []})
 
       # A consumer pattern-matching two shapes gets it wrong, so there is only
       # one: every entry carries a %ScanRun{}, whichever way it was recorded.
@@ -604,7 +612,7 @@ defmodule ReactiveDag.InsightsTest do
     end
 
     test "a bare drain's duration is the DRAIN's — the two rows mean the same thing" do
-      Insights.record(%Drain.Report{passes: 2, duration_us: 900, steps: []})
+      Insights.record(%ReactiveDag.Report{passes: 2, duration_us: 900, steps: []})
 
       entry = Insights.last_run()
 
@@ -615,7 +623,7 @@ defmodule ReactiveDag.InsightsTest do
     end
 
     test "a bare drain claims no poll findings it never made" do
-      Insights.record(%Drain.Report{passes: 2, duration_us: 900, steps: []})
+      Insights.record(%ReactiveDag.Report{passes: 2, duration_us: 900, steps: []})
 
       run = Insights.last_run().run
 

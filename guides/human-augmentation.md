@@ -141,7 +141,7 @@ not collide.
 
 Both may appear on one resource; an action covered by both marks once.
 
-`schedule_drain true` applies to either: mark *and* enqueue a drain in the same
+Either one enqueues its cascade in the same
 transaction, so an edit lands in seconds rather than at the next sweep. For
 someone who just typed a correction and is watching the page, that is the
 point.
@@ -304,20 +304,32 @@ to be a person.
 ### Reviewing
 
 ```elixir
-Frontier.awaiting("agenda_items")   #=> [{key, diff}] — what is held, and its diff
-Frontier.approve("agenda_items", ["_05132025-671"])
-Frontier.reject("agenda_items", :all)
+ReactiveDag.Suspension.points(tenant: "acme")
+#=> [%{point: %{waiting: "agenda_items", resource: "meeting_docs", row_uuid: "…"},
+#      reason: :approval, count: 3, oldest: ~U[…]}]
 ```
 
-A held change's diff IS the review: `%{field => %{"from" => old, "to" => new}}`,
-both sides, which is what a reviewer needs to see. `reject/3` discards the mark —
-the row stands and the consumers stay as they were, which is the honest meaning
-of "no" when the gate holds propagation rather than the write.
+A gated change writes a suspension — the same row an expensive one writes, with
+`reason: :approval` instead of `:expensive`. It names which tenant, what
+stopped, what changed, and which version of it; the version resolves to the
+diff, both sides, which is what a reviewer needs to see.
 
-A second change to a held key MERGES into it (`Frontier.merge_diffs/2`): earliest
-`from`, latest `to`. So a row edited three times before review shows one diff
-covering the whole state change, and never an intermediate value no settled state
-held.
+`count` and `oldest` are the operational half: a point whose count climbs while
+its `oldest` recedes is one nobody is reviewing.
+
+> **Not yet implemented.** Approving and rejecting — the actions that clear a
+> `:approval` suspension — are a deferred phase. The suspension is recorded and
+> the cascade correctly stops; what does not yet exist is the API to release
+> it. A host needing this today discharges the rows itself and re-originates.
+>
+> The design for it is sign-off keyed to a version: a row references the
+> approval that covers it, the approval names the `version_id` it approved, and
+> "is this approved" is an equality rather than a stored flag — so nothing has
+> to remember to clear it when the content moves.
+
+Several changes to one gated row accumulate as several suspensions at one
+point, and the job that resumes reads them all and propagates once. So a row
+edited three times before review is one unit of work, not three.
 
 ### Where a gate belongs
 
@@ -339,7 +351,7 @@ summary that follows from it.
 | you want | declare |
 |---|---|
 | a human edit re-runs the cascade | `augmented_by [:action]` |
-| ...and applies immediately | `+ schedule_drain true` |
+| ...and applies immediately | (automatic — originating IS enqueuing) |
 | the mark outlives recomputes | nothing — the default; keep the column out of the payload action's `accept` |
 | the mark is a claim about content | `lapse :attr, when_changed: :any` |
 | ...about *particular* content | `lapse :attr, when_changed: [:fields]` |

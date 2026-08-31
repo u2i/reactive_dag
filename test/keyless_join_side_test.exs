@@ -22,7 +22,7 @@ defmodule ReactiveDag.KeylessJoinSideTest do
   """
   use ExUnit.Case, async: false
 
-  alias ReactiveDag.{Drain, Frontier}
+  alias ReactiveDag.{Cascade}
 
   defmodule Domain do
     use Ash.Domain, validate_config_inclusion?: false
@@ -129,25 +129,25 @@ defmodule ReactiveDag.KeylessJoinSideTest do
   defp plan, do: ReactiveDag.Node.graph([Machine, EdrAgent, Observation])
 
   defp drain,
-    do: Drain.run(plan(), recompute: ReactiveDag.Node.Recompute, key_rule: ReactiveDag.Node.KeyRule)
+    do: ReactiveDag.Test.Pending.cascade(plan(), recompute: ReactiveDag.Node.Recompute, key_rule: ReactiveDag.Node.KeyRule)
 
   setup do
-    start_supervised!(ReactiveDag.Test.FakeFrontierRepo)
-    ReactiveDag.Test.FakeFrontierRepo.install()
+    start_supervised!(ReactiveDag.Test.FakeSuspensionRepo)
+    ReactiveDag.Test.FakeSuspensionRepo.install()
 
     for m <- [Machine, EdrAgent, Observation], r <- Ash.read!(m), do: Ash.destroy!(r)
-    for cell <- ["machine_register", "edr_agents", "machine_observations"], do: Frontier.claim(cell)
+    ReactiveDag.Test.Pending.reset()
     :ok
   end
 
   defp put_machine(serial, hostname) do
     Ash.create!(Machine, %{serial: serial, hostname: hostname}, action: :upsert)
-    Frontier.mark_dirty("machine_register", [serial], "test")
+    ReactiveDag.Test.Pending.add("machine_register", [serial])
   end
 
   defp put_agent(serial, version) do
     Ash.create!(EdrAgent, %{serial: serial, version: version}, action: :upsert)
-    Frontier.mark_dirty("edr_agents", [serial], "test")
+    ReactiveDag.Test.Pending.add("edr_agents", [serial])
   end
 
   test "a keyless LEFT side drains — it does not filter on the literal `false`" do
@@ -181,7 +181,7 @@ defmodule ReactiveDag.KeylessJoinSideTest do
     # proposed — but it reprices every observation because one row moved. A side
     # that declares `row_key` has said how to find its rows.
     Ash.create!(Machine, %{serial: "A", hostname: "host-a2"}, action: :upsert)
-    Frontier.mark_dirty("machine_register", ["A"], "test")
+    ReactiveDag.Test.Pending.add("machine_register", ["A"])
 
     {:ok, report} = drain()
     claimed = Map.new(report.steps, &{&1.cell, &1})["machine_observations"].claimed

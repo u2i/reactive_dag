@@ -16,7 +16,7 @@ defmodule ReactiveDag.ReportBreakdownTest do
   """
   use ExUnit.Case, async: true
 
-  alias ReactiveDag.Drain.Report
+  alias ReactiveDag.Report
 
   defp report(metas) do
     steps =

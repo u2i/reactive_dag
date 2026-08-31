@@ -19,7 +19,7 @@ defmodule ReactiveDag.OpProgressTest do
 
     :telemetry.attach(
       "op-progress-test",
-      [:reactive_dag, :drain, :progress],
+      [:reactive_dag, :cascade, :progress],
       fn _e, measurements, metadata, _ -> send(parent, {:progress, measurements, metadata}) end,
       nil
     )

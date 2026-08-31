@@ -24,7 +24,7 @@ defmodule ReactiveDag.AugmentedByTest do
   """
   use ExUnit.Case, async: false
 
-  alias ReactiveDag.{Frontier, Node}
+  alias ReactiveDag.{Cascade, Node}
   alias ReactiveDag.Node.Verifiers.VerifyReactive
 
   defmodule Domain do
@@ -172,7 +172,7 @@ defmodule ReactiveDag.AugmentedByTest do
     end
   end
 
-  # `schedule_drain` composes: an augmented write enqueues the drain in the same
+  # An augmented write enqueues its cascade in the same
   # transaction as the mark.
   defmodule Verdicts do
     use Ash.Resource,
@@ -205,7 +205,6 @@ defmodule ReactiveDag.AugmentedByTest do
       id(:verdicts)
       leaf?(true)
       augmented_by([:override])
-      schedule_drain(true)
     end
   end
 
@@ -243,7 +242,6 @@ defmodule ReactiveDag.AugmentedByTest do
       # :correct is an `:update`, so BOTH cover it
       dirties_on([:create, :update])
       augmented_by([:correct])
-      schedule_drain(true)
     end
   end
 
@@ -289,14 +287,20 @@ defmodule ReactiveDag.AugmentedByTest do
 
     on_exit(fn -> Application.put_env(:reactive_dag, :repo, prev_repo) end)
 
+    # An augmented write no longer marks a table a test can read back — it
+    # enqueues a cascade. This is the seam that catches those enqueues, so the
+    # assertions below can ask what a write ORIGINATED without an Oban running.
+    ReactiveDag.Test.Pending.capture_enqueues()
+
     # the ETS tables are shared, so start each test from a known-empty state —
     # including the frontier, which the destroys above would otherwise re-dirty.
     for res <- [Expenses, CategoryTotals, Rollups, Verdicts, Readings] do
       res |> Ash.read!() |> Enum.each(&Ash.destroy!/1)
     end
 
-    for cell <- ["expenses", "category_totals", "rollups", "verdicts", "readings"],
-        do: Frontier.claim(cell)
+    # AFTER the cleanup destroys, which enqueue too.
+    ReactiveDag.Test.Pending.reset_enqueued()
+    ReactiveDag.Test.Pending.reset()
 
     :ok
   end
@@ -310,20 +314,18 @@ defmodule ReactiveDag.AugmentedByTest do
 
   test "a write through an AUGMENTED action marks the node's own key" do
     row = computed_row(%{key: "travel", category: "travel", total: 100.0, n: 2})
-    Frontier.claim("category_totals")
 
     row |> Ash.Changeset.for_update(:correct, %{total: 120.0}) |> Ash.update!()
 
-    assert FakeRepo.dirty() == [{"category_totals", "travel"}]
+    assert ReactiveDag.Test.Pending.enqueued_work() == [{"category_totals", ["travel"]}]
   end
 
   test "every action in the list marks — not just the first" do
     row = computed_row(%{key: "meals", category: "meals", total: 10.0, n: 1})
-    Frontier.claim("category_totals")
 
     row |> Ash.Changeset.for_update(:approve, %{note: "checked"}) |> Ash.update!()
 
-    assert FakeRepo.dirty() == [{"category_totals", "meals"}]
+    assert ReactiveDag.Test.Pending.enqueued_work() == [{"category_totals", ["meals"]}]
   end
 
   test "an augmented CREATE marks too — even sharing its type with the payload upsert" do
@@ -334,17 +336,16 @@ defmodule ReactiveDag.AugmentedByTest do
     |> Ash.Changeset.for_create(:add, %{key: "fuel", category: "fuel", total: 5.0, n: 1})
     |> Ash.create!()
 
-    assert FakeRepo.dirty() == [{"category_totals", "fuel"}]
+    assert ReactiveDag.Test.Pending.enqueued_work() == [{"category_totals", ["fuel"]}]
   end
 
   test "a write through a NON-augmented action on the same resource marks nothing" do
     row = computed_row(%{key: "lodging", category: "lodging", total: 50.0, n: 1})
-    Frontier.claim("category_totals")
 
     # `:annotate` writes the same column `:approve` does, and is not in the list
     row |> Ash.Changeset.for_update(:annotate, %{note: "internal"}) |> Ash.update!()
 
-    assert FakeRepo.dirty() == []
+    assert ReactiveDag.Test.Pending.enqueued_work() == []
   end
 
   test "THE POINT: the library's own payload upsert does NOT mark" do
@@ -358,7 +359,8 @@ defmodule ReactiveDag.AugmentedByTest do
       n: 2
     })
 
-    assert FakeRepo.dirty() == [], "the recompute's own write must not re-dirty its cell"
+    assert ReactiveDag.Test.Pending.enqueued_work() == [],
+           "the recompute's own write must not re-originate its cell"
 
     # and again, as a repeated drain would: still nothing, so it settles
     Node.Payload.upsert(CategoryTotals, :key, "travel", %{
@@ -368,7 +370,7 @@ defmodule ReactiveDag.AugmentedByTest do
       n: 2
     })
 
-    assert FakeRepo.dirty() == []
+    assert ReactiveDag.Test.Pending.enqueued_work() == []
   end
 
   test "a drain over an augmented node settles — it does not re-dirty itself" do
@@ -378,75 +380,85 @@ defmodule ReactiveDag.AugmentedByTest do
     |> Ash.Changeset.for_create(:create, %{key: "e1", category: "travel", amount: 100.0})
     |> Ash.create!()
 
-    {:ok, _} =
-      ReactiveDag.Drain.run(plan, recompute: Node.Recompute, key_rule: Node.KeyRule)
+    # The write enqueued its own cascade; run it the way `CascadeWorker` would.
+    for {cell, keys, opts} <- ReactiveDag.Test.Pending.enqueued() do
+      ReactiveDag.Test.Pending.add(cell, keys, versions: Keyword.get(opts, :versions, %{}))
+    end
+
+    ReactiveDag.Test.Pending.reset_enqueued()
+    {:ok, _} = ReactiveDag.Test.Pending.cascade(plan)
 
     assert (CategoryTotals |> Ash.get!("travel")).total == 100.0
-    assert FakeRepo.dirty() == [], "the drain consumed everything and left nothing behind"
+
+    # THE POINT: the fold's own payload write into `category_totals` must not
+    # enqueue a further cascade, or the graph never settles.
+    assert ReactiveDag.Test.Pending.enqueued_work() == [],
+           "the cascade left nothing behind — an augmented node does not re-originate itself"
   end
 
   test "the key is the IDENTITY serialization for a composite primary key" do
     Node.Payload.upsert_identity(Rollups, [:fund, :fy], %{fund: "gf", fy: "2025", total: 1.0})
-    assert FakeRepo.dirty() == [], "and the payload write itself still marks nothing"
+    assert ReactiveDag.Test.Pending.enqueued_work() == [],
+           "and the payload write itself still originates nothing"
 
     Rollups
     |> Ash.get!(%{fund: "gf", fy: "2025"})
     |> Ash.Changeset.for_update(:correct, %{total: 2.0})
     |> Ash.update!()
 
-    assert FakeRepo.dirty() == [{"rollups", "gf|2025"}]
+    assert ReactiveDag.Test.Pending.enqueued_work() == [{"rollups", ["gf|2025"]}]
   end
 
-  describe "schedule_drain composes" do
-    setup do
-      {:ok, agent} = Agent.start_link(fn -> 0 end)
-      prev = Application.get_env(:reactive_dag, :drain_enqueuer)
+  describe "originating composes with dirties_on" do
+    # This block counted calls through a `:drain_enqueuer` seam, because under
+    # the queue a write MARKED and then — separately, only if the node opted in
+    # — scheduled a drain to consume that mark. `MarkDirty` now enqueues the
+    # cascade directly and nothing in `lib/` reads `:drain_enqueuer`, so those
+    # counts would all be zero and the tests would pass while asserting nothing.
+    #
+    # The property that matters survives intact, and is now easier to state:
+    # every enqueue IS the schedule, so counting enqueues is counting schedules.
 
-      Application.put_env(:reactive_dag, :drain_enqueuer, fn ->
-        Agent.update(agent, &(&1 + 1))
-        {:ok, :enqueued}
-      end)
-
-      on_exit(fn -> Application.put_env(:reactive_dag, :drain_enqueuer, prev) end)
-      %{enqueues: fn -> Agent.get(agent, & &1) end}
-    end
-
-    test "an augmented write schedules the drain, so the correction lands promptly", ctx do
+    test "an augmented write enqueues its own cascade, so the correction lands promptly" do
       Node.Payload.upsert(Verdicts, :key, "v1", %{key: "v1", status: "fail"})
-      assert ctx.enqueues.() == 0, "the payload write neither marks nor schedules"
+
+      assert ReactiveDag.Test.Pending.enqueued_work() == [],
+             "the library's own payload write neither originates nor schedules"
 
       Verdicts
       |> Ash.get!("v1")
       |> Ash.Changeset.for_update(:override, %{status: "accepted"})
       |> Ash.update!()
 
-      assert ctx.enqueues.() == 1
-      assert {"verdicts", "v1"} in FakeRepo.dirty(), "and it still marked"
+      assert ReactiveDag.Test.Pending.enqueued_work() == [{"verdicts", ["v1"]}]
     end
 
-    test "an action covered by BOTH dirties_on and augmented_by marks ONCE", ctx do
+    test "an action covered by BOTH dirties_on and augmented_by enqueues ONCE" do
       # Ash concatenates an action's own changes with the resource's global
-      # changes and dedupes neither, so a naive wiring runs MarkDirty twice. The
-      # frontier insert is ON CONFLICT DO NOTHING and would hide that — the
-      # enqueue is what shows it.
+      # changes and dedupes neither, so a naive wiring runs MarkDirty twice.
+      # The frontier insert was ON CONFLICT DO NOTHING and would have hidden
+      # that; a list of enqueues cannot hide it, which is why this assertion
+      # counts entries rather than asking whether one exists.
       Readings
       |> Ash.Changeset.for_create(:create, %{key: "r1", value: 1.0})
       |> Ash.create!()
 
-      assert ctx.enqueues.() == 1, "the create is covered by dirties_on only"
-      Frontier.claim("readings")
+      assert length(ReactiveDag.Test.Pending.enqueued()) == 1,
+             "the create is covered by dirties_on only"
+
+      ReactiveDag.Test.Pending.reset_enqueued()
 
       Readings
       |> Ash.get!("r1")
       |> Ash.Changeset.for_update(:correct, %{value: 2.0})
       |> Ash.update!()
 
-      assert ctx.enqueues.() == 2, ":correct is covered by BOTH, and must mark exactly once"
-      assert FakeRepo.dirty() == [{"readings", "r1"}]
+      assert length(ReactiveDag.Test.Pending.enqueued()) == 1,
+             ":correct is covered by BOTH, and must enqueue exactly once"
+
+      assert ReactiveDag.Test.Pending.enqueued_work() == [{"readings", ["r1"]}]
     end
   end
-
-
 
   describe "compile-time checks" do
     # A name that doesn't wire is the worst outcome for a feature whose whole

@@ -15,7 +15,6 @@ defmodule ReactiveDag.Node.Recompute.PerKey do
   (`%{called: n, skipped: n}`), so the saving is visible rather than assumed.
   """
 
-  require Ash.Query
 
   alias ReactiveDag.Node.Fingerprint
   alias ReactiveDag.Node.Recompute.Read

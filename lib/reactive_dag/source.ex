@@ -9,7 +9,7 @@ defmodule ReactiveDag.Source do
        return the leaf keys that CHANGED (so the caller can mark parents dirty).
        Sources are independent; a failure is contained to its own leaf.
     2. **drain** — the engine recomputes everything downstream from the dirty
-       frontier (`ReactiveDag.Drain`). No source runs here.
+       graph (`ReactiveDag.Cascade`). No source runs here.
 
   This split is a design invariant, not an accident: the drain is pure set/graph
   computation over rows already written — deterministic, re-runnable, and it
@@ -475,25 +475,45 @@ defmodule ReactiveDag.Source do
   end
 
   # A flat list belongs to the cell that was polled; a map names its own leaves.
-  defp mark(graph, cell_id, result, reason, key_rule) do
+  defp mark(graph, cell_id, result, _reason, _key_rule) do
     by_leaf = by_leaf(result, cell_id)
 
-    # A poll marks THIS graph's frontier. Without the tenant a tenanted scan
-    # would write its findings under `"*"`, where that tenant's drain never looks
-    # — the crawl would report rows found and nothing would ever recompute.
+    # A poll originates THIS graph's cascade. Without the tenant a tenanted scan
+    # would cascade under `"*"`, where that tenant's rows are not — the crawl
+    # would report rows found and nothing would recompute. A read scoped to the
+    # wrong tenant returns nothing and reports SUCCESS.
     opts = frontier_opts(graph)
 
+    # The parent walk that used to be here is gone. It existed because a mark
+    # named one cell and something had to name the next; a cascade follows the
+    # graph itself, so handing it the changed leaf keys is the whole job.
     for {leaf, keys} <- by_leaf, keys != [], into: %{} do
-      ReactiveDag.Frontier.mark_dirty(leaf, keys, reason, opts)
-
-      # `dirty_parents/5` COMPUTES each parent's claim; marking it is the
-      # caller's. Dropping the return here would mark the leaf and strand the
-      # change one level up — the cascade would stop before it started.
-      for {parent, parent_keys} <- ReactiveDag.Graph.dirty_parents(graph, leaf, keys, key_rule) do
-        ReactiveDag.Frontier.mark_dirty(parent, parent_keys, reason, opts)
-      end
-
+      enqueue_cascade(leaf, keys, opts)
       {leaf, keys}
+    end
+  end
+
+  # Overridable for the same reasons `dirties_on`'s is — a host with its own
+  # queue, a test that wants to observe without Oban.
+  defp enqueue_cascade(cell, keys, opts) do
+    enqueuer =
+      Application.get_env(:reactive_dag, :cascade_enqueuer) ||
+        &ReactiveDag.CascadeWorker.enqueue/3
+
+    case enqueuer.(cell, keys, opts) do
+      {:ok, _} ->
+        :ok
+
+      {:error, reason} ->
+        require Logger
+
+        Logger.warning(
+          "reactive_dag: scanned #{inspect(cell)} but could not enqueue its cascade — " <>
+            "#{inspect(reason)}. The rows are written; nothing downstream will " <>
+            "recompute until the next scan re-observes them."
+        )
+
+        :ok
     end
   end
 
@@ -847,7 +867,7 @@ defmodule ReactiveDag.Source do
 
   @doc """
   Sum one `detail:` key across a sweep's results — the scan-side counterpart to
-  `ReactiveDag.Drain.Report.total/2`.
+  `ReactiveDag.Report.total/2`.
 
       {:ok, results} = Source.poll_all(plan)
       Source.detail_total(results, :tokens_in)
@@ -884,7 +904,7 @@ defmodule ReactiveDag.Source do
   or a single result, so a host can total one `poll_cell/3` the same way.
 
   The arithmetic is `ReactiveDag.Rollup`, shared with
-  `ReactiveDag.Drain.Report.total/2` — the containers differ because the phases
+  `ReactiveDag.Report.total/2` — the containers differ because the phases
   do, but "what did this cost" is one fold, not two that must agree.
   """
   @spec detail_total(map() | [map()] | term(), atom()) :: number()
@@ -892,7 +912,7 @@ defmodule ReactiveDag.Source do
 
   @doc """
   One `detail:` key across a sweep, summed **per bucket** — the breakdown behind
-  `detail_total/2`, mirroring `ReactiveDag.Drain.Report.by/2`.
+  `detail_total/2`, mirroring `ReactiveDag.Report.by/2`.
 
       Source.detail_by(results, :tokens_in)
       #=> %{"claude-haiku-4-5" => 900, "openai/gpt-5.6-luna" => 300}

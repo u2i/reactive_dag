@@ -25,7 +25,7 @@ defmodule ReactiveDag.Node.Transformers.AddMarkDirty do
   and dedupes NEITHER (`Ash.Changeset.run_action_changes/6`). So an action named
   in `augmented_by` whose type is also in `dirties_on` would run MarkDirty
   twice. The frontier insert is `ON CONFLICT DO NOTHING` and would survive that,
-  but `schedule_drain` would enqueue twice per write — so such actions are
+  but the enqueue would fire twice per write — so such actions are
   wired ONCE, by the global change, and skipped here.
 
   The key derivation is resolved HERE, at compile time, and passed as options:
@@ -116,29 +116,23 @@ defmodule ReactiveDag.Node.Transformers.AddMarkDirty do
   end
 
   defp mark_opts(dsl) do
-    schedule? = Transformer.get_option(dsl, [:reactive], :schedule_drain) || false
-
-    # Raise at COMPILE time rather than at the first write. `schedule_drain: true`
-    # without Oban would mark and never drain — the exact silent staleness the
-    # option exists to remove, and worse for being asked for explicitly.
-    if schedule? and not Code.ensure_loaded?(Oban) do
+    # REMOVED as a capability, so declaring it is an error rather than a no-op.
+    # A silently ignored option is worse than a missing one: the host reads the
+    # line, believes propagation is scheduled, and gets nothing.
+    if Transformer.get_option(dsl, [:reactive], :schedule_drain) do
       raise Spark.Error.DslError,
         module: Transformer.get_persisted(dsl, :module),
         path: [:reactive, :schedule_drain],
         message: """
-        `schedule_drain: true` needs Oban, which is an optional dependency of
-        reactive_dag and is not loaded.
+        reactive_dag: `schedule_drain` has been removed — delete the line.
 
-        Add it:
+        Originating a cascade IS enqueuing one. `dirties_on` and `augmented_by`
+        enqueue inside the write's own transaction, so there is no longer a
+        separate step to schedule and nothing for this option to switch on.
 
-            {:oban, "~> 2.17"}
-
-        and give it the queue the worker runs on:
-
-            config :my_app, Oban, queues: [drain: 1]
-
-        Or drop the option — `dirties_on`/`augmented_by` still mark correctly,
-        and whatever drains next (a ScanWorker sweep) will pick the mark up.
+        It existed because a mark was durable but INERT: something had to
+        consume it, and a host that forgot to schedule that got staleness which
+        looked like success. That gap is closed by construction now.
         """
     end
 
@@ -146,7 +140,6 @@ defmodule ReactiveDag.Node.Transformers.AddMarkDirty do
       cell: dsl |> cell_id() |> to_string(),
       payload_key: payload_key(dsl),
       identity_fields: identity_fields(dsl),
-      schedule_drain: schedule?,
       # Whether a change through this cell WAITS for a human. Read here rather
       # than at mark time because the declaration is on the node and the change
       # has no plan in scope.

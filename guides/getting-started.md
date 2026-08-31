@@ -176,7 +176,7 @@ node shape.
 ```elixir
 plan = ReactiveDag.Node.graph([MyApp.FiscalLines, MyApp.BudgetRollups])
 
-{:ok, report} = ReactiveDag.Drain.run(plan)
+{:ok, report} = ReactiveDag.Cascade.run(plan, [%{cell: "expenses", keys: ["e1"]}])
 
 report.steps
 # one entry per cell recompute, in execution order:
@@ -184,7 +184,7 @@ report.steps
 #   claimed: ["fy24"], changed: ["fy24"], pass: 1, duration_us: 812}
 ```
 
-The `%ReactiveDag.Drain.Report{}` is the drain's processing trace — what ran,
+The `%ReactiveDag.Report{}` is the processing trace — what ran,
 why (`triggered_by` reconstructs the causal tree), what actually changed, and
 how long each step took. Persist it wherever your runs live (a job's meta, a
 run table): the library reports, the host records. For progress *during* a long
@@ -228,25 +228,25 @@ drains, and `dirties_on` alone schedules nothing:
 
 ```elixir
 MyApp.FiscalLines |> Ash.Changeset.for_create(:create, attrs) |> Ash.create!()
-ReactiveDag.Drain.run(plan)                                  # ← still yours
+ReactiveDag.Cascade.run(plan, origins)                       # ← still yours
 ```
 
-For a graph with a polling source that is fine — the next sweep picks it up. For
-a write-fed leaf it means the result of a user's action appears whenever
-something else happens to drain, which may be never. Add `schedule_drain:`:
+Under the old engine this was a two-step affair: a write left a mark, and
+something else had to consume it — with `schedule_drain: true` as the opt-in
+that made it prompt. A host that forgot got staleness that looked like success.
+
+There is nothing to opt into now. **Originating a cascade IS enqueuing one**:
 
 ```elixir
 reactive do
   id :fiscal_lines
   leaf? true
   dirties_on [:create, :update, :destroy]
-  schedule_drain true
 end
 ```
 
-That enqueues a `ReactiveDag.DrainWorker` job in the same transaction as the
-mark, so both commit or neither does, and the drain runs after the request rather
-than inside it. A burst of writes coalesces to one pending job. Needs Oban and a
+That write enqueues a `ReactiveDag.CascadeWorker` job in its own transaction, so
+both commit or neither does, and the propagation runs after the request rather
 `drain` queue:
 
 ```elixir
@@ -262,7 +262,7 @@ the leaf's rows, then mark what changed:
 # 2. mark the changed keys dirty upward
 ReactiveDag.Graph.dirty_parents(plan, "fiscal_lines", changed)
 # 3. drain
-ReactiveDag.Drain.run(plan)
+ReactiveDag.Cascade.run(plan, origins)
 ```
 
 For a scanner with a real contract (id, leaf binding, failure containment),

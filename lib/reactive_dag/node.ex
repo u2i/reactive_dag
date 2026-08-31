@@ -103,7 +103,7 @@ defmodule ReactiveDag.Node do
   resources; the substrate reads only the `reactive` block. Then:
 
       plan = ReactiveDag.Node.graph([FlowMonth, FiscalLines, …], for_each: &fetch/1)
-      ReactiveDag.Drain.run(plan)
+      ReactiveDag.Cascade.run(plan, origins)
 
   Nothing else to wire: the drain reads what each node declared.
 
@@ -1269,7 +1269,18 @@ defmodule ReactiveDag.Node do
           "how a child key maps to this cell's key on propagation: `:identity` (same " <>
             "key) or `:all` (whole-cell). Group-grain claims (`:group`, " <>
             "`{:group, from: :key}`) are declared ON the combinator — the claim grain " <>
-            "and the computation it must agree with belong in one unit."
+            "and the computation it must agree with belong in one unit.\n\n" <>
+            "`:identity` is the DEFAULT and it is an assertion, not a neutral " <>
+            "setting: it says a child's key names a row of THIS cell. That is false " <>
+            "wherever a node re-keys — a `union` whose output is keyed by something " <>
+            "other than its inputs' keys, or a fold grouping on a column its own " <>
+            "computation derives. Such a cell receives claims naming rows it does not " <>
+            "have, recomputes nothing, and leaves stale rows behind.\n\n" <>
+            "The old drain hid this by reaching those cells with whole-cell claims " <>
+            "often enough to paper over it; a cascade propagates the actual keys, so " <>
+            "the declaration now has to be honest. A re-keying node wants `:all` " <>
+            "(correct, coarse) or a `:group` grain on its combinator (correct, " <>
+            "precise) — never the `:identity` default it gets by saying nothing."
       ],
       leaf?: [type: :boolean, default: false, doc: "true for a source-fed leaf (no compute)"],
       retain_if_vanished: [
@@ -1326,6 +1337,29 @@ defmodule ReactiveDag.Node do
             "(the diff is what a claim is derived from), and there is simply no durable " <>
             "record to look back at."
       ],
+      suspends: [
+        type: {:or, [:boolean, :keyword_list]},
+        required: false,
+        default: false,
+        doc:
+          "this node's recompute is too SLOW to run inside a transaction, so a cascade " <>
+            "reaching it stops, records a suspension, and commits everything that " <>
+            "already ran. A job resumes it later, outside any transaction.\n\n" <>
+            "Declared, never inferred. A node that becomes slow without saying so holds " <>
+            "the cascade's connection open until something times out — the failure this " <>
+            "exists to prevent — so the declaration has to be honest. Conversely a node " <>
+            "declared slow always suspends, even when its `fingerprint` would have " <>
+            "made this particular recompute a cache hit: one code path, no " <>
+            "timing-dependent behaviour, at the cost of an enqueue on the cheap case.\n\n" <>
+            "Requires `version_diff` here and `version_id` on every input, checked at " <>
+            "graph assembly. Without them a resumption cannot be narrowed to the rows " <>
+            "that moved and recomputes the whole cell — expensive work over a whole " <>
+            "table instead of a handful of rows, and silent.\n\n" <>
+            "The sibling of `gated`: both stop a cascade and record where. They differ " <>
+            "only in what the resuming job does — this one computes and then propagates, " <>
+            "`gated` only propagates, because its write already happened.",
+        snippet: "suspends true"
+      ],
       gated: [
         type: {:or, [:boolean, :keyword_list]},
         required: false,
@@ -1354,13 +1388,13 @@ defmodule ReactiveDag.Node do
           "make ordinary Ash writes trigger the cascade: a `:create`/`:update`/`:destroy` " <>
             "on THIS resource marks the written record's key dirty on this cell, so the " <>
             "next drain picks it up. Without it a host must call " <>
-            "`ReactiveDag.Frontier.mark_dirty/3` at every write site, and a missed call " <>
+            "`ReactiveDag.CascadeWorker.enqueue/3` at every write site, and a missed call " <>
             "is silent staleness. Wired as an `after_action` change, so the mark runs " <>
             "INSIDE the write's transaction — a rolled-back write leaves no dirty key, " <>
             "and a committed one always leaves one. (A NOTIFIER cannot promise that: " <>
             "Ash dispatches notifications after commit.) Opt-in, and not implied by " <>
             "`leaf?` — a leaf fed by a `ReactiveDag.Source` poll would double-trigger. " <>
-            "Marks but does not SCHEDULE: pair with `schedule_drain: true` unless " <>
+            "ORIGINATES a cascade, inside the write's own transaction — there is no " <>
             "something else already drains on a cadence you are happy to wait for. " <>
             "For a SOURCE-FED LEAF, where every write is an observation; a COMPUTED " <>
             "node whose rows the library writes itself needs `augmented_by`, which " <>
@@ -1386,7 +1420,7 @@ defmodule ReactiveDag.Node do
             "Wired as an `after_action` change on each named action, so the mark runs " <>
             "INSIDE the write's transaction, exactly as `dirties_on` does — a rolled-back " <>
             "correction leaves no dirty key, a committed one always leaves one. Composes " <>
-            "with `schedule_drain: true` (same meaning: enqueue the drain in the same " <>
+            "with `dirties_on` on a leaf that is ALSO human-augmented (same meaning: " <>
             "transaction) and with `dirties_on` on a leaf that is ALSO human-augmented; " <>
             "an action covered by both marks ONCE."
       ],
@@ -1395,17 +1429,13 @@ defmodule ReactiveDag.Node do
         required: false,
         default: false,
         doc:
-          "with `dirties_on` or `augmented_by`, enqueue a `ReactiveDag.DrainWorker` job in the SAME " <>
-            "transaction as the mark — so a write is promptly reflected rather than " <>
-            "merely durable. Without it the mark waits for whatever drains next (in " <>
-            "practice the hourly sweep), which for a write-fed leaf with no polling " <>
-            "source on that cadence may be no drain at all (u2i/reactive_dag#142). " <>
-            "The enqueue is one INSERT and joins the write's transaction, so a " <>
-            "rolled-back write schedules nothing; the DRAIN itself runs later, out " <>
-            "of the request. A burst of N writes coalesces to one pending job. " <>
-            "Requires Oban (an optional dependency) — without it the option raises " <>
-            "at compile time rather than silently marking and never draining. " <>
-            "Default false: existing hosts keep today's behaviour."
+          "REMOVED, and kept only so a host declaring it gets an error rather than " <>
+            "silence. Originating a cascade IS enqueuing one — `dirties_on` and " <>
+            "`augmented_by` enqueue inside the write's transaction, and there is no " <>
+            "longer a separate step to schedule. Delete the line.\n\n" <>
+            "It existed because a mark was durable but inert: something had to consume " <>
+            "it, and a host that forgot got staleness that looked like success. That " <>
+            "gap cannot be left open now, so the option has nothing to switch on."
       ],
       fingerprint: [
         type: {:or, [{:fun, 1}, {:list, :atom}]},
@@ -1423,6 +1453,32 @@ defmodule ReactiveDag.Node do
         type: :atom,
         required: false,
         doc: "the attribute a leaf's `fingerprint` is stored in (default `:fingerprint`)."
+      ],
+      approved_by: [
+        type: :keyword_list,
+        required: false,
+        doc:
+          "how a human SIGN-OFF on this node's rows is recorded: " <>
+            "`approved_by via: :approval_id, resource: MyApp.Approval`.\n\n" <>
+            "`via:` names the column on THIS node holding a reference; " <>
+            "`resource:` names what it points at. That resource must carry a " <>
+            "`version_id` — the version its approval covered. The library reads those " <>
+            "two columns and compares them, and reads nothing else: a scheme with two " <>
+            "reviewers, a recorded reason, or an expiry is a different HOST resource, " <>
+            "not a different option here.\n\n" <>
+            "Whether a row is approved is DERIVED, never stored: " <>
+            "`approval.version_id == row.version_id`. A stored flag needs something to " <>
+            "clear it on every path that writes the row, and a path that forgets leaves " <>
+            "a row reading as reviewed when nobody reviewed that content. An equality " <>
+            "that stops holding cannot be forgotten.\n\n" <>
+            "The reference column must NOT appear in `compare:` — otherwise recording " <>
+            "the approval moves the row's version and instantly invalidates the " <>
+            "approval just made. A verifier reports this, and Spark surfaces it as a " <>
+            "compile WARNING rather than an error: the module still builds, so a host " <>
+            "that ignores warnings ships the loop. Do not ignore it.\n\n" <>
+            "Pairs with `gated`, which is what stops the cascade until someone signs. " <>
+            "This says how the signature is recorded; `gated` says that one is needed.",
+        snippet: "approved_by via: :approval_id, resource: MyApp.Approval"
       ],
       compare: [
         type: {:list, :atom},
@@ -1628,7 +1684,7 @@ defmodule ReactiveDag.Node do
   defp with_tenant(%ReactiveDag.Plan{} = plan, opts) do
     case Keyword.get(opts, :tenant) do
       nil -> plan
-      tenant -> %{plan | tenant: ReactiveDag.Frontier.tenant(tenant: tenant)}
+      tenant -> %{plan | tenant: ReactiveDag.Suspension.tenant(tenant: tenant)}
     end
   end
 
@@ -1664,9 +1720,126 @@ defmodule ReactiveDag.Node do
 
     verify_one_node_per_source!(plan)
     verify_tenancy_flows_downstream!(plan)
+    verify_suspension_versions!(plan)
+    verify_one_cell_per_suspendable_resource!(plan)
 
     plan
   end
+
+  # A node that suspends must be able to RESUME from the change that stopped it.
+  #
+  # A suspension records `(resource, row_uuid, version_id)` — which row of what
+  # moved. Resuming means reading that version, deriving the units it touched,
+  # and recomputing only those. Two declarations make that possible, on
+  # different nodes:
+  #
+  #   * the SUSPENDING node needs `version_diff` — how to read a version back;
+  #   * each of its INPUTS needs `version_id` — how to record one when it writes.
+  #
+  # Neither is checkable by a Spark verifier, which sees one resource and cannot
+  # know what feeds it. So it is checked here, at assembly, like the tenancy rule
+  # above.
+  #
+  # It RAISES rather than warns because the failure is silent and expensive. A
+  # missing version does not error at drain time: the resumption simply cannot be
+  # narrowed and recomputes the whole cell — which is correct, and is an LLM call
+  # over every row of a table instead of the three that moved. Nothing reports
+  # it. The cost shows up as a bill.
+  #
+  # A leaf as an INPUT is not exempt, and that is deliberate: a source-fed leaf
+  # is exactly where the expensive nodes tend to sit, one hop downstream.
+  # Exempting them would let the check pass while delivering none of the
+  # precision it exists to guarantee. `Payload.upsert_row/5` already records
+  # versions, so a leaf needs only the declaration.
+  #
+  # A leaf that SUSPENDS is a different case — see below.
+  #
+  # Context inputs are excluded, matching `Graph.build_parents/1`: a context edge
+  # is read but never propagates, so it can never be the change a suspension
+  # names.
+  defp verify_suspension_versions!(%ReactiveDag.Plan{} = plan) do
+    # A suspendable LEAF is exempt from the reader half, and only that half.
+    #
+    # `version_diff` says how to read back a version a suspension references,
+    # so a resumption can narrow to the rows that moved. A leaf has no inputs,
+    # so there is no upstream change to read: the thing that stopped IS the
+    # thing that changed, and its own key already names it exactly. Demanding a
+    # reader here asks for something with nothing to read.
+    #
+    # This is the shape a gated source-fed leaf takes — a crawler's rows held
+    # for review before anything downstream sees them — so it is a real case,
+    # not a loophole.
+    for {id, cell} <- plan.cells, suspends?(cell), not cell.leaf? do
+      unless cell.meta[:version_diff] do
+        raise ArgumentError,
+              "reactive_dag: cell #{inspect(id)} suspends, but declares no " <>
+                "`version_diff` — so a resumption has no way to read the change that " <>
+                "stopped it, and would recompute the whole cell every time. Declare " <>
+                "`version_diff {MyApp.Versions, :changes_for, []}` on #{inspect(id)}."
+      end
+
+      context = cell.meta[:context_inputs] || []
+
+      for input_id <- cell.inputs,
+          to_string(input_id) not in context,
+          input = plan.cells[input_id],
+          input != nil,
+          is_nil(input.meta[:version_id]) do
+        raise ArgumentError,
+              "reactive_dag: cell #{inspect(id)} suspends, so its input " <>
+                "#{inspect(input_id)} must declare `version_id` — it is what records " <>
+                "WHICH ROW changed. Without it every suspension at #{inspect(id)} " <>
+                "carries no version and resumption recomputes the whole cell: the " <>
+                "expensive work you declared runs over the whole table instead of the " <>
+                "rows that moved, with no error to tell you."
+      end
+    end
+
+    :ok
+  end
+
+  # A suspension names what stopped by RESOURCE, not by cell id — so a host
+  # writing a row can name a stopping point without knowing the graph's internal
+  # names. That only works while a suspendable resource resolves to exactly one
+  # cell.
+  #
+  # Three things in this DSL break that: `for_each` expands one node into
+  # `<id>.<member>` per member, `companion` emits `<id>` and `<id>/set`, and
+  # `compose` legs become sub-cells. All share their resource. If two of them
+  # suspend, a resumption reading `waiting = "MyApp.Thing"` cannot tell which
+  # cell to recompute, and will silently recompute one with the other's units.
+  #
+  # Rather than add a `cell_id` column that exists only for these cases, forbid
+  # the combination. The check is here because it is a property of the assembled
+  # graph — one resource, several cells — that no single resource can see.
+  defp verify_one_cell_per_suspendable_resource!(%ReactiveDag.Plan{} = plan) do
+    plan.cells
+    |> Enum.filter(fn {_id, cell} -> cell.meta[:resource] end)
+    |> Enum.group_by(fn {_id, cell} -> cell.meta[:resource] end, fn {id, cell} -> {id, cell} end)
+    |> Enum.each(fn
+      {_resource, [_only_one]} ->
+        :ok
+
+      {resource, cells} ->
+        case Enum.filter(cells, fn {_id, cell} -> suspends?(cell) end) do
+          [] ->
+            :ok
+
+          [{id, _} | _] ->
+            raise ArgumentError,
+                  "reactive_dag: cell #{inspect(id)} suspends, but #{inspect(resource)} " <>
+                    "backs #{length(cells)} cells " <>
+                    "(#{Enum.map_join(cells, ", ", fn {i, _} -> inspect(i) end)}). A " <>
+                    "suspension names what stopped by RESOURCE, so a resumption could " <>
+                    "not tell which of them to recompute and would silently run one " <>
+                    "with another's units. `for_each`, `companion` and `compose` all " <>
+                    "produce several cells per resource; none can suspend."
+        end
+    end)
+  end
+
+  defp suspends?(%ReactiveDag.Cell{meta: meta}), do: is_map(meta[:suspends])
+  defp suspends?(_), do: false
 
   # A tenanted node must not feed an UNTENANTED one.
   #
@@ -2655,6 +2828,12 @@ defmodule ReactiveDag.Node do
         fingerprint: Ext.get_opt(resource, [:reactive], :fingerprint, nil),
         fingerprint_attribute: Ext.get_opt(resource, [:reactive], :fingerprint_attribute, nil),
         compare: Ext.get_opt(resource, [:reactive], :compare, nil),
+        approved_by: Ext.get_opt(resource, [:reactive], :approved_by, nil),
+        # WHERE A CASCADE STOPS, by reason. `suspends` and `gated` are two ways
+        # to say the same structural thing — this node cannot be completed
+        # inline — so they normalise into one map here rather than being read
+        # from two places by everything downstream.
+        suspends: suspends(resource),
         retain_if_vanished: retain_policy(resource),
         slices: slices(resource),
         lapse: lapses(resource),
@@ -2669,6 +2848,32 @@ defmodule ReactiveDag.Node do
     |> Map.merge(run_meta)
     |> Map.merge(scan_meta)
   end
+
+  # The reasons this node stops a cascade, as `%{reason => opts}`.
+  #
+  # `suspends` and `gated` are one structural fact with two causes: a cascade
+  # reaching this node cannot finish it inline, so it records where it stopped
+  # and commits what already ran. They differ only in what the resuming job
+  # does — `:expensive` computes and then propagates, `:approval` only
+  # propagates, because the write already happened and the gate merely opened.
+  #
+  # Normalised into one map so nothing downstream has to ask two questions to
+  # learn one thing. `nil` (not `%{}`) when neither is declared, so
+  # `extra_meta/2`'s nil-reject keeps it off cells that never suspend.
+  defp suspends(resource) do
+    %{}
+    |> put_suspend(:expensive, Ext.get_opt(resource, [:reactive], :suspends, false))
+    |> put_suspend(:approval, Ext.get_opt(resource, [:reactive], :gated, false))
+    |> case do
+      empty when map_size(empty) == 0 -> nil
+      reasons -> reasons
+    end
+  end
+
+  defp put_suspend(acc, _reason, false), do: acc
+  defp put_suspend(acc, _reason, nil), do: acc
+  defp put_suspend(acc, reason, true), do: Map.put(acc, reason, [])
+  defp put_suspend(acc, reason, opts) when is_list(opts), do: Map.put(acc, reason, opts)
 
   defp context_inputs(resource) do
     case Ext.get_entities(resource, [:reactive]) |> Enum.filter(&match?(%Context{}, &1)) do

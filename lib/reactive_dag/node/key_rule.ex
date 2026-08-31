@@ -1,7 +1,7 @@
 defmodule ReactiveDag.Node.KeyRule do
   @moduledoc """
   THE propagation rule: how a change reaches a parent, decided by what the parent
-  DECLARED. `ReactiveDag.Drain` calls this — there is nothing to configure.
+  DECLARED. `ReactiveDag.Cascade` calls this — there is nothing to configure.
 
   `Node` records each node's `key_rule` in `cell.meta`; this reads it:
 

@@ -70,7 +70,7 @@ if Code.ensure_loaded?(Oban.Worker) do
 
     require Logger
 
-    alias ReactiveDag.{Drain, Frontier, Graph, Job}
+    alias ReactiveDag.{Cascade, Job}
     alias ReactiveDag.Node.Rows
 
     @impl Oban.Worker
@@ -95,8 +95,6 @@ if Code.ensure_loaded?(Oban.Worker) do
           # "no valid prior result", which is exactly true here.
           invalidated = invalidate(cell, keys, plan)
 
-          mark(plan, cell_id, keys, reason)
-
           t0 = System.monotonic_time(:microsecond)
 
           :telemetry.execute(
@@ -105,7 +103,17 @@ if Code.ensure_loaded?(Oban.Worker) do
             %{cell: cell_id, args: args, reason: reason}
           )
 
-          {:ok, report} = Drain.run(plan)
+          # A reprocess originates AT the cell itself — the point is to re-run
+          # this cell, not merely to notify what reads it. `force:` makes it
+          # propagate even where the recompute reports nothing changed, which
+          # after a prompt change is the common case and is exactly what the
+          # operator asked for.
+          {:ok, report} =
+            Cascade.run(
+              plan,
+              [%{cell: cell_id, keys: keys}],
+              Keyword.put(ReactiveDag.Plan.frontier_opts(plan), :force, :all)
+            )
 
           :telemetry.execute(
             [:reactive_dag, :reprocess, :stop],
@@ -113,7 +121,8 @@ if Code.ensure_loaded?(Oban.Worker) do
               duration_us: System.monotonic_time(:microsecond) - t0,
               claimed: claimed_count(keys),
               invalidated: length(invalidated),
-              changed: ReactiveDag.Drain.Report.changed_total(report),
+              changed: ReactiveDag.Report.changed_total(report),
+              suspended: length(report.suspended),
               passes: report.passes
             },
             %{cell: cell_id, args: args, reason: reason, report: report}
@@ -141,26 +150,6 @@ if Code.ensure_loaded?(Oban.Worker) do
     defp select(_cell, _args, _plan), do: ["*"]
 
     # A whole-cell claim propagates `:all` to parents; specific keys go through
-    # the key rule, exactly as a scan's would. Marking the leaf without its
-    # parents would strand the change one level up.
-    defp mark(_plan, _cell_id, [], _reason), do: :ok
-
-    defp mark(plan, cell_id, keys, reason) do
-      # The PLAN's tenant. Without it a reprocess of a tenanted plan marks work
-      # the drain never reads — and a drain that finds nothing reports SUCCESS,
-      # so the button appears to work and nothing recomputes.
-      opts = ReactiveDag.Plan.frontier_opts(plan)
-
-      Frontier.mark_dirty(cell_id, keys, reason, opts)
-
-      for {parent, parent_keys} <-
-            Graph.dirty_parents(plan, cell_id, keys, ReactiveDag.Node.KeyRule) do
-        Frontier.mark_dirty(parent, parent_keys, reason, opts)
-      end
-
-      :ok
-    end
-
     # `"*"` is not a key list, so everything the cell holds is invalidated.
     defp invalidate(cell, ["*"], plan),
       do: Rows.invalidate(cell, :all, ReactiveDag.Plan.frontier_opts(plan))

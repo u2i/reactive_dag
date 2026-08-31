@@ -61,7 +61,7 @@ end
 ```
 
 `dirties_on` is the important line. With it, `Ash.create!/1` on this resource
-marks its key dirty **inside the write's own transaction** — so a rolled-back
+enqueues its cascade **inside the write's own transaction** — so a rolled-back
 write leaves nothing to recompute, and a committed one always leaves a mark. No
 call site has to remember.
 
@@ -132,18 +132,23 @@ A verdict is an ordinary row with a `:status` column. "What is failing?" is
 ```elixir
 plan = ReactiveDag.Node.graph([MyApp.Expenses, MyApp.CategoryTotals, MyApp.BudgetHealth])
 
-{:ok, report} = ReactiveDag.Drain.run(plan)
+{:ok, report} =
+  ReactiveDag.Cascade.run(plan, [%{cell: "expenses", keys: ["e1", "e2"]}])
 ```
 
-The plan is the only argument: how each node recomputes and how its changes
-propagate are declared in its `reactive` block, and the drain reads them there.
+A cascade is **told what changed** and follows the consequences. It never asks
+the database what needs doing — how each node recomputes and how its changes
+propagate are declared in its `reactive` block, and the walk reads them there.
+
+In practice you rarely call this yourself: `dirties_on`, `augmented_by` and a
+`Source` poll each enqueue a cascade inside the write's own transaction.
 
 `graph/2` assembles and validates at that point: every edge resolves, ids are
 unique, the graph is acyclic, declared attributes exist. An authoring mistake
-fails here rather than at 3am mid-drain.
+fails here rather than at 3am mid-run.
 
-Writing two expenses and draining once gives this — depth order, and only the
-keys that actually moved:
+Writing two expenses gives this — depth order, and only the keys that actually
+moved:
 
 ```
 expenses         changed: ["e1", "e2"]           triggered_by: nil
@@ -151,23 +156,37 @@ category_totals  changed: ["meals", "travel"]    triggered_by: "expenses"
 budget_health    changed: ["meals", "travel"]    triggered_by: "category_totals"
 ```
 
-Now change one expense in `travel` and drain again: `category_totals` claims
-`["travel"]` only, `meals` is never read, and `budget_health` recomputes one row.
-That proportionality is the whole point of the library.
+Now change one expense in `travel`: `category_totals` claims `["travel"]` only,
+`meals` is never read, and `budget_health` recomputes one row. That
+proportionality is the whole point of the library.
 
-The `%Drain.Report{}` is the processing trace — one step per recompute with
-`cell`, `claimed`, `changed`, `triggered_by`, `duration_us`, plus run totals.
-`triggered_by` reconstructs the causal chain above.
+The `%ReactiveDag.Report{}` is the processing trace — one step per recompute
+with `cell`, `claimed`, `changed`, `triggered_by`, `duration_us`, plus
+`suspended`: the points where the cascade had to stop. `triggered_by`
+reconstructs the causal chain above.
+
+### Where a cascade stops
+
+Everything above runs in one transaction. Two things stop it, and only two:
+
+  * **`suspends true`** — work too slow to hold a transaction open (a model
+    call, a large fetch). The cascade records where it stopped, commits
+    everything that ran, and a job resumes it later with nothing open.
+  * **`gated true`** — work that needs a person.
+
+Both write the same row: which tenant, what stopped, what changed, and which
+version of it. Nothing else is stored — no queue of pending work, because
+everything that could run already has.
 
 ### Configuration
 
 ```elixir
 config :reactive_dag,
-  repo: MyApp.Repo,          # REQUIRED
-  dirty_table: "my_dirty"    # optional; defaults to reactive_dag_dirty
+  repo: MyApp.Repo,                    # REQUIRED
+  suspension_table: "my_suspensions"   # optional; defaults to reactive_dag_suspension
 ```
 
-One table, the dirty frontier, and `ReactiveDag.Migration.up/1` creates it.
+One table, for suspensions, and `ReactiveDag.Migration.up/1` creates it.
 Everything else is your own resources with their own migrations. Call
 `ReactiveDag.Config.validate!/0` at boot to catch a misconfiguration there rather
 than at the first query.
@@ -371,16 +390,16 @@ not observe and it is skipped — written nowhere, reported as nothing.
 **retired** (their row destroyed) and reported as changed, because something
 disappearing is a change your downstream nodes need to see.
 
-Then poll and drain:
+Then poll:
 
 ```elixir
 {:ok, results} = ReactiveDag.Source.poll_all(plan)
-for {_source, %{changed: keys}} <- results do
-  ReactiveDag.Graph.dirty_parents(plan, "docs", keys)
-end
-
-ReactiveDag.Drain.run(plan)
 ```
+
+That is the whole call. A poll writes what it observed and enqueues a cascade
+per changed leaf, in its own transaction — the hand-walk of `dirty_parents/3`
+that used to be needed here is gone, because a cascade follows the graph
+itself.
 
 `poll_all/1` finds every scanner from the plan's `poll` declarations, so there is
 no hand-kept list to fall out of date. `graph/2` has already checked that each
@@ -423,7 +442,7 @@ a MACHINE change's propagation until someone approves it: the row is written, bu
 the consumers do not recompute. The row stays readable — which matters when the
 derived tables are what you serve — and a person's own edit passes straight
 through, because nobody should queue for approval of their own edit.
-`Frontier.awaiting/2` lists what is held, with the diff to review;
+`ReactiveDag.Suspension.points/1` lists what is held, with counts and ages;
 `approve/3` and `reject/3` decide.
 
 **More:** [Sources and scanning](https://hexdocs.pm/reactive_dag/sources.html)
@@ -622,8 +641,8 @@ itself deferred.
 
     mix test
 
-The suite hands the frontier an in-memory repo
-(`ReactiveDag.Test.FakeFrontierRepo`), which covers the library's logic and
+The suite hands the library an in-memory repo
+(`ReactiveDag.Test.FakeSuspensionRepo`), which covers the logic and
 deliberately does not cover the SQL — it matches on statements rather than
 executing them.
 
@@ -631,14 +650,17 @@ The SQL itself has its own file, opt-in because it needs a database:
 
     createdb reactive_dag_test
     REACTIVE_DAG_TEST_DATABASE_URL=postgres://user:pass@localhost/reactive_dag_test \
-      mix test test/real_postgres_frontier_test.exs
+      mix test test/real_postgres_suspension_test.exs
 
-Worth running before changing anything in `Frontier`'s statements. Three bugs have
-shipped past a green suite because a fake cannot see inside SQL — `?` being both
-Postgres's jsonb-exists operator and Postgrex's parameter marker, `||` being
-right-biased so a merge kept the wrong end, and a column dropped from the schema
-but still named in an INSERT. Each is the kind that file catches: reversing the
-`COALESCE` in the ON CONFLICT clause fails it and passes all 846 of the others.
+Worth running before changing anything in `Suspension`'s statements. Four bugs
+have now shipped past a green suite because a fake cannot see inside SQL — `?`
+being both Postgres's jsonb-exists operator and Postgrex's parameter marker,
+`||` being right-biased so a merge kept the wrong end, a column dropped from
+the schema but still named in an INSERT, and a `uuid` column that rejected
+every insert because the library passes ids in their textual form.
+
+The last of those was caught on the first run of that file, which is the case
+for it existing.
 
 ## Status
 

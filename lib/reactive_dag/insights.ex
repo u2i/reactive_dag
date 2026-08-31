@@ -5,7 +5,7 @@ defmodule ReactiveDag.Insights do
 
   Everything here is a READ. Nothing new is computed — the plan already carries
   the structure and depths, each cell's own resource already carries its rows,
-  and `ReactiveDag.Drain.Report` is already a complete causal trace. This module
+  and `ReactiveDag.Report` is already a complete causal trace. This module
   is those three assembled into the shape a human (or a dashboard, a mix task,
   an alerting check) actually asks for.
 
@@ -30,7 +30,7 @@ defmodule ReactiveDag.Insights do
       end, nil)
 
       # a drain someone triggered directly, with no poll in front of it
-      {:ok, report} = ReactiveDag.Drain.run(plan, opts)
+      {:ok, report} = ReactiveDag.Cascade.run(plan, origins, opts)
       ReactiveDag.Insights.record(report)
 
   The buffer holds `%ReactiveDag.ScanRun{}` either way. A bare `%Report{}` is a
@@ -60,7 +60,7 @@ defmodule ReactiveDag.Insights do
   its runs already live.
   """
 
-  alias ReactiveDag.{Drain.Report, Frontier, Node.Rows, Plan, ScanRun}
+  alias ReactiveDag.{Report, Node.Rows, Plan, ScanRun}
 
   @default_keep 20
   @failing_sample 10
@@ -223,16 +223,43 @@ defmodule ReactiveDag.Insights do
   end
 
   @doc """
-  Cell ids with dirty keys waiting — what the NEXT drain would work on.
+  Resources with work SUSPENDED — a cascade reached them and stopped.
 
-  Reads the frontier rather than the nodes themselves: a cell is pending because
-  something dirtied it, whether or not its rows have changed yet.
+  What "pending" means has changed with the engine, and the difference matters
+  to anything rendering it. Under the queue this listed cells a drain had yet to
+  reach: work in flight, clearing on its own within seconds. A suspension is
+  work that has stopped and will not resume without a job running or a person
+  acting.
+
+  So a name appearing here briefly is normal; a name that stays is a question.
+  `ReactiveDag.Suspension.points/1` carries the counts and ages behind these.
   """
   @spec pending(Plan.t()) :: [String.t()]
-  def pending(%Plan{cells: cells}) do
+  def pending(%Plan{cells: cells} = plan) do
     safe(
       fn ->
-        Frontier.dirty_cells() |> Enum.filter(&Map.has_key?(cells, &1)) |> Enum.sort()
+        # FILTERED TO THIS PLAN. The suspension table is shared — one database
+        # serves every graph a host assembles — so an unfiltered read reports
+        # another graph's stopped work as this one's. Matching on both the cell
+        # id and the resource name because `waiting` holds whichever of the two
+        # identified the node.
+        known =
+          cells
+          |> Enum.flat_map(fn {id, cell} ->
+            case cell.meta[:resource] do
+              nil -> [to_string(id)]
+              resource -> [to_string(id), inspect(resource)]
+            end
+          end)
+          |> MapSet.new()
+
+        plan
+        |> Plan.frontier_opts()
+        |> ReactiveDag.Suspension.points()
+        |> Enum.map(& &1.point.waiting)
+        |> Enum.filter(&MapSet.member?(known, &1))
+        |> Enum.uniq()
+        |> Enum.sort()
       end,
       []
     )
@@ -249,14 +276,14 @@ defmodule ReactiveDag.Insights do
     * a `%ReactiveDag.ScanRun{}` — a scan, kept whole. The poll's duration,
       changed keys, cost `detail` and `unreachable` list are the point: they are
       most of what a scan did, and unwrapping to the report throws them away.
-    * a bare `%ReactiveDag.Drain.Report{}` — a drain someone triggered directly,
+    * a bare `%ReactiveDag.Report{}` — a drain someone triggered directly,
       with no poll in front of it. Wrapped in a `%ScanRun{}` here so `recent/1`
       returns one shape; `polled?` on the entry is `false`.
 
   Opt-in: neither the scan nor the drain persists anything on its own. Returns
   its argument unchanged, so it drops into a pipeline either way:
 
-      plan |> ReactiveDag.Drain.run(opts) |> then(fn {:ok, r} -> Insights.record(r) end)
+      plan |> ReactiveDag.Cascade.run(origins, opts) |> then(fn {:ok, r} -> Insights.record(r) end)
   """
   @spec record(ScanRun.t(), keyword()) :: ScanRun.t()
   @spec record(Report.t(), keyword()) :: Report.t()

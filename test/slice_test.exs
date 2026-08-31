@@ -483,7 +483,7 @@ defmodule ReactiveDag.SliceTest do
     keys = Rows.keys_where(cell(Lines), fiscal_year: "FY25")
 
     assert keys == ["gf|FY25", "sewer|FY25"]
-    # `Frontier.mark_dirty("lines", keys, "reprocess FY25")` is then the action;
+    # `CascadeWorker.enqueue("lines", keys)` is then the action;
     # it needs no knowledge of what a fiscal year is.
   end
 end

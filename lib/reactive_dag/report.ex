@@ -1,7 +1,7 @@
-defmodule ReactiveDag.Drain.Report do
+defmodule ReactiveDag.Report do
   @moduledoc """
   What a drain ACTUALLY did — the processing trace, returned by
-  `ReactiveDag.Drain.run/2`.
+  `ReactiveDag.Cascade.run/3`.
 
   The drain already knows everything worth recording as it works: which cell
   it claimed, what the recompute reported changed, which cell's propagation
@@ -45,13 +45,27 @@ defmodule ReactiveDag.Drain.Report do
           meta: map()
         }
 
+  @typedoc """
+  A point where the cascade stopped — the same quartet the database holds, plus
+  why. This is the only part of a report that outlives it: everything else
+  describes work that is finished, and these describe work that is not.
+  """
+  @type suspension :: %{
+          tenant: String.t(),
+          waiting: String.t(),
+          resource: String.t(),
+          row_uuid: String.t(),
+          reason: :expensive | :approval
+        }
+
   @type t :: %__MODULE__{
           steps: [step()],
+          suspended: [suspension()],
           passes: non_neg_integer(),
           duration_us: non_neg_integer()
         }
 
-  defstruct steps: [], passes: 0, duration_us: 0
+  defstruct steps: [], suspended: [], passes: 0, duration_us: 0
 
   @doc "The distinct cells the drain recomputed, in first-touched order."
   @spec cells(t()) :: [String.t()]

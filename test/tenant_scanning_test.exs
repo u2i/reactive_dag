@@ -11,7 +11,7 @@ defmodule ReactiveDag.TenantScanningTest do
   """
   use ExUnit.Case, async: false
 
-  alias ReactiveDag.{Frontier, Source}
+  alias ReactiveDag.{Cascade, Source}
 
   defmodule Domain do
     use Ash.Domain, validate_config_inclusion?: false
@@ -116,6 +116,11 @@ defmodule ReactiveDag.TenantScanningTest do
   end
 
   setup do
+    # A poll or a write now ENQUEUES a cascade rather than leaving a mark,
+    # so without this the library reaches for Oban and these tests fail on
+    # a missing instance rather than on anything they are about.
+    ReactiveDag.Test.Pending.capture_enqueues()
+
     # `start_supervised!`, not `start_link`: the agent is registered under a global
     # name and linked to the test process, so it exits ASYNCHRONOUSLY when a test
     # ends — and the next test can call `start_link` before the name is released,
@@ -132,18 +137,20 @@ defmodule ReactiveDag.TenantScanningTest do
   defp plan(tenant), do: ReactiveDag.Node.graph([Docs], tenant: tenant)
 
   describe "a poll under a tenanted plan" do
-    test "marks the frontier in ITS OWN tenant" do
+    # A poll no longer leaves a mark in a tenanted table that a claim reads
+    # back. It enqueues a cascade, and the tenant rides on THAT — so these
+    # assert the same property one step earlier: the tenant the plan was built
+    # with is the tenant the cascade is enqueued under. Getting this wrong is
+    # the failure my notes call "empty is how tenancy fails" — the cascade runs
+    # scoped to the wrong tenant, reads nothing, and reports success.
+    test "enqueues the cascade in ITS OWN tenant" do
       Process.put(:crawler_keys, ["d1", "d2"])
 
       {:ok, _} = Source.refresh(plan("tenant_a"), "docs")
 
-      # visible to A...
-      assert Frontier.next_cell(%{"docs" => 0}, [], tenant: "tenant_a") == "docs"
-      assert Enum.sort(Frontier.claim("docs", tenant: "tenant_a")) == ["d1", "d2"]
-
-      # ...and to nobody else
-      assert Frontier.empty?(tenant: "tenant_b")
-      assert Frontier.empty?()
+      assert [{"docs", keys, opts}] = ReactiveDag.Test.Pending.enqueued()
+      assert Enum.sort(keys) == ["d1", "d2"]
+      assert Keyword.get(opts, :tenant) == "tenant_a"
     end
 
     test "two tenants' findings do not mix" do
@@ -153,16 +160,27 @@ defmodule ReactiveDag.TenantScanningTest do
       Process.put(:crawler_keys, ["b1"])
       {:ok, _} = Source.refresh(plan("tenant_b"), "docs")
 
-      assert Frontier.claim("docs", tenant: "tenant_a") == ["a1"]
-      assert Frontier.claim("docs", tenant: "tenant_b") == ["b1"]
+      assert [{"docs", ["a1"], a_opts}, {"docs", ["b1"], b_opts}] =
+               ReactiveDag.Test.Pending.enqueued()
+
+      assert Keyword.get(a_opts, :tenant) == "tenant_a"
+      assert Keyword.get(b_opts, :tenant) == "tenant_b"
     end
 
-    test "an untenanted plan still marks `\"*\"`" do
+    test "an untenanted plan still enqueues under `\"*\"`" do
+      # NOTE, because the two enqueue paths disagree: a SCAN carries the plan's
+      # tenant verbatim, and an untenanted plan's is the `"*"` sentinel — so
+      # `"*"` arrives here. A `dirties_on` WRITE takes its tenant off the
+      # changeset instead, where an untenanted write simply has none, and
+      # enqueues `nil` (see dirties_on_test). Both mean "not scoped to one
+      # tenant" and `CascadeWorker` handles each, but they are not the same
+      # value, and a reader comparing the two tests should know it is not a typo.
       Process.put(:crawler_keys, ["d1"])
 
       {:ok, _} = Source.refresh(ReactiveDag.Node.graph([Docs]), "docs")
 
-      assert Frontier.claim("docs") == ["d1"]
+      assert [{"docs", ["d1"], opts}] = ReactiveDag.Test.Pending.enqueued()
+      assert Keyword.get(opts, :tenant) == "*"
     end
   end
 
@@ -206,10 +224,10 @@ defmodule ReactiveDag.TenantScanningTest do
 
   describe "the sweep lock" do
     test "an untenanted plan locks on the dirty table, as before" do
-      Frontier.with_lock(fn -> :ok end)
+      ReactiveDag.Lock.with_lock(fn -> :ok end)
       assert_receive {:lock, unscoped}
 
-      Frontier.with_lock(fn -> :ok end, scope: nil)
+      ReactiveDag.Lock.with_lock(fn -> :ok end, scope: nil)
       assert_receive {:lock, explicit_nil}
 
       assert unscoped == explicit_nil,
@@ -218,13 +236,13 @@ defmodule ReactiveDag.TenantScanningTest do
     end
 
     test "two tenants take DIFFERENT locks, so they do not queue behind each other" do
-      Frontier.with_lock(fn -> :ok end, scope: {:tenant, "tenant_a"})
+      ReactiveDag.Lock.with_lock(fn -> :ok end, scope: {:tenant, "tenant_a"})
       assert_receive {:lock, a}
 
-      Frontier.with_lock(fn -> :ok end, scope: {:tenant, "tenant_b"})
+      ReactiveDag.Lock.with_lock(fn -> :ok end, scope: {:tenant, "tenant_b"})
       assert_receive {:lock, b}
 
-      Frontier.with_lock(fn -> :ok end)
+      ReactiveDag.Lock.with_lock(fn -> :ok end)
       assert_receive {:lock, global}
 
       assert a != b
