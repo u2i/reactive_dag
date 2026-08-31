@@ -560,10 +560,19 @@ defmodule ReactiveDag.Cascade do
   # other, and reading the second off the first would name the wrong resource in
   # every suspension.
   #
-  # The FIRST arrival wins when several children queue the same parent. That is a
-  # real limitation rather than a considered choice: the suspension names one
-  # changed resource, so a parent stopped by two different inputs in one cascade
-  # records only the first. It is the sibling problem, and it is open.
+  # The FIRST arrival names the change when several children queue the same
+  # parent, and that is a real limitation rather than a considered choice.
+  #
+  # A suspension records ONE changed resource, so a slow cell stopped by two
+  # different inputs in one cascade attributes itself to whichever arrived
+  # first. Nothing is lost from the WORK — the keys and versions of both are
+  # merged, so the resumption recomputes everything it should — but the
+  # suspension's `resource` column names only one of the two, and a reviewer
+  # reading it back sees half the story.
+  #
+  # It is logged rather than left silent: a limitation nobody can see is
+  # indistinguishable from correct behaviour, and this one only appears in
+  # graphs where a suspendable cell has several suspendable-reaching inputs.
   defp merge_pending(pending, cell_id, from, work) do
     {keys, versions} = split_entries(work.keys, work.versions)
 
@@ -572,6 +581,14 @@ defmodule ReactiveDag.Cascade do
       cell_id,
       %{keys: keys, versions: versions, diffs: work.diffs, from: from},
       fn existing ->
+        if existing.from && from && existing.from != from do
+          Logger.debug(fn ->
+            "reactive_dag: #{cell_id} was reached by both #{existing.from} and " <>
+              "#{from} in one cascade; a suspension there will name " <>
+              "#{existing.from} only. The work of both is merged."
+          end)
+        end
+
         %{
           keys: merge_keys(existing.keys, keys),
           versions: Map.merge(existing.versions, versions),
