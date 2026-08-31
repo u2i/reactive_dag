@@ -68,8 +68,14 @@ defmodule ReactiveDag.RealPostgresSuspensionTest do
       Postgrex.query!(pid, "DROP TABLE IF EXISTS #{@table}", [])
 
       # The DDL `ReactiveDag.Migration.up/1` produces. Written out rather than
-      # run through Ecto.Migration because that needs a migration runner; the
-      # column types and nullability must stay in step with migration.ex.
+      # run through Ecto.Migration because that needs a migration runner — so
+      # the column types and nullability have to be kept in step with
+      # migration.ex BY HAND, and a divergence here would hide exactly the
+      # class of bug this file exists to catch.
+      #
+      # `timestamp`, not `timestamptz`: `:utc_datetime_usec` maps to a naive
+      # column holding UTC. Verified against a real migrated database rather
+      # than assumed.
       Postgrex.query!(
         pid,
         """
@@ -81,7 +87,7 @@ defmodule ReactiveDag.RealPostgresSuspensionTest do
           row_uuid    text NOT NULL DEFAULT '*',
           version_id  text NOT NULL DEFAULT '*',
           reason      text NOT NULL,
-          inserted_at timestamptz NOT NULL DEFAULT now()
+          inserted_at timestamp NOT NULL DEFAULT now()
         )
         """,
         []

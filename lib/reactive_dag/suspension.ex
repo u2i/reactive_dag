@@ -201,10 +201,19 @@ defmodule ReactiveDag.Suspension do
         point: %{tenant: tenant, waiting: waiting, resource: resource, row_uuid: row_uuid},
         reason: String.to_existing_atom(reason),
         count: count,
-        oldest: oldest
+        oldest: as_utc(oldest)
       }
     end)
   end
+
+  # `inserted_at` is `:utc_datetime_usec`, which Ecto maps to a NAIVE column
+  # holding UTC — so Postgres hands back a `NaiveDateTime` and a caller doing
+  # date arithmetic against `DateTime.utc_now/0` would get a
+  # `FunctionClauseError` for its trouble. Converted once, here, rather than
+  # leaving every caller to discover the shape.
+  defp as_utc(%NaiveDateTime{} = naive), do: DateTime.from_naive!(naive, "Etc/UTC")
+  defp as_utc(%DateTime{} = dt), do: dt
+  defp as_utc(other), do: other
 
   @doc """
   Whether anything is suspended for this tenant.
