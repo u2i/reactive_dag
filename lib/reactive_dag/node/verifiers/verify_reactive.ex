@@ -50,6 +50,7 @@ defmodule ReactiveDag.Node.Verifiers.VerifyReactive do
          :ok <- verify_lapse(dsl),
          :ok <- verify_fingerprint_reaches_something(dsl, computations),
          :ok <- verify_compare(dsl),
+         :ok <- verify_approved_by(dsl),
          :ok <- verify_combinators(dsl, computations),
          # LAST: a node with a broken declaration should hear about THAT. This
          # check is about where correct output goes, so it is the least specific
@@ -463,6 +464,57 @@ defmodule ReactiveDag.Node.Verifiers.VerifyReactive do
   # nothing": a node that can never report a change is a node whose consumers are
   # permanently stale, and if that is genuinely wanted it should be said by not
   # declaring the node.
+  # `approved_by` names a column and what it points at, and one combination of
+  # them is a self-cancelling loop worth refusing at compile time.
+  #
+  # Recording an approval WRITES the reference column. If that column is in
+  # `compare:`, the write moves the row's version — and the approval, which
+  # names the version it covered, no longer matches. The sign-off invalidates
+  # itself the instant it is made, forever, and the symptom is a review queue
+  # nobody can clear.
+  #
+  # Five lines here, or an afternoon for whoever hits it.
+  defp verify_approved_by(dsl) do
+    case Verifier.get_option(dsl, [:reactive], :approved_by) do
+      nil ->
+        :ok
+
+      spec when is_list(spec) ->
+        with :ok <- approved_by_keys(dsl, spec) do
+          via = Keyword.get(spec, :via)
+          compare = Verifier.get_option(dsl, [:reactive], :compare)
+
+          if is_list(compare) and via in compare do
+            error(
+              dsl,
+              "`approved_by via: #{inspect(via)}` names a column that is also in " <>
+                "`compare:`. Recording an approval writes that column, which would move " <>
+                "this row's version — and the approval names the version it covered, so " <>
+                "it would stop matching the moment it was made. The sign-off would " <>
+                "invalidate itself instantly and forever. Remove #{inspect(via)} from " <>
+                "`compare:`: it is not part of what this node COMPUTED, it is a record " <>
+                "of someone reviewing what it computed."
+            )
+          else
+            :ok
+          end
+        end
+    end
+  end
+
+  defp approved_by_keys(dsl, spec) do
+    cond do
+      is_nil(Keyword.get(spec, :via)) ->
+        error(dsl, "`approved_by` needs `via:` — the column on this node holding the reference.")
+
+      is_nil(Keyword.get(spec, :resource)) ->
+        error(dsl, "`approved_by` needs `resource:` — what the reference points at.")
+
+      true ->
+        :ok
+    end
+  end
+
   defp verify_compare(dsl) do
     case Verifier.get_option(dsl, [:reactive], :compare) do
       nil ->

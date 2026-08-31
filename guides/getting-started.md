@@ -231,22 +231,22 @@ MyApp.FiscalLines |> Ash.Changeset.for_create(:create, attrs) |> Ash.create!()
 ReactiveDag.Cascade.run(plan, origins)                       # ← still yours
 ```
 
-For a graph with a polling source that is fine — the next sweep picks it up. For
-a write-fed leaf it means the result of a user's action appears whenever
-something else happens to drain, which may be never. Add `schedule_drain:`:
+Under the old engine this was a two-step affair: a write left a mark, and
+something else had to consume it — with `schedule_drain: true` as the opt-in
+that made it prompt. A host that forgot got staleness that looked like success.
+
+There is nothing to opt into now. **Originating a cascade IS enqueuing one**:
 
 ```elixir
 reactive do
   id :fiscal_lines
   leaf? true
   dirties_on [:create, :update, :destroy]
-  schedule_drain true
 end
 ```
 
-That enqueues a `ReactiveDag.DrainWorker` job in the same transaction as the
-mark, so both commit or neither does, and the drain runs after the request rather
-than inside it. A burst of writes coalesces to one pending job. Needs Oban and a
+That write enqueues a `ReactiveDag.CascadeWorker` job in its own transaction, so
+both commit or neither does, and the propagation runs after the request rather
 `drain` queue:
 
 ```elixir

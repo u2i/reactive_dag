@@ -90,7 +90,6 @@ defmodule ReactiveDag.DirtiesOnTest do
       id(:attestations)
       leaf?(true)
       dirties_on([:create, :destroy])
-      schedule_drain(true)
       payload_key(:key)
     end
   end
@@ -620,7 +619,7 @@ defmodule ReactiveDag.DirtiesOnTest do
     # WHAT THIS BLOCK USED TO ASSERT, and why it no longer can.
     #
     # Under the queue, a write did two things: mark the frontier, and — only if
-    # the node opted in with `schedule_drain: true` — enqueue something to
+    # every origination enqueues — there is no opt-in any more, so
     # consume that mark. A host that did the first and forgot the second got
     # durable staleness, and this block existed to pin the second step down:
     # it counted calls through a `:drain_enqueuer` seam and asserted the count
@@ -655,7 +654,7 @@ defmodule ReactiveDag.DirtiesOnTest do
     end
 
     test "a node that never opted into scheduling enqueues all the same" do
-      # `Expenses` declares no `schedule_drain`. Under the queue that meant
+      # Under the queue, a node that did not opt in meant
       # "mark, and wait for whatever drains next"; it now means nothing, because
       # marking and enqueuing are the same act.
       Expenses

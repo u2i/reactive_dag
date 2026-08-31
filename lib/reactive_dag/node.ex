@@ -1394,7 +1394,7 @@ defmodule ReactiveDag.Node do
             "and a committed one always leaves one. (A NOTIFIER cannot promise that: " <>
             "Ash dispatches notifications after commit.) Opt-in, and not implied by " <>
             "`leaf?` — a leaf fed by a `ReactiveDag.Source` poll would double-trigger. " <>
-            "Marks but does not SCHEDULE: pair with `schedule_drain: true` unless " <>
+            "ORIGINATES a cascade, inside the write's own transaction — there is no " <>
             "something else already drains on a cadence you are happy to wait for. " <>
             "For a SOURCE-FED LEAF, where every write is an observation; a COMPUTED " <>
             "node whose rows the library writes itself needs `augmented_by`, which " <>
@@ -1420,7 +1420,7 @@ defmodule ReactiveDag.Node do
             "Wired as an `after_action` change on each named action, so the mark runs " <>
             "INSIDE the write's transaction, exactly as `dirties_on` does — a rolled-back " <>
             "correction leaves no dirty key, a committed one always leaves one. Composes " <>
-            "with `schedule_drain: true` (same meaning: enqueue the drain in the same " <>
+            "with `dirties_on` on a leaf that is ALSO human-augmented (same meaning: " <>
             "transaction) and with `dirties_on` on a leaf that is ALSO human-augmented; " <>
             "an action covered by both marks ONCE."
       ],
@@ -1429,17 +1429,13 @@ defmodule ReactiveDag.Node do
         required: false,
         default: false,
         doc:
-          "with `dirties_on` or `augmented_by`, enqueue a `ReactiveDag.CascadeWorker` job in the SAME " <>
-            "transaction as the mark — so a write is promptly reflected rather than " <>
-            "merely durable. Without it the mark waits for whatever drains next (in " <>
-            "practice the hourly sweep), which for a write-fed leaf with no polling " <>
-            "source on that cadence may be no drain at all (u2i/reactive_dag#142). " <>
-            "The enqueue is one INSERT and joins the write's transaction, so a " <>
-            "rolled-back write schedules nothing; the DRAIN itself runs later, out " <>
-            "of the request. A burst of N writes coalesces to one pending job. " <>
-            "Requires Oban (an optional dependency) — without it the option raises " <>
-            "at compile time rather than silently marking and never draining. " <>
-            "Default false: existing hosts keep today's behaviour."
+          "REMOVED, and kept only so a host declaring it gets an error rather than " <>
+            "silence. Originating a cascade IS enqueuing one — `dirties_on` and " <>
+            "`augmented_by` enqueue inside the write's transaction, and there is no " <>
+            "longer a separate step to schedule. Delete the line.\n\n" <>
+            "It existed because a mark was durable but inert: something had to consume " <>
+            "it, and a host that forgot got staleness that looked like success. That " <>
+            "gap cannot be left open now, so the option has nothing to switch on."
       ],
       fingerprint: [
         type: {:or, [{:fun, 1}, {:list, :atom}]},
@@ -1457,6 +1453,30 @@ defmodule ReactiveDag.Node do
         type: :atom,
         required: false,
         doc: "the attribute a leaf's `fingerprint` is stored in (default `:fingerprint`)."
+      ],
+      approved_by: [
+        type: :keyword_list,
+        required: false,
+        doc:
+          "how a human SIGN-OFF on this node's rows is recorded: " <>
+            "`approved_by via: :approval_id, resource: MyApp.Approval`.\n\n" <>
+            "`via:` names the column on THIS node holding a reference; " <>
+            "`resource:` names what it points at. That resource must carry a " <>
+            "`version_id` — the version its approval covered. The library reads those " <>
+            "two columns and compares them, and reads nothing else: a scheme with two " <>
+            "reviewers, a recorded reason, or an expiry is a different HOST resource, " <>
+            "not a different option here.\n\n" <>
+            "Whether a row is approved is DERIVED, never stored: " <>
+            "`approval.version_id == row.version_id`. A stored flag needs something to " <>
+            "clear it on every path that writes the row, and a path that forgets leaves " <>
+            "a row reading as reviewed when nobody reviewed that content. An equality " <>
+            "that stops holding cannot be forgotten.\n\n" <>
+            "The reference column must NOT appear in `compare:` — otherwise recording " <>
+            "the approval moves the row's version and instantly invalidates the " <>
+            "approval just made. Checked at compile time.\n\n" <>
+            "Pairs with `gated`, which is what stops the cascade until someone signs. " <>
+            "This says how the signature is recorded; `gated` says that one is needed.",
+        snippet: "approved_by via: :approval_id, resource: MyApp.Approval"
       ],
       compare: [
         type: {:list, :atom},
@@ -2806,6 +2826,7 @@ defmodule ReactiveDag.Node do
         fingerprint: Ext.get_opt(resource, [:reactive], :fingerprint, nil),
         fingerprint_attribute: Ext.get_opt(resource, [:reactive], :fingerprint_attribute, nil),
         compare: Ext.get_opt(resource, [:reactive], :compare, nil),
+        approved_by: Ext.get_opt(resource, [:reactive], :approved_by, nil),
         # WHERE A CASCADE STOPS, by reason. `suspends` and `gated` are two ways
         # to say the same structural thing — this node cannot be completed
         # inline — so they normalise into one map here rather than being read

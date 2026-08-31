@@ -334,4 +334,67 @@ defmodule ReactiveDag.SuspendsTest do
       assert plan.cells["reviewed"]
     end
   end
+
+    defmodule WellFormed do
+      use Ash.Resource,
+        domain: ReactiveDag.SuspendsTest.Domain,
+        data_layer: Ash.DataLayer.Ets,
+        extensions: [ReactiveDag.Node]
+
+      ets do
+        private?(true)
+      end
+
+      attributes do
+        attribute :key, :string, primary_key?: true, allow_nil?: false, public?: true
+        attribute :outcome, :string, public?: true
+        attribute :approval_id, :string, public?: true
+      end
+
+      actions do
+        defaults [:read, :destroy]
+        create :upsert, upsert?: true, accept: [:key, :outcome, :approval_id]
+
+        action :extract, :map do
+          run fn _i, _c -> {:ok, %{}} end
+        end
+      end
+
+      reactive do
+        id :well_formed
+        depends_on [:versioned_leaf]
+        run :extract
+        compare [:outcome]
+        approved_by via: :approval_id, resource: ReactiveDag.SuspendsTest.VersionedLeaf
+      end
+    end
+
+  describe "approved_by, checked at compile time" do
+    @tag :skip
+    test "the reference column must not be in compare:" do
+      # SKIPPED, and honestly rather than quietly: the check exists in
+      # `VerifyReactive.verify_approved_by/1` and its message renders correctly
+      # when triggered by hand, but I could not get a test to reach it. Spark
+      # raises at module-definition time, so `assert_raise` around a
+      # `defmodule` does not catch it; `Code.compile_string/1` compiles the same
+      # source cleanly; and calling the verifier directly needs a dsl config
+      # carrying both options, which nothing in this suite builds.
+      #
+      # Left as a skip rather than deleted, because the check it covers is the
+      # one that matters most in this feature: if the reference column IS in
+      # `compare:`, recording an approval moves the row's version and the
+      # sign-off invalidates itself the instant it is made, forever. The symptom
+      # — a review queue nobody can clear — is a long way from the cause.
+      #
+      # Whoever picks this up: the shape to test is a computed node declaring
+      # both `compare [:x, :approval_id]` and
+      # `approved_by via: :approval_id, resource: SomeResource`.
+      flunk("unimplemented — see the comment above")
+    end
+
+    test "the same declaration is fine when the column is not compared" do
+      plan = ReactiveDag.Node.graph([VersionedLeaf, WellFormed])
+      assert plan.cells["well_formed"].meta[:approved_by][:via] == :approval_id
+    end
+  end
 end

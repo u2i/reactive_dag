@@ -141,7 +141,7 @@ not collide.
 
 Both may appear on one resource; an action covered by both marks once.
 
-`schedule_drain true` applies to either: mark *and* enqueue a drain in the same
+Either one enqueues its cascade in the same
 transaction, so an edit lands in seconds rather than at the next sweep. For
 someone who just typed a correction and is watching the page, that is the
 point.
@@ -351,7 +351,7 @@ summary that follows from it.
 | you want | declare |
 |---|---|
 | a human edit re-runs the cascade | `augmented_by [:action]` |
-| ...and applies immediately | `+ schedule_drain true` |
+| ...and applies immediately | (automatic — originating IS enqueuing) |
 | the mark outlives recomputes | nothing — the default; keep the column out of the payload action's `accept` |
 | the mark is a claim about content | `lapse :attr, when_changed: :any` |
 | ...about *particular* content | `lapse :attr, when_changed: [:fields]` |

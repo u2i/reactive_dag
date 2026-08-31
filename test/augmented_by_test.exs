@@ -172,7 +172,7 @@ defmodule ReactiveDag.AugmentedByTest do
     end
   end
 
-  # `schedule_drain` composes: an augmented write enqueues the drain in the same
+  # An augmented write enqueues its cascade in the same
   # transaction as the mark.
   defmodule Verdicts do
     use Ash.Resource,
@@ -205,7 +205,6 @@ defmodule ReactiveDag.AugmentedByTest do
       id(:verdicts)
       leaf?(true)
       augmented_by([:override])
-      schedule_drain(true)
     end
   end
 
@@ -243,7 +242,6 @@ defmodule ReactiveDag.AugmentedByTest do
       # :correct is an `:update`, so BOTH cover it
       dirties_on([:create, :update])
       augmented_by([:correct])
-      schedule_drain(true)
     end
   end
 
