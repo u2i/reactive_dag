@@ -474,6 +474,11 @@ defmodule ReactiveDag.Node.Verifiers.VerifyReactive do
   # nobody can clear.
   #
   # Five lines here, or an afternoon for whoever hits it.
+  #
+  # Spark surfaces a verifier error as a compile WARNING and still defines the
+  # module, so this does not BLOCK the shape — it names it. A host compiling
+  # with `--warnings-as-errors` gets the stop; one that does not gets a loud
+  # line it has to choose to ignore.
   defp verify_approved_by(dsl) do
     case Verifier.get_option(dsl, [:reactive], :approved_by) do
       nil ->

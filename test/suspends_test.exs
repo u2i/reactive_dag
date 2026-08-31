@@ -369,27 +369,64 @@ defmodule ReactiveDag.SuspendsTest do
       end
     end
 
-  describe "approved_by, checked at compile time" do
-    @tag :skip
+  # Declares the loop on purpose. It compiles — Spark warns rather than raising
+  # — which is why the test below calls the verifier instead of expecting a
+  # raise. The `@moduledoc false` keeps it out of the docs.
+  defmodule SelfCancelling do
+    @moduledoc false
+    use Ash.Resource,
+      domain: ReactiveDag.SuspendsTest.Domain,
+      data_layer: Ash.DataLayer.Ets,
+      extensions: [ReactiveDag.Node]
+
+    ets do
+      private?(true)
+    end
+
+    attributes do
+      attribute :key, :string, primary_key?: true, allow_nil?: false, public?: true
+      attribute :outcome, :string, public?: true
+      attribute :approval_id, :string, public?: true
+    end
+
+    actions do
+      defaults [:read, :destroy]
+      create :upsert, upsert?: true, accept: [:key, :outcome, :approval_id]
+
+      action :extract, :map do
+        run fn _i, _c -> {:ok, %{}} end
+      end
+    end
+
+    reactive do
+      id :self_cancelling
+      run :extract
+      compare [:outcome, :approval_id]
+      approved_by via: :approval_id, resource: ReactiveDag.SuspendsTest.VersionedLeaf
+    end
+  end
+
+  describe "approved_by, reported by the verifier" do
     test "the reference column must not be in compare:" do
-      # SKIPPED, and honestly rather than quietly: the check exists in
-      # `VerifyReactive.verify_approved_by/1` and its message renders correctly
-      # when triggered by hand, but I could not get a test to reach it. Spark
-      # raises at module-definition time, so `assert_raise` around a
-      # `defmodule` does not catch it; `Code.compile_string/1` compiles the same
-      # source cleanly; and calling the verifier directly needs a dsl config
-      # carrying both options, which nothing in this suite builds.
+      # Recording an approval WRITES the reference column. If that column is
+      # part of what `compare:` calls the result, the write moves the row's
+      # version — and the approval names the version it covered, so it stops
+      # matching the instant it is made. Forever. The symptom is a review queue
+      # nobody can clear, which is a long way from the cause.
       #
-      # Left as a skip rather than deleted, because the check it covers is the
-      # one that matters most in this feature: if the reference column IS in
-      # `compare:`, recording an approval moves the row's version and the
-      # sign-off invalidates itself the instant it is made, forever. The symptom
-      # — a review queue nobody can clear — is a long way from the cause.
-      #
-      # Whoever picks this up: the shape to test is a computed node declaring
-      # both `compare [:x, :approval_id]` and
-      # `approved_by via: :approval_id, resource: SomeResource`.
-      flunk("unimplemented — see the comment above")
+      # The verifier is CALLED, which is how this suite tests every DSL error.
+      # Spark surfaces a verifier's `{:error, _}` as a compile-time WARNING and
+      # still defines the module — so `assert_raise` around a `defmodule` never
+      # fires, and neither does `Code.compile_string/1`. I spent a while
+      # asserting on the wrong mechanism before reading what Spark actually
+      # does with the return value.
+      assert {:error, %Spark.Error.DslError{message: msg}} =
+               ReactiveDag.Node.Verifiers.VerifyReactive.verify(
+                 SelfCancelling.spark_dsl_config()
+               )
+
+      assert msg =~ "invalidate itself"
+      assert msg =~ "Remove :approval_id from `compare:`"
     end
 
     test "the same declaration is fine when the column is not compared" do

@@ -1473,7 +1473,9 @@ defmodule ReactiveDag.Node do
             "that stops holding cannot be forgotten.\n\n" <>
             "The reference column must NOT appear in `compare:` — otherwise recording " <>
             "the approval moves the row's version and instantly invalidates the " <>
-            "approval just made. Checked at compile time.\n\n" <>
+            "approval just made. A verifier reports this, and Spark surfaces it as a " <>
+            "compile WARNING rather than an error: the module still builds, so a host " <>
+            "that ignores warnings ships the loop. Do not ignore it.\n\n" <>
             "Pairs with `gated`, which is what stops the cascade until someone signs. " <>
             "This says how the signature is recorded; `gated` says that one is needed.",
         snippet: "approved_by via: :approval_id, resource: MyApp.Approval"
