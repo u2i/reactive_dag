@@ -1326,6 +1326,29 @@ defmodule ReactiveDag.Node do
             "(the diff is what a claim is derived from), and there is simply no durable " <>
             "record to look back at."
       ],
+      suspends: [
+        type: {:or, [:boolean, :keyword_list]},
+        required: false,
+        default: false,
+        doc:
+          "this node's recompute is too SLOW to run inside a transaction, so a cascade " <>
+            "reaching it stops, records a suspension, and commits everything that " <>
+            "already ran. A job resumes it later, outside any transaction.\n\n" <>
+            "Declared, never inferred. A node that becomes slow without saying so holds " <>
+            "the cascade's connection open until something times out — the failure this " <>
+            "exists to prevent — so the declaration has to be honest. Conversely a node " <>
+            "declared slow always suspends, even when its `fingerprint` would have " <>
+            "made this particular recompute a cache hit: one code path, no " <>
+            "timing-dependent behaviour, at the cost of an enqueue on the cheap case.\n\n" <>
+            "Requires `version_diff` here and `version_id` on every input, checked at " <>
+            "graph assembly. Without them a resumption cannot be narrowed to the rows " <>
+            "that moved and recomputes the whole cell — expensive work over a whole " <>
+            "table instead of a handful of rows, and silent.\n\n" <>
+            "The sibling of `gated`: both stop a cascade and record where. They differ " <>
+            "only in what the resuming job does — this one computes and then propagates, " <>
+            "`gated` only propagates, because its write already happened.",
+        snippet: "suspends true"
+      ],
       gated: [
         type: {:or, [:boolean, :keyword_list]},
         required: false,
@@ -1664,9 +1687,113 @@ defmodule ReactiveDag.Node do
 
     verify_one_node_per_source!(plan)
     verify_tenancy_flows_downstream!(plan)
+    verify_suspension_versions!(plan)
+    verify_one_cell_per_suspendable_resource!(plan)
 
     plan
   end
+
+  # A node that suspends must be able to RESUME from the change that stopped it.
+  #
+  # A suspension records `(resource, row_uuid, version_id)` — which row of what
+  # moved. Resuming means reading that version, deriving the units it touched,
+  # and recomputing only those. Two declarations make that possible, on
+  # different nodes:
+  #
+  #   * the SUSPENDING node needs `version_diff` — how to read a version back;
+  #   * each of its INPUTS needs `version_id` — how to record one when it writes.
+  #
+  # Neither is checkable by a Spark verifier, which sees one resource and cannot
+  # know what feeds it. So it is checked here, at assembly, like the tenancy rule
+  # above.
+  #
+  # It RAISES rather than warns because the failure is silent and expensive. A
+  # missing version does not error at drain time: the resumption simply cannot be
+  # narrowed and recomputes the whole cell — which is correct, and is an LLM call
+  # over every row of a table instead of the three that moved. Nothing reports
+  # it. The cost shows up as a bill.
+  #
+  # Leaves are NOT exempt, and that is deliberate: a source-fed leaf is exactly
+  # where the expensive nodes tend to sit, one hop downstream. Exempting them
+  # would let the check pass while delivering none of the precision it exists to
+  # guarantee. `Payload.upsert_row/5` already records versions, so a leaf needs
+  # only the declaration.
+  #
+  # Context inputs are excluded, matching `Graph.build_parents/1`: a context edge
+  # is read but never propagates, so it can never be the change a suspension
+  # names.
+  defp verify_suspension_versions!(%ReactiveDag.Plan{} = plan) do
+    for {id, cell} <- plan.cells, suspends?(cell) do
+      unless cell.meta[:version_diff] do
+        raise ArgumentError,
+              "reactive_dag: cell #{inspect(id)} suspends, but declares no " <>
+                "`version_diff` — so a resumption has no way to read the change that " <>
+                "stopped it, and would recompute the whole cell every time. Declare " <>
+                "`version_diff {MyApp.Versions, :changes_for, []}` on #{inspect(id)}."
+      end
+
+      context = cell.meta[:context_inputs] || []
+
+      for input_id <- cell.inputs,
+          to_string(input_id) not in context,
+          input = plan.cells[input_id],
+          input != nil,
+          is_nil(input.meta[:version_id]) do
+        raise ArgumentError,
+              "reactive_dag: cell #{inspect(id)} suspends, so its input " <>
+                "#{inspect(input_id)} must declare `version_id` — it is what records " <>
+                "WHICH ROW changed. Without it every suspension at #{inspect(id)} " <>
+                "carries no version and resumption recomputes the whole cell: the " <>
+                "expensive work you declared runs over the whole table instead of the " <>
+                "rows that moved, with no error to tell you."
+      end
+    end
+
+    :ok
+  end
+
+  # A suspension names what stopped by RESOURCE, not by cell id — so a host
+  # writing a row can name a stopping point without knowing the graph's internal
+  # names. That only works while a suspendable resource resolves to exactly one
+  # cell.
+  #
+  # Three things in this DSL break that: `for_each` expands one node into
+  # `<id>.<member>` per member, `companion` emits `<id>` and `<id>/set`, and
+  # `compose` legs become sub-cells. All share their resource. If two of them
+  # suspend, a resumption reading `waiting = "MyApp.Thing"` cannot tell which
+  # cell to recompute, and will silently recompute one with the other's units.
+  #
+  # Rather than add a `cell_id` column that exists only for these cases, forbid
+  # the combination. The check is here because it is a property of the assembled
+  # graph — one resource, several cells — that no single resource can see.
+  defp verify_one_cell_per_suspendable_resource!(%ReactiveDag.Plan{} = plan) do
+    plan.cells
+    |> Enum.filter(fn {_id, cell} -> cell.meta[:resource] end)
+    |> Enum.group_by(fn {_id, cell} -> cell.meta[:resource] end, fn {id, cell} -> {id, cell} end)
+    |> Enum.each(fn
+      {_resource, [_only_one]} ->
+        :ok
+
+      {resource, cells} ->
+        case Enum.filter(cells, fn {_id, cell} -> suspends?(cell) end) do
+          [] ->
+            :ok
+
+          [{id, _} | _] ->
+            raise ArgumentError,
+                  "reactive_dag: cell #{inspect(id)} suspends, but #{inspect(resource)} " <>
+                    "backs #{length(cells)} cells " <>
+                    "(#{Enum.map_join(cells, ", ", fn {i, _} -> inspect(i) end)}). A " <>
+                    "suspension names what stopped by RESOURCE, so a resumption could " <>
+                    "not tell which of them to recompute and would silently run one " <>
+                    "with another's units. `for_each`, `companion` and `compose` all " <>
+                    "produce several cells per resource; none can suspend."
+        end
+    end)
+  end
+
+  defp suspends?(%ReactiveDag.Cell{meta: meta}), do: is_map(meta[:suspends])
+  defp suspends?(_), do: false
 
   # A tenanted node must not feed an UNTENANTED one.
   #
@@ -2655,6 +2782,11 @@ defmodule ReactiveDag.Node do
         fingerprint: Ext.get_opt(resource, [:reactive], :fingerprint, nil),
         fingerprint_attribute: Ext.get_opt(resource, [:reactive], :fingerprint_attribute, nil),
         compare: Ext.get_opt(resource, [:reactive], :compare, nil),
+        # WHERE A CASCADE STOPS, by reason. `suspends` and `gated` are two ways
+        # to say the same structural thing — this node cannot be completed
+        # inline — so they normalise into one map here rather than being read
+        # from two places by everything downstream.
+        suspends: suspends(resource),
         retain_if_vanished: retain_policy(resource),
         slices: slices(resource),
         lapse: lapses(resource),
@@ -2669,6 +2801,32 @@ defmodule ReactiveDag.Node do
     |> Map.merge(run_meta)
     |> Map.merge(scan_meta)
   end
+
+  # The reasons this node stops a cascade, as `%{reason => opts}`.
+  #
+  # `suspends` and `gated` are one structural fact with two causes: a cascade
+  # reaching this node cannot finish it inline, so it records where it stopped
+  # and commits what already ran. They differ only in what the resuming job
+  # does — `:expensive` computes and then propagates, `:approval` only
+  # propagates, because the write already happened and the gate merely opened.
+  #
+  # Normalised into one map so nothing downstream has to ask two questions to
+  # learn one thing. `nil` (not `%{}`) when neither is declared, so
+  # `extra_meta/2`'s nil-reject keeps it off cells that never suspend.
+  defp suspends(resource) do
+    %{}
+    |> put_suspend(:expensive, Ext.get_opt(resource, [:reactive], :suspends, false))
+    |> put_suspend(:approval, Ext.get_opt(resource, [:reactive], :gated, false))
+    |> case do
+      empty when map_size(empty) == 0 -> nil
+      reasons -> reasons
+    end
+  end
+
+  defp put_suspend(acc, _reason, false), do: acc
+  defp put_suspend(acc, _reason, nil), do: acc
+  defp put_suspend(acc, reason, true), do: Map.put(acc, reason, [])
+  defp put_suspend(acc, reason, opts) when is_list(opts), do: Map.put(acc, reason, opts)
 
   defp context_inputs(resource) do
     case Ext.get_entities(resource, [:reactive]) |> Enum.filter(&match?(%Context{}, &1)) do
