@@ -87,7 +87,27 @@ defmodule ReactiveDag.Test.Pending do
   """
   def capture_enqueues do
     prev = Application.get_env(:reactive_dag, :cascade_enqueuer)
-    Agent.start_link(fn -> [] end, name: __MODULE__.Enqueued)
+
+    # `start_supervised!`, NOT `Agent.start_link`, and the difference is a
+    # flake this suite has hit.
+    #
+    # `start_link` links the agent to the TEST process, which exits at the end
+    # of the test — asynchronously. The next test calling this can reach
+    # `start_link` before the name is released and get
+    # `{:error, {:already_started, dying_pid}}`; the result was discarded here,
+    # so the failure surfaced later as an `Agent.update` against a dead pid,
+    # in whichever test happened to run next.
+    #
+    # Measured rather than assumed: starting a globally-named agent from a
+    # short-lived process and immediately restarting it collides 2999 times out
+    # of 3000. ExUnit's supervisor WAITS for the exit, so it cannot.
+    #
+    # The same reasoning is written into `op_tenant_test` and
+    # `tenant_plan_test`, which hit this before.
+    ExUnit.Callbacks.start_supervised!(%{
+      id: __MODULE__.Enqueued,
+      start: {Agent, :start_link, [fn -> [] end, [name: __MODULE__.Enqueued]]}
+    })
 
     Application.put_env(:reactive_dag, :cascade_enqueuer, fn cell, keys, opts ->
       Agent.update(__MODULE__.Enqueued, &[{cell, keys, opts} | &1])

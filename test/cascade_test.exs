@@ -105,7 +105,8 @@ defmodule ReactiveDag.CascadeTest do
   # Records every recompute, so the test can assert HOW MANY times a cell ran —
   # which is the only way to see the diamond property.
   defmodule Ran do
-    def start, do: Agent.start_link(fn -> [] end, name: __MODULE__)
+    def child_spec(_), do: %{id: __MODULE__, start: {__MODULE__, :start_link, [[]]}}
+    def start_link(_ \\ []), do: Agent.start_link(fn -> [] end, name: __MODULE__)
     def note(id, keys), do: Agent.update(__MODULE__, &[{id, Enum.sort(keys)} | &1])
     def all, do: Agent.get(__MODULE__, &Enum.reverse/1)
     def count(id), do: all() |> Enum.count(fn {c, _} -> c == id end)
@@ -141,11 +142,12 @@ defmodule ReactiveDag.CascadeTest do
   end
 
   setup do
-    case Ran.start() do
-      {:ok, _} -> :ok
-      {:error, {:already_started, _}} -> Agent.update(Ran, fn _ -> [] end)
-    end
-
+    # `start_supervised!`, not `Agent.start_link` with an `already_started`
+    # fallback. The fallback REUSED a pid that may be mid-exit — the previous
+    # test's agent, dying asynchronously — so it traded a visible setup error
+    # for an intermittent failure somewhere later. ExUnit's supervisor waits for
+    # the exit, so the name is free by the time this runs.
+    start_supervised!(Ran)
     :ok
   end
 
