@@ -5,7 +5,7 @@ defmodule ReactiveDag.Config do
   Misconfiguration otherwise surfaces at the **first query** — a missing
   `:repo` raises on the first drain, which may be a long way into a deploy and
   in whatever process happened to trigger it. Worse, only `:repo` raises at all:
-  a `:dirty_table` name that is not a valid identifier fails later and less
+  a `:suspension_table` name that is not a valid identifier fails later and less
   legibly, as a syntax error deep inside a query.
 
   Call it once at boot:
@@ -107,7 +107,12 @@ defmodule ReactiveDag.Config do
   # the one identifier SQL cannot parameterise, so a typo would otherwise be a
   # syntax error deep inside a query
   defp table_names do
-    for {key, default} <- [dirty_table: "reactive_dag_dirty"],
+    for {key, default} <- [
+          suspension_table: "reactive_dag_suspension",
+          # Still checked, because `Migration.drop_dirty/1` still interpolates
+          # it into DDL. Nothing reads it at runtime.
+          dirty_table: "reactive_dag_dirty"
+        ],
         name = Application.get_env(:reactive_dag, key, default),
         problem = table_problem(key, name),
         do: problem

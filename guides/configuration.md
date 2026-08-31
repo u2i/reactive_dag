@@ -18,7 +18,7 @@ config :reactive_dag, repo: MyApp.Repo
 | [`:repo`](#repo) | — | **yes** | `Suspension` |
 | [`:suspension_table`](#suspension_table) | `"reactive_dag_suspension"` | no | `Suspension`, `Migration` |
 | [`:cascade_timeout`](#cascade_timeout) | `30_000` | no | `Suspension` |
-| [`:dirty_table`](#dirty_table) | `"reactive_dag_dirty"` | no | `Migration.drop_dirty/1` |
+| [`:dirty_table`](#dirty_table) | `"reactive_dag_dirty"` | no | `Migration.drop_dirty/1` only |
 | [`:plan_mfa`](#plan_mfa) | — | only with `ScanWorker` | `ScanWorker` |
 | [`:insights_keep`](#insights_keep) | `20` | no | `Insights` |
 | [`:cascade_enqueuer`](#cascade_enqueuer) | `CascadeWorker.enqueue/3` | no | `dirties_on`, `augmented_by`, `Source` |
@@ -74,19 +74,20 @@ this back to `:infinity` restores that failure.
 
 ### `:dirty_table`
 
-The OLD queue table, kept only so a host upgrading can drop it.
+**Nothing reads this at runtime.** It names the OLD queue table, and its only
+consumer is `ReactiveDag.Migration.drop_dirty/1` — the migration that removes
+it.
 
 ```elixir
 config :reactive_dag, dirty_table: "my_existing_dirty"
 ```
 
-Read by nothing at runtime — `ReactiveDag.Migration.drop_dirty/1` is its only
-consumer. Set it if your queue table was not called `reactive_dag_dirty`;
-otherwise ignore it and it disappears once you have dropped the table.
+Set it only if your queue table was not called `reactive_dag_dirty` and you
+have not yet dropped it. Once the drop has run everywhere, delete the line: it
+configures nothing.
 
-Sequence the drop deliberately: drain the old queue to empty on the old code,
-deploy, then drop. An undrained mark is outstanding work, and the queue was the
-only record that it was pending.
+Deliberately still validated as an identifier, because it is still
+interpolated into DDL.
 
 ### `:plan_mfa`
 

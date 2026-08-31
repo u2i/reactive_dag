@@ -110,11 +110,12 @@ defmodule ReactiveDag.Node do
   ## Config
 
       config :reactive_dag,
-        repo:        MyApp.Repo,   # REQUIRED (raises if unset)
-        dirty_table: "my_dirty"    # frontier table (must match your migration)
+        repo:             MyApp.Repo,        # REQUIRED (raises if unset)
+        suspension_table: "my_suspensions"   # must match your migration
 
-  `dirty_table` defaults silently, so a name that doesn't match your migration
-  yields empty results with no error — set it explicitly.
+  `suspension_table` defaults silently, so a name that doesn't match your
+  migration yields empty results with no error — `ReactiveDag.Config.validate!/0`
+  at boot is what turns that into a stop.
   """
 
   defmodule Ref do
