@@ -404,6 +404,35 @@ defmodule ReactiveDag.Node.Payload do
   # `version_id` once and both producers honour it. The arguments differ by
   # necessity: the payload loop builds attrs rather than accepting a caller's
   # changeset, so a resolver here receives the written record and the prior one.
+  @doc """
+  Record a version for `key` from OUTSIDE the payload path.
+
+  For a host whose leaf writes its own rows. A source-fed leaf often must — a
+  crawl needs `upsert_fields:` scoped to one document family, so an agenda
+  write does not blank the minutes columns — and such a write never reaches
+  `upsert_row/5`, where a `version_id` resolver is normally called.
+
+  Without this, declaring `version_id` on such a leaf is INERT: it satisfies
+  the assembly check that a suspendable cell's inputs record versions, and then
+  records none. Every suspension downstream carries `"*"` and every resumption
+  recomputes a whole cell — correct, expensive, and reported nowhere.
+
+  Only has an effect inside `collecting_diffs_and_versions/1`, which
+  `Source.refresh/3` wraps a poll in. Outside one it is a no-op, so a host can
+  call it unconditionally.
+  """
+  @spec put_version(String.t(), String.t()) :: :ok
+  def put_version(key, version_id) when is_binary(key) and is_binary(version_id) do
+    case Process.get(@versions) do
+      nil -> :ok
+      acc -> Process.put(@versions, Map.put(acc, key, version_id))
+    end
+
+    :ok
+  end
+
+  def put_version(_key, _version_id), do: :ok
+
   defp record_version(cell_key, written, prior, opts) do
     with resolver when not is_nil(resolver) <- opts[:version_id],
          acc when not is_nil(acc) <- Process.get(@versions),

@@ -29,6 +29,10 @@ defmodule ReactiveDag.ScanWorkerTest do
     def start_link, do: Agent.start_link(fn -> %{polls: [], result: nil} end, name: __MODULE__)
     def polls, do: Agent.get(__MODULE__, & &1.polls) |> Enum.reverse()
     def returns(result), do: Agent.update(__MODULE__, &%{&1 | result: result})
+
+    # Versions this poll should record DURING its write, as a real leaf does —
+    # `put_version/2` only lands inside the collector `refresh/3` establishes.
+    def records(versions), do: Agent.update(__MODULE__, &Map.put(&1, :versions, versions))
     def raises, do: Agent.update(__MODULE__, &%{&1 | result: :raise})
 
     @impl true
@@ -38,6 +42,10 @@ defmodule ReactiveDag.ScanWorkerTest do
     @impl true
     def poll(opts) do
       Agent.update(__MODULE__, &%{&1 | polls: [opts | &1.polls]})
+
+      for {k, v} <- Agent.get(__MODULE__, &Map.get(&1, :versions, %{})) do
+        ReactiveDag.Node.Payload.put_version(k, v)
+      end
 
       case Agent.get(__MODULE__, & &1.result) do
         :raise -> raise "upstream is down"
@@ -257,6 +265,46 @@ defmodule ReactiveDag.ScanWorkerTest do
       {:ok, _} = Source.refresh(plan(), "docs", reason: "nightly")
 
       assert [{"docs", ["a"]}] = ReactiveDag.Test.Pending.enqueued_work()
+    end
+
+    test "a version the poll's write recorded reaches the cascade" do
+      # THE PROPERTY THAT WAS SILENTLY ABSENT. A poll writes its rows through
+      # the HOST's own code — `Payload`'s upsert is not on this path, because a
+      # crawl needs `upsert_fields:` scoped to one document family — so a
+      # version recorded there had nowhere to go. The enqueue carried bare
+      # keys, every suspension downstream carried `"*"`, and every resumption
+      # recomputed a whole cell for a one-document scan.
+      #
+      # Correct, expensive, and invisible: a whole-cell recompute produces the
+      # right rows, so nothing failed and nothing reported it.
+      Crawler.returns(%{changed: ["a"]})
+
+      # Recorded DURING the poll, which is when a real leaf writes its row.
+      Crawler.records(%{"a" => "v-from-the-poll"})
+
+      {:ok, _} = Source.refresh(plan(), "docs")
+
+      assert [{"docs", ["a"], opts}] = ReactiveDag.Test.Pending.enqueued()
+
+      assert Keyword.get(opts, :versions) == %{"a" => "v-from-the-poll"},
+             "without this the cascade cannot narrow, and says so only in the bill"
+    end
+
+    test "one leaf's version is not attached to another leaf's key" do
+      # The collector is per-process and a fan-out poll feeds several leaves,
+      # so the whole map must not go to every leaf: a version describes ONE
+      # row, and the wrong one derives the wrong unit — which for a fold
+      # reconciles a live row away.
+      Crawler.returns(%{changed: %{"docs" => ["d1"], "notices" => ["n1"]}})
+
+      Crawler.records(%{"d1" => "v-doc", "n1" => "v-notice"})
+
+      {:ok, _} = Source.refresh(plan(), "docs")
+
+      by_cell = Map.new(ReactiveDag.Test.Pending.enqueued(), fn {c, _k, o} -> {c, o} end)
+
+      assert Keyword.get(by_cell["docs"], :versions) == %{"d1" => "v-doc"}
+      assert Keyword.get(by_cell["notices"], :versions) == %{"n1" => "v-notice"}
     end
 
     test "the poll enqueues only the LEAF — the cascade finds the parents" do
