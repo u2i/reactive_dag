@@ -1,0 +1,381 @@
+defmodule ReactiveDag.CascadeTest do
+  @moduledoc """
+  A change, propagated to completion in one transaction — stopping only where
+  it must.
+
+  The properties under test are the ones the queue could not offer:
+
+    * a cascade runs the whole reachable subtree from an explicit origin,
+      shallowest first, without asking the database what needs doing;
+    * a **diamond recomputes its apex once** — two inputs changing in one
+      cascade merge before the shared parent runs, where the queue managed this
+      only if two marks happened to land before a claim;
+    * a suspendable node **stops its branch and leaves a row**, while every
+      other branch keeps running and commits;
+    * a failing cell **stops its own branch only**;
+    * a change that cannot be attributed suspends with `"*"`, which is what
+      makes a whole-cell resumption an honest statement rather than a guess.
+  """
+  use ExUnit.Case, async: false
+
+  alias ReactiveDag.Cascade
+
+  # An in-memory stand-in for the suspension table. The walk's behaviour is what
+  # is under test here; the SQL has its own file, executed against real Postgres.
+  defmodule FakeRepo do
+    use Agent
+
+    def child_spec(_), do: %{id: __MODULE__, start: {__MODULE__, :start_link, [[]]}}
+    def start_link(_ \\ []), do: Agent.start_link(fn -> [] end, name: __MODULE__)
+
+    def install do
+      prev = Application.get_env(:reactive_dag, :repo)
+      Application.put_env(:reactive_dag, :repo, __MODULE__)
+
+      ExUnit.Callbacks.on_exit(fn ->
+        if prev,
+          do: Application.put_env(:reactive_dag, :repo, prev),
+          else: Application.delete_env(:reactive_dag, :repo)
+      end)
+
+      :ok
+    end
+
+    def recorded, do: Agent.get(__MODULE__, &Enum.reverse/1)
+
+    def query!("INSERT INTO " <> _, [id, tenant, waiting, resource, row_uuid, version_id, reason]) do
+      Agent.update(__MODULE__, &[
+        %{
+          id: id,
+          tenant: tenant,
+          waiting: waiting,
+          resource: resource,
+          row_uuid: row_uuid,
+          version_id: version_id,
+          reason: reason
+        }
+        | &1
+      ])
+
+      %{rows: [], num_rows: 1}
+    end
+
+    def query!("SELECT" <> _, _), do: %{rows: [], num_rows: 0}
+    def query!("DELETE" <> _, _), do: %{rows: [], num_rows: 0}
+  end
+
+  setup do
+    start_supervised!(FakeRepo)
+    FakeRepo.install()
+    :ok
+  end
+
+  # ---- a hand-built plan, so the walk is tested without a DSL in the way ----
+
+  defp cell(id, inputs, opts \\ []) do
+    %ReactiveDag.Cell{
+      id: id,
+      op: Keyword.get(opts, :op, :test),
+      inputs: inputs,
+      leaf?: inputs == [],
+      meta: Keyword.get(opts, :meta, %{})
+    }
+  end
+
+  # Records every recompute, so the test can assert HOW MANY times a cell ran —
+  # which is the only way to see the diamond property.
+  defmodule Ran do
+    def start, do: Agent.start_link(fn -> [] end, name: __MODULE__)
+    def note(id, keys), do: Agent.update(__MODULE__, &[{id, Enum.sort(keys)} | &1])
+    def all, do: Agent.get(__MODULE__, &Enum.reverse/1)
+    def count(id), do: all() |> Enum.count(fn {c, _} -> c == id end)
+    def keys(id), do: all() |> Enum.find_value([], fn {c, k} -> if c == id, do: k end)
+  end
+
+  defmodule PassThrough do
+    @behaviour ReactiveDag.Op
+
+    @impl true
+    def recompute(cell, keys) do
+      ReactiveDag.CascadeTest.Ran.note(cell.id, keys)
+      {:ok, keys}
+    end
+  end
+
+  defmodule Fails do
+    @behaviour ReactiveDag.Op
+
+    @impl true
+    def recompute(cell, keys) do
+      ReactiveDag.CascadeTest.Ran.note(cell.id, keys)
+      {:error, :upstream_unavailable}
+    end
+  end
+
+  defp plan_of(cells) do
+    ReactiveDag.Graph.build(cells)
+  end
+
+  defp compute(id, inputs, mod \\ PassThrough, extra \\ %{}) do
+    cell(id, inputs, meta: Map.merge(%{compute: mod}, extra))
+  end
+
+  setup do
+    case Ran.start() do
+      {:ok, _} -> :ok
+      {:error, {:already_started, _}} -> Agent.update(Ran, fn _ -> [] end)
+    end
+
+    :ok
+  end
+
+  describe "the walk" do
+    test "runs the whole reachable subtree from one origin" do
+      plan =
+        plan_of([
+          cell("leaf", []),
+          compute("mid", ["leaf"]),
+          compute("top", ["mid"])
+        ])
+
+      {:ok, report} = Cascade.run(plan, [%{cell: "leaf", keys: ["k1"]}])
+
+      assert ["leaf", "mid", "top"] == Enum.map(report.steps, & &1.cell),
+             "an explicit origin, then everything downstream — no queue consulted"
+
+      assert report.suspended == []
+    end
+
+    test "runs shallowest first" do
+      plan =
+        plan_of([
+          cell("leaf", []),
+          compute("deep", ["mid"]),
+          compute("mid", ["leaf"])
+        ])
+
+      {:ok, report} = Cascade.run(plan, [%{cell: "leaf", keys: ["k1"]}])
+
+      cells = Enum.map(report.steps, & &1.cell)
+      assert Enum.find_index(cells, &(&1 == "mid")) < Enum.find_index(cells, &(&1 == "deep"))
+    end
+
+    test "records what caused each step" do
+      plan = plan_of([cell("leaf", []), compute("mid", ["leaf"])])
+
+      {:ok, report} = Cascade.run(plan, [%{cell: "leaf", keys: ["k1"]}])
+
+      assert [%{cell: "leaf", triggered_by: nil}, %{cell: "mid", triggered_by: "leaf"}] =
+               report.steps
+    end
+
+    test "a diamond recomputes its apex ONCE" do
+      # Two inputs of one cell change in the same cascade. Under the queue this
+      # coalesced only if both marks landed before the claim; in memory the
+      # merge happens before the cell runs, by construction.
+      plan =
+        plan_of([
+          cell("leaf", []),
+          compute("left", ["leaf"]),
+          compute("right", ["leaf"]),
+          compute("apex", ["left", "right"])
+        ])
+
+      {:ok, report} = Cascade.run(plan, [%{cell: "leaf", keys: ["k1"]}])
+
+      assert Ran.count("apex") == 1,
+             "the apex ran #{Ran.count("apex")} times; two inputs changing in one " <>
+               "cascade must merge into one unit of work"
+
+      assert Enum.count(report.steps, &(&1.cell == "apex")) == 1
+    end
+
+    test "the apex sees the union of what BOTH sides changed" do
+      # Running once is not enough — it must run once with everything. Each side
+      # renames its key, so the apex's two arrivals carry disjoint work and an
+      # overwrite would silently drop one side's rows while still looking like
+      # a single tidy recompute.
+      defmodule RenameLeft do
+        @behaviour ReactiveDag.Op
+        @impl true
+        def recompute(cell, keys) do
+          ReactiveDag.CascadeTest.Ran.note(cell.id, keys)
+          {:ok, Enum.map(keys, &"L-#{&1}")}
+        end
+      end
+
+      defmodule RenameRight do
+        @behaviour ReactiveDag.Op
+        @impl true
+        def recompute(cell, keys) do
+          ReactiveDag.CascadeTest.Ran.note(cell.id, keys)
+          {:ok, Enum.map(keys, &"R-#{&1}")}
+        end
+      end
+
+      plan =
+        plan_of([
+          cell("leaf", []),
+          compute("left", ["leaf"], RenameLeft),
+          compute("right", ["leaf"], RenameRight),
+          compute("apex", ["left", "right"])
+        ])
+
+      {:ok, _} = Cascade.run(plan, [%{cell: "leaf", keys: ["k1"]}])
+
+      assert Ran.count("apex") == 1
+      assert Ran.keys("apex") == ["L-k1", "R-k1"],
+             "the apex must recompute BOTH sides' keys in its single run; " <>
+               "keeping only the last arrival loses the other side's work"
+    end
+  end
+
+  describe "suspension" do
+    test "a suspendable cell stops its branch and records a row" do
+      plan =
+        plan_of([
+          cell("leaf", []),
+          compute("slow", ["leaf"], PassThrough, %{suspends: %{expensive: []}}),
+          compute("after_slow", ["slow"])
+        ])
+
+      {:ok, report} =
+        Cascade.run(plan, [%{cell: "leaf", keys: ["k1"], versions: %{"k1" => "v-1"}}])
+
+      assert Ran.count("slow") == 0, "the expensive cell must NOT run inline"
+      assert Ran.count("after_slow") == 0, "and nothing below it runs either"
+
+      assert [%{waiting: "slow", resource: "leaf", version_id: "v-1", reason: "expensive"}] =
+               FakeRepo.recorded()
+
+      assert [%{waiting: "slow", reason: :expensive}] = report.suspended
+    end
+
+    test "other branches keep running and commit" do
+      plan =
+        plan_of([
+          cell("leaf", []),
+          compute("slow", ["leaf"], PassThrough, %{suspends: %{expensive: []}}),
+          compute("fast_a", ["leaf"]),
+          compute("fast_b", ["leaf"])
+        ])
+
+      {:ok, report} = Cascade.run(plan, [%{cell: "leaf", keys: ["k1"]}])
+
+      assert Ran.count("fast_a") == 1
+      assert Ran.count("fast_b") == 1
+      assert Ran.count("slow") == 0
+
+      assert length(report.suspended) == 1,
+             "a suspension truncates ONE branch — the rest of the graph is unaffected"
+    end
+
+    test "gated suspends with :approval rather than :expensive" do
+      plan =
+        plan_of([
+          cell("leaf", []),
+          compute("reviewed", ["leaf"], PassThrough, %{suspends: %{approval: []}})
+        ])
+
+      {:ok, _} = Cascade.run(plan, [%{cell: "leaf", keys: ["k1"]}])
+
+      assert [%{reason: "approval"}] = FakeRepo.recorded()
+    end
+
+    test "one suspension per changed row" do
+      plan =
+        plan_of([
+          cell("leaf", []),
+          compute("slow", ["leaf"], PassThrough, %{suspends: %{expensive: []}})
+        ])
+
+      {:ok, _} =
+        Cascade.run(plan, [
+          %{cell: "leaf", keys: ["a", "b", "c"], versions: %{"a" => "v-a", "b" => "v-b"}}
+        ])
+
+      recorded = FakeRepo.recorded()
+      assert length(recorded) == 3, "the row is what a resumption narrows by"
+
+      assert ["v-a", "v-b", "*"] == Enum.map(recorded, & &1.version_id),
+             "a key with no version suspends with the sentinel, not a nil"
+    end
+
+    test "an unattributable whole-cell change suspends with *" do
+      plan =
+        plan_of([
+          cell("leaf", []),
+          compute("slow", ["leaf"], PassThrough, %{suspends: %{expensive: []}})
+        ])
+
+      {:ok, _} = Cascade.run(plan, [%{cell: "leaf", keys: ["*"]}])
+
+      assert [%{row_uuid: "*", version_id: "*"}] = FakeRepo.recorded(),
+             "not `something happened somewhere`, but `this could not be narrowed`"
+    end
+
+    test "the suspension names what CHANGED, not what stopped, as its resource" do
+      plan =
+        plan_of([
+          cell("leaf", []),
+          compute("mid", ["leaf"]),
+          compute("slow", ["mid"], PassThrough, %{suspends: %{expensive: []}})
+        ])
+
+      {:ok, _} = Cascade.run(plan, [%{cell: "leaf", keys: ["k1"]}])
+
+      assert [%{waiting: "slow", resource: "mid"}] = FakeRepo.recorded(),
+             "`waiting` is the cell that stopped; `resource` is the cell whose " <>
+               "change reached it. Reading one off the other would name the " <>
+               "wrong resource in every suspension"
+    end
+  end
+
+  describe "failure" do
+    test "a failing cell stops its own branch only" do
+      plan =
+        plan_of([
+          cell("leaf", []),
+          compute("bad", ["leaf"], Fails),
+          compute("below_bad", ["bad"]),
+          compute("good", ["leaf"])
+        ])
+
+      {:ok, report} = Cascade.run(plan, [%{cell: "leaf", keys: ["k1"]}])
+
+      assert Ran.count("good") == 1, "an unrelated branch commits"
+      assert Ran.count("below_bad") == 0, "nothing below the failure runs"
+
+      refute Enum.any?(report.steps, &(&1.cell == "bad")),
+             "a failed cell contributes no step — it changed nothing"
+    end
+
+    test "a runaway cascade raises with the partial trace" do
+      # `mid` re-dirties itself through a cycle the plan builder would reject,
+      # so instead: a very low budget over a legitimate graph.
+      plan = plan_of([cell("leaf", []), compute("mid", ["leaf"]), compute("top", ["mid"])])
+
+      assert_raise Cascade.RunawayError, ~r/exceeded/, fn ->
+        Cascade.run(plan, [%{cell: "leaf", keys: ["k1"]}], max_steps: 1)
+      end
+    end
+  end
+
+  describe "the report" do
+    test "carries steps, suspensions and timing" do
+      plan =
+        plan_of([
+          cell("leaf", []),
+          compute("fast", ["leaf"]),
+          compute("slow", ["leaf"], PassThrough, %{suspends: %{expensive: []}})
+        ])
+
+      {:ok, report} = Cascade.run(plan, [%{cell: "leaf", keys: ["k1"]}])
+
+      assert length(report.steps) == 2
+      assert length(report.suspended) == 1
+      assert report.duration_us >= 0
+      assert "leaf" in ReactiveDag.Drain.Report.cells(report)
+    end
+  end
+end
