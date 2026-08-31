@@ -62,6 +62,26 @@ defmodule ReactiveDag.CascadeTest do
 
     def query!("SELECT" <> _, _), do: %{rows: [], num_rows: 0}
     def query!("DELETE" <> _, _), do: %{rows: [], num_rows: 0}
+
+    # `Suspension.transaction/1` and `savepoint/1` only wrap when the repo
+    # exports `transaction/2` — so a fake without it silently takes the
+    # no-transaction path, and a test asserting transaction boundaries would
+    # pass for the wrong reason. This flags the process while inside, which is
+    # what lets a recompute observe whether it is running in one.
+    def transaction(fun, _opts \\ []) do
+      outer = Process.get(:rd_in_txn, false)
+      Process.put(:rd_in_txn, true)
+
+      try do
+        {:ok, fun.()}
+      catch
+        :throw, {:rd_rollback, reason} -> {:error, reason}
+      after
+        Process.put(:rd_in_txn, outer)
+      end
+    end
+
+    def rollback(reason), do: throw({:rd_rollback, reason})
   end
 
   setup do
@@ -376,6 +396,99 @@ defmodule ReactiveDag.CascadeTest do
       assert length(report.suspended) == 1
       assert report.duration_us >= 0
       assert "leaf" in ReactiveDag.Drain.Report.cells(report)
+    end
+  end
+
+  describe "resuming a suspended cell" do
+    test "runs the suspended cell and cascades onward from it" do
+      plan =
+        plan_of([
+          cell("leaf", []),
+          compute("slow", ["leaf"], PassThrough, %{suspends: %{expensive: []}}),
+          compute("after_slow", ["slow"])
+        ])
+
+      {:ok, report} =
+        Cascade.run(plan, [%{cell: "slow", keys: ["k1"]}], resuming: "slow")
+
+      assert Ran.count("slow") == 1,
+             "`resuming:` is what lets a suspendable cell run at all — without " <>
+               "it the cascade suspends it again on sight and the point never clears"
+
+      assert Ran.count("after_slow") == 1, "and the branch below it continues"
+      assert report.suspended == []
+      assert ["slow", "after_slow"] == Enum.map(report.steps, & &1.cell)
+    end
+
+    test "the resumed cell runs with NO transaction open" do
+      # The property the whole redesign exists for. The drain held a
+      # transaction across a nine-minute extraction until the database closed
+      # the connection; here the slow work happens with nothing open.
+      defmodule TxnSpy do
+        @behaviour ReactiveDag.Op
+
+        @impl true
+        def recompute(cell, keys) do
+          ReactiveDag.CascadeTest.Ran.note(cell.id, keys)
+          send(self(), {:ran_inside_txn?, cell.id, Process.get(:rd_in_txn, false)})
+          {:ok, keys}
+        end
+      end
+
+      plan =
+        plan_of([
+          cell("leaf", []),
+          compute("slow", ["leaf"], TxnSpy, %{suspends: %{expensive: []}}),
+          compute("after_slow", ["slow"], TxnSpy)
+        ])
+
+      {:ok, _} = Cascade.run(plan, [%{cell: "slow", keys: ["k1"]}], resuming: "slow")
+
+      assert_received {:ran_inside_txn?, "slow", false}
+      assert_received {:ran_inside_txn?, "after_slow", true},
+                      "the fast subtree below the resumed cell IS transactional — " <>
+                        "only the expensive step is lifted out"
+    end
+
+    test "a failing resumption reports, so its suspensions are kept" do
+      plan =
+        plan_of([
+          cell("leaf", []),
+          compute("slow", ["leaf"], Fails, %{suspends: %{expensive: []}})
+        ])
+
+      assert {:error, {:resumption_failed, "slow", :upstream_unavailable}} =
+               Cascade.run(plan, [%{cell: "slow", keys: ["k1"]}], resuming: "slow")
+
+      # Slow work keeps its retry because its suspension committed before the
+      # work began. Fast work has no such record and relies on re-observation.
+    end
+
+    test "resuming a cell that changed nothing cascades nowhere" do
+      defmodule NoChange do
+        @behaviour ReactiveDag.Op
+
+        @impl true
+        def recompute(cell, keys) do
+          ReactiveDag.CascadeTest.Ran.note(cell.id, keys)
+          {:ok, []}
+        end
+      end
+
+      plan =
+        plan_of([
+          cell("leaf", []),
+          compute("slow", ["leaf"], NoChange, %{suspends: %{expensive: []}}),
+          compute("after_slow", ["slow"])
+        ])
+
+      {:ok, report} = Cascade.run(plan, [%{cell: "slow", keys: ["k1"]}], resuming: "slow")
+
+      assert Ran.count("slow") == 1
+      assert Ran.count("after_slow") == 0,
+             "the ordinary outcome when a resumption`s input was already superseded"
+
+      assert report.suspended == []
     end
   end
 end

@@ -112,10 +112,30 @@ defmodule ReactiveDag.Cascade do
     )
 
     try do
-      result = Suspension.transaction(fn -> walk(plan, origins, opts, t0) end)
+      # A RESUMPTION runs its expensive cell FIRST, and outside the
+      # transaction. This is the whole redesign in one line: the drain held a
+      # transaction open across a nine-minute extraction until the database
+      # closed the connection, and the only way not to is to do that work with
+      # nothing open.
+      #
+      # What follows — the fast subtree below it — is transactional as usual.
+      # So a resumption is two phases, not one: the slow thing, then the
+      # cascade from what it produced.
+      {origins, pre_steps} = run_resuming_cell(plan, origins, opts)
+
+      result =
+        Suspension.transaction(fn -> walk(plan, origins, opts, t0, pre_steps) end)
+
       emit_stop(result, t0)
       result
     catch
+      # A resumption's own recompute failed, before any transaction opened.
+      # Reported as a value so the caller leaves the suspensions in place and
+      # the job retries — the failure is the work's, not the cascade's, and
+      # nothing has been written to roll back.
+      :throw, {:resumption_failed, cell_id, reason} ->
+        {:error, {:resumption_failed, cell_id, reason}}
+
       kind, reason ->
         :telemetry.execute(
           [:reactive_dag, :cascade, :exception],
@@ -129,10 +149,132 @@ defmodule ReactiveDag.Cascade do
 
   # ---- the walk ----
 
-  defp walk(plan, origins, opts, t0) do
+  defp walk(plan, origins, opts, t0, pre_steps) do
     pending = Enum.reduce(origins, %{}, &merge_origin(&2, &1))
 
-    do_walk(plan, pending, opts, %{}, [], [], 0, t0)
+    do_walk(plan, pending, opts, %{}, pre_steps, [], 0, t0)
+  end
+
+  # The expensive recompute, run with NO transaction open, before the cascade
+  # begins. Only a resumption reaches this: `opts[:resuming]` names the cell
+  # whose suspension is being cleared, and it is the one cell allowed to run
+  # despite declaring `suspends` — otherwise it would suspend again on sight and
+  # the point would never clear.
+  #
+  # Returns the origins the cascade should actually start from: this cell's
+  # CHANGED keys, so the walk continues from what the work produced rather than
+  # re-running it. A cell that changed nothing yields no origin, and the cascade
+  # is a no-op — correct, and the ordinary outcome when a resumption's input has
+  # already been superseded.
+  defp run_resuming_cell(plan, origins, opts) do
+    case Keyword.get(opts, :resuming) do
+      nil ->
+        {origins, []}
+
+      cell_id ->
+        {mine, others} = Enum.split_with(origins, &(&1.cell == cell_id))
+
+        case mine do
+          [] ->
+            {others, []}
+
+          [origin | _] ->
+            cell = Map.get(plan.cells, cell_id)
+            run_outside_transaction(plan, cell_id, cell, origin, opts, others)
+        end
+    end
+  end
+
+  defp run_outside_transaction(_plan, _cell_id, nil, _origin, _opts, others), do: {others, []}
+
+  defp run_outside_transaction(plan, cell_id, cell, origin, opts, others) do
+    keys = Enum.sort(Map.get(origin, :keys, []))
+    versions = Map.get(origin, :versions, %{})
+
+    :telemetry.execute(
+      [:reactive_dag, :cascade, :cell_start],
+      %{claimed: length(keys), system_time: System.system_time()},
+      %{cell: cell_id, step: 0, claimed_keys: keys, outside_transaction: true}
+    )
+
+    {{outcome, diffs, new_versions}, us} =
+      timed(fn ->
+        ReactiveDag.Node.Payload.collecting_diffs_and_versions(fn ->
+          recompute(cell, keys, Keyword.merge(opts, Plan.frontier_opts(plan)))
+        end)
+      end)
+
+    case outcome do
+      {:failed, reason} ->
+        # NOT discharged by the caller: this returns without changed keys, so
+        # the resumption's suspensions stay and the job retries. That is the
+        # difference from fast work — slow work keeps its retry, because its
+        # suspension committed before the work began.
+        Logger.warning(
+          "reactive_dag: resuming #{cell_id} failed (#{brief(reason)}); its " <>
+            "suspensions stay for the next attempt"
+        )
+
+        :telemetry.execute(
+          [:reactive_dag, :cascade, :cell_failed],
+          %{duration_us: us},
+          %{cell: cell_id, step: 0, reason: reason, claimed: keys}
+        )
+
+        throw({:resumption_failed, cell_id, reason})
+
+      {changed, meta} ->
+        step = %{
+          cell: cell_id,
+          pass: 0,
+          claimed: keys,
+          changed: changed,
+          triggered_by: nil,
+          duration_us: us,
+          op: cell.op,
+          depth: Map.get(plan.depths, cell_id),
+          meta: meta
+        }
+
+        :telemetry.execute(
+          [:reactive_dag, :cascade, :step],
+          %{duration_us: us, claimed: length(keys), changed: length(changed)},
+          %{cell: cell_id, step: 0, changed_keys: changed, outside_transaction: true}
+        )
+
+        # Continue from this cell's PARENTS, seeded as origins. The cell itself
+        # is not re-queued: it has just run, and queueing it would suspend it
+        # again.
+        #
+        # NOTHING CHANGED means nothing to propagate. `Graph.dirty_parents/5`
+        # does not short-circuit on an empty key list — it returns every parent
+        # paired with `[]` — so without this a resumption whose work produced no
+        # change would still recompute everything below it. The ordinary case
+        # for that is a resumption whose input was superseded before the job
+        # ran, which is common rather than exotic.
+        merged_versions = Map.merge(versions, new_versions)
+
+        parent_origins =
+          case changed do
+            [] ->
+              []
+
+            changed ->
+              plan
+              |> Graph.dirty_parents(cell_id, changed, ReactiveDag.Node.KeyRule, diffs)
+              |> Enum.map(fn {parent_id, mapped} ->
+                %{
+                  cell: parent_id,
+                  keys: entries_for(plan, parent_id, cell_id, mapped, changed, merged_versions),
+                  versions: merged_versions,
+                  diffs: diffs,
+                  from: cell_id
+                }
+              end)
+          end
+
+        {others ++ parent_origins, [step]}
+    end
   end
 
   defp do_walk(_plan, pending, _opts, _cause, steps, suspended, n, t0)
@@ -253,7 +395,14 @@ defmodule ReactiveDag.Cascade do
         # whole-cell resumption is correct.
         versions = Map.merge(work.versions, new_versions)
 
-        parents = Graph.dirty_parents(plan, cell_id, changed, ReactiveDag.Node.KeyRule, merged)
+        # A recompute reporting NO change propagates nothing — the point of
+        # reporting changed keys rather than claimed ones. `dirty_parents/5`
+        # pairs every parent with `[]` rather than returning none, so this has
+        # to be checked here.
+        parents =
+          if changed == [],
+            do: [],
+            else: Graph.dirty_parents(plan, cell_id, changed, ReactiveDag.Node.KeyRule, merged)
 
         pending =
           Enum.reduce(parents, pending, fn {parent_id, mapped}, acc ->
@@ -362,7 +511,7 @@ defmodule ReactiveDag.Cascade do
   # that cell as both what stopped and what changed, which is exactly right for
   # a source-fed node that is itself too slow to run inline.
   defp merge_origin(pending, origin) do
-    merge_pending(pending, origin.cell, origin.cell, %{
+    merge_pending(pending, origin.cell, Map.get(origin, :from) || origin.cell, %{
       keys: Map.get(origin, :keys, []),
       versions: Map.get(origin, :versions, %{}),
       diffs: Map.get(origin, :diffs, %{})
