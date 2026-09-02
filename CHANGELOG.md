@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.17.0-rc.62](https://github.com/u2i/reactive_dag/compare/v0.17.0-rc.61...v0.17.0-rc.62) (2026-09-02)
+
+
+### Bug Fixes
+
+* release the key_rule seam removal ([9b7dba6](https://github.com/u2i/reactive_dag/commit/9b7dba626b93258b245dad95321f8b26fb13ad9c))
+
 ## [0.17.0-rc.61](https://github.com/u2i/reactive_dag/compare/v0.17.0-rc.60...v0.17.0-rc.61) (2026-09-02)
 
 
