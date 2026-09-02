@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.17.0-rc.61](https://github.com/u2i/reactive_dag/compare/v0.17.0-rc.60...v0.17.0-rc.61) (2026-09-02)
+
+
+### Features
+
+* a declared back-edge, and a scheduler that says what it means ([#237](https://github.com/u2i/reactive_dag/issues/237)) ([9a2dd01](https://github.com/u2i/reactive_dag/commit/9a2dd01723da59d99fda62e1de76426e3350f030))
+
 ## [0.17.0-rc.60](https://github.com/u2i/reactive_dag/compare/v0.17.0-rc.59...v0.17.0-rc.60) (2026-08-31)
 
 
