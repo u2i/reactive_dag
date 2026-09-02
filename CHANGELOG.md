@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.17.0-rc.65](https://github.com/u2i/reactive_dag/compare/v0.17.0-rc.64...v0.17.0-rc.65) (2026-09-02)
+
+
+### Bug Fixes
+
+* count a tenanted node's rows with its tenant ([#245](https://github.com/u2i/reactive_dag/issues/245)) ([13313c4](https://github.com/u2i/reactive_dag/commit/13313c4201d2cbc04a76360b8347dfe78f386ef3))
+
 ## [0.17.0-rc.64](https://github.com/u2i/reactive_dag/compare/v0.17.0-rc.63...v0.17.0-rc.64) (2026-09-02)
 
 
