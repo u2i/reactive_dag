@@ -338,6 +338,101 @@ defmodule ReactiveDag.Suspension do
   end
 
   @doc """
+  Stopping points whose resumption job can never run.
+
+  A job that exhausts its attempts is normally `discarded`, which is visible.
+  But Oban returns a failed job to `available` with a backoff BEFORE checking
+  attempts, so a final attempt that fails leaves `attempt == max_attempts` in
+  state `available` — and the fetch query requires `attempt < max_attempts`
+  (`Oban.Engines.Basic`). The job is then unfetchable and undiscarded: it will
+  never run and nothing reports it as failed.
+
+  That would merely be a stalled point, except the resumption worker's
+  uniqueness is `states: :incomplete`, which INCLUDES `available`. So the
+  stranded job also dedups every future enqueue for its point. The suspension
+  stays outstanding, no job will ever discharge it, and the queue looks healthy.
+
+  Observed in production: a resumption whose third attempt hit
+  `DBConnection.ConnectionError` while the machine was being replaced.
+
+  Returns a point plus its `job_id` for each. Repair with `revive/1`.
+  Note that `Oban.retry_job/1` does NOT fix these — it skips jobs already in
+  `available` (`retry_all_jobs/2`), so it reports success and changes nothing.
+  """
+  @spec stranded(keyword()) :: [map()]
+  def stranded(opts \\ []) do
+    %{rows: rows} =
+      query!(
+        """
+        SELECT j.id, j.args->>'tenant', j.args->>'waiting',
+               j.args->>'resource', j.args->>'row_uuid'
+        FROM #{oban_table()} j
+        WHERE j.worker = $1
+          AND j.state = 'available'
+          AND j.attempt >= j.max_attempts
+        ORDER BY j.id
+        """,
+        [Keyword.get(opts, :worker, "ReactiveDag.ResumptionWorker")]
+      )
+
+    Enum.map(rows, fn [id, tenant, waiting, resource, row_uuid] ->
+      %{
+        job_id: id,
+        tenant: tenant,
+        waiting: waiting,
+        resource: resource,
+        row_uuid: row_uuid
+      }
+    end)
+  end
+
+  @doc """
+  Make stranded resumption jobs fetchable again, returning the job ids revived.
+
+  Raises `max_attempts` above `attempt` — the same expression Oban's own
+  `retry_all_jobs/2` uses — and clears the backoff so the queue picks the job
+  up on its next poll. Idempotent: a job already fetchable does not match.
+
+  Safe to run blind. A resumption whose suspensions were discharged in the
+  meantime finds nothing at step 1 and exits, which is its ordinary duplicate
+  path.
+  """
+  @spec revive(keyword()) :: [integer()]
+  def revive(opts \\ []) do
+    %{rows: rows} =
+      query!(
+        """
+        UPDATE #{oban_table()}
+        SET max_attempts = GREATEST(max_attempts, attempt + 1),
+            scheduled_at = now()
+        WHERE worker = $1
+          AND state = 'available'
+          AND attempt >= max_attempts
+        RETURNING id
+        """,
+        [Keyword.get(opts, :worker, "ReactiveDag.ResumptionWorker")]
+      )
+
+    List.flatten(rows)
+  end
+
+  @doc """
+  Oban's job table, validated. Configurable only so the SQL above can be
+  exercised against a real database without colliding with a host's own table.
+  """
+  @spec oban_table() :: String.t()
+  def oban_table do
+    name = Application.get_env(:reactive_dag, :oban_table, "public.oban_jobs")
+
+    if is_binary(name) and name =~ ~r/\A[a-zA-Z_][a-zA-Z0-9_]*(\.[a-zA-Z_][a-zA-Z0-9_]*)?\z/ do
+      name
+    else
+      raise ArgumentError,
+            "reactive_dag: oban_table #{inspect(name)} is not a valid table identifier"
+    end
+  end
+
+  @doc """
   The suspension table's name, validated.
   """
   @spec table() :: String.t()

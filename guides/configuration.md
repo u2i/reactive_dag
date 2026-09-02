@@ -19,6 +19,7 @@ config :reactive_dag, repo: MyApp.Repo
 | [`:suspension_table`](#suspension_table) | `"reactive_dag_suspension"` | no | `Suspension`, `Migration` |
 | [`:cascade_timeout`](#cascade_timeout) | `30_000` | no | `Suspension` |
 | [`:dirty_table`](#dirty_table) | `"reactive_dag_dirty"` | no | `Migration.drop_dirty/1` only |
+| [`:oban_table`](#oban_table) | `"public.oban_jobs"` | no | `Suspension.stranded/1`, `Suspension.revive/1` |
 | [`:plan_mfa`](#plan_mfa) | — | only with `ScanWorker` | `ScanWorker` |
 | [`:insights_keep`](#insights_keep) | `20` | no | `Insights` |
 | [`:cascade_enqueuer`](#cascade_enqueuer) | `CascadeWorker.enqueue/3` | no | `dirties_on`, `augmented_by`, `Source` |
@@ -54,6 +55,41 @@ config :reactive_dag, suspension_table: "my_suspensions"
 Resolved identically by `ReactiveDag.Suspension` and `ReactiveDag.Migration`,
 and validated against an identifier grammar at read time, so a typo fails
 loudly rather than as a syntax error deep inside a query.
+
+### `:oban_table`
+
+Where Oban's job table lives, for the two functions that read it:
+`ReactiveDag.Suspension.stranded/1` and `revive/1`.
+
+```elixir
+config :reactive_dag, oban_table: "public.oban_jobs"
+```
+
+You should not need to set this. It exists so the SQL in those two functions
+can be exercised against a real database without colliding with a host's own
+`oban_jobs` — see `test/real_postgres_suspension_test.exs`. Validated against
+an identifier grammar (optionally schema-qualified) at read time.
+
+#### Why those two functions exist
+
+Oban returns a failed job to `available` with a retry backoff *before* it
+checks the attempt count. A final attempt that fails therefore leaves
+`attempt == max_attempts` in state `available` — and Oban's fetch query
+requires `attempt < max_attempts`. The job is unfetchable and undiscarded: it
+will never run, and nothing reports it as failed.
+
+For a resumption that is worse than a stalled point. The worker's uniqueness is
+`states: :incomplete`, which includes `available`, so the stranded job also
+dedups every future enqueue for its stopping point. The suspension stays
+outstanding, no job will ever discharge it, and the queue looks healthy.
+
+`Oban.retry_job/1` does NOT repair these — `retry_all_jobs/2` skips jobs
+already in `available`, so it reports success and changes nothing. `revive/1`
+raises `max_attempts` above `attempt` instead, using the same expression Oban
+does, and is safe to run blind.
+
+Workers declared `max_attempts: 1` — `ReprocessWorker` and `ScanWorker` — reach
+this state on their FIRST failure, with no retry budget to absorb it.
 
 ### `:max_feedback_passes`
 
