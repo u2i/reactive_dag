@@ -18,6 +18,12 @@ defmodule ReactiveDag.Graph do
     by_id = Map.new(cells, &{&1.id, &1})
     validate_inputs!(cells, by_id)
 
+    # Depths FIRST: `validate_feedback!` walks the graph with feedback edges
+    # excluded, and `build_depths` raising on an undeclared cycle is what
+    # guarantees that walk terminates.
+    depths = build_depths(by_id)
+    validate_feedback!(cells, by_id)
+
     # `tenant` explicitly, though it equals the struct default. Omitting it makes
     # the INFERRED type of this expression narrower than `%Plan{}` — Elixir's
     # type checker reports the omitted field as absent rather than defaulted — so
@@ -26,7 +32,7 @@ defmodule ReactiveDag.Graph do
     %Plan{
       cells: by_id,
       parents: build_parents(cells),
-      depths: build_depths(by_id),
+      depths: depths,
       tenant: "*"
     }
   end
@@ -187,16 +193,116 @@ defmodule ReactiveDag.Graph do
   # `.id` and `.inputs`.
   defp compute_depth(%{inputs: []}, id, _by_id, memo, _on_stack), do: {0, Map.put(memo, id, 0)}
 
-  defp compute_depth(%{inputs: inputs}, id, by_id, memo, on_stack) do
+  defp compute_depth(%{inputs: inputs} = cell, id, by_id, memo, on_stack) do
     on_stack = MapSet.put(on_stack, id)
+    feedback = feedback_inputs(cell)
 
     {max_input_depth, memo} =
       Enum.reduce(inputs, {-1, memo}, fn input_id, {acc_max, acc_memo} ->
-        {d, acc_memo} = depth_of(input_id, by_id, acc_memo, on_stack)
-        {max(acc_max, d), acc_memo}
+        # A FEEDBACK edge does not order this cell. The edge is real — it
+        # propagates, it is read — but it points at something derived from this
+        # cell, so counting it would make the cell's depth depend on its own
+        # depth: the cycle `depth_of` exists to refuse. Declaring the edge
+        # `feedback` is the author saying "the loop is real in the graph and
+        # never real in time", and this skip is the entire structural meaning
+        # of that declaration. An UNDECLARED back-edge still recurses and hits
+        # the `on_stack` guard, so only named loops assemble.
+        if MapSet.member?(feedback, input_id) do
+          {acc_max, acc_memo}
+        else
+          {d, acc_memo} = depth_of(input_id, by_id, acc_memo, on_stack)
+          {max(acc_max, d), acc_memo}
+        end
       end)
 
     depth = max_input_depth + 1
     {depth, Map.put(memo, id, depth)}
+  end
+
+  # The declared back-edges, as a set of input ids. A pattern match rather than
+  # `cell.meta[:feedback_inputs]`, because the contract above `compute_depth/5`
+  # holds: a host may pass its OWN cell struct, and the graph math must need
+  # only `.id` and `.inputs` of it — a struct without `meta` (or with a non-map
+  # one) reads as "no feedback edges" instead of crashing.
+  defp feedback_inputs(%{meta: %{feedback_inputs: feedback}}) when is_list(feedback),
+    do: MapSet.new(feedback)
+
+  defp feedback_inputs(_cell), do: MapSet.new()
+
+  # ---- feedback edges: each must close a REAL cycle ----
+  #
+  # A feedback declaration weakens the acyclicity guarantee for exactly one
+  # edge, so it must be spent on an actual loop. Accepting a spurious one would
+  # leave an input silently unordered: the cell could run BEFORE the input it
+  # reads, and nothing anywhere would report it — the read just returns stale
+  # or empty rows, which is the failure mode this codebase least tolerates.
+  #
+  # "Real cycle" means the feedback target is transitively DERIVED from the
+  # declaring cell through ordinary (non-feedback) edges — the loop exists in
+  # the graph and only the declared edge closes it. The walk excludes every
+  # feedback edge, not just the one under test, so it runs on the same graph
+  # `build_depths` just proved acyclic and cannot orbit; the visited set is
+  # kept anyway, because this function must terminate even if that ordering
+  # is ever broken by a refactor.
+  defp validate_feedback!(cells, by_id) do
+    for cell <- cells,
+        feedback = feedback_inputs(cell),
+        MapSet.size(feedback) > 0,
+        input <- feedback do
+      cond do
+        input not in cell.inputs ->
+          # Only reachable on a HAND-BUILT cell whose meta drifted from its
+          # inputs — the DSL emits both from one entity. Loud, because a
+          # feedback declaration naming a non-input would otherwise be inert
+          # and read as protection it isn't providing.
+          raise ArgumentError,
+                "cell #{inspect(cell.id)} declares feedback on #{inspect(input)}, " <>
+                  "which is not one of its inputs #{inspect(cell.inputs)} — a feedback " <>
+                  "edge IS an input edge; declare it as one"
+
+        derived_from?(input, cell.id, by_id) ->
+          :ok
+
+        true ->
+          raise ArgumentError,
+                "cell #{inspect(cell.id)} declares feedback on #{inspect(input)}, but " <>
+                  "#{inspect(input)} is not derived from #{inspect(cell.id)} — the edge " <>
+                  "closes no cycle. A feedback edge exists to name a back-edge the depth " <>
+                  "ordering must skip; on an acyclic edge it would leave the input " <>
+                  "UNORDERED, so this cell could run before #{inspect(input)} settles, " <>
+                  "silently reading stale rows. Declare it `ref`/`depends_on` (recompute " <>
+                  "on change) or `context` (read without recomputing) instead."
+      end
+    end
+
+    :ok
+  end
+
+  # Is `target` transitively derived from `source` through non-feedback edges?
+  # An iterative walk with a shared seen-set rather than a recursion — the
+  # closure can be wide, and one path's visits must count for the others.
+  defp derived_from?(target, source, by_id) do
+    walk_derivation([target], MapSet.new([target]), source, by_id)
+  end
+
+  defp walk_derivation([], _seen, _source, _by_id), do: false
+  defp walk_derivation([source | _], _seen, source, _by_id), do: true
+
+  defp walk_derivation([id | rest], seen, source, by_id) do
+    next =
+      case Map.get(by_id, id) do
+        nil ->
+          []
+
+        cell ->
+          feedback = feedback_inputs(cell)
+
+          Enum.reject(
+            cell.inputs,
+            &(MapSet.member?(feedback, &1) or MapSet.member?(seen, &1))
+          )
+      end
+
+    walk_derivation(next ++ rest, MapSet.union(seen, MapSet.new(next)), source, by_id)
   end
 end

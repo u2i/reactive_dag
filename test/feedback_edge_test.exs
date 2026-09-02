@@ -1,6 +1,7 @@
 defmodule ReactiveDag.FeedbackEdgeTest do
   @moduledoc """
-  A WORKED EXAMPLE of a feedback loop, and what the engine does with it today.
+  The `feedback` edge — a WORKED EXAMPLE of a declared loop, and the bounds
+  that keep it honest.
 
   ## The domain shape
 
@@ -11,10 +12,11 @@ defmodule ReactiveDag.FeedbackEdgeTest do
          ↑                                 │
          └─────────── feedback ────────────┘
 
-  A meeting's minutes announce meetings; those meetings are meetings. The loop is
-  real in the graph and never real in TIME — a resolution passed at meeting M can
-  only schedule meetings strictly after M — so nothing feeds itself. The graph
-  flattens time away, which is the only reason it looks circular.
+  A meeting's minutes announce meetings; those meetings are meetings — same
+  table, same identity. The loop is real in the graph and never real in TIME: a
+  resolution passed at meeting M can only schedule meetings strictly after M,
+  so nothing feeds itself. The graph flattens time away, which is the only
+  reason it looks circular.
 
   ## Keys are UUIDs
 
@@ -25,47 +27,33 @@ defmodule ReactiveDag.FeedbackEdgeTest do
 
   ## What these tests establish
 
-  Read in order, they say: the engine already has the machinery for this, EXCEPT
-  for the runaway guard, which a loop crossing a suspending cell escapes.
+    * the DECLARATION: a `feedback` edge assembles, takes no part in depth
+      ordering, and is otherwise a real input — validated, propagating. An
+      UNDECLARED back-edge still fails assembly, and a declared one that closes
+      no real cycle is refused: it would leave an input silently unordered.
+    * CONVERGENCE: an honest loop settles by itself, because a recompute
+      reporting no change propagates nothing (`cascade.ex`, unconditional).
+    * the TWO BOUNDS on a dishonest loop:
+        - in one cascade, a key may cross a feedback edge `max_feedback_passes`
+          times before `RunawayError` names the edge and the key;
+        - ACROSS cascades — a loop through a `suspends` cell ends every cascade
+          cleanly, so no in-memory counter survives — the lap count rides on
+          the suspension rows (`lap` column) and `max_feedback_laps` bounds the
+          chain of otherwise individually-successful resumption jobs.
 
-  A second hole — a scoped claim for a key with no row reporting itself changed
-  forever — WAS a precondition for this feature and is now closed; see
+  A precondition — a SCOPED claim for a key with no row reporting itself
+  changed forever — was closed before this feature landed; see
   `retire_vanished_test.exs`, "a SCOPED claim for a key with no row reports
-  nothing". That one mattered most because an identity-keyed loop could not
-  terminate while it stood.
+  nothing". An identity-keyed loop could not terminate while it stood.
   """
   use ExUnit.Case, async: false
 
   alias ReactiveDag.Cascade
+  alias ReactiveDag.Test.FakeSuspensionRepo
 
   # Minted, not derived. Fixed literals so failures are readable.
   @known "018f2a10-0000-7000-8000-000000000001"
   @future "018f2a10-0000-7000-8000-000000000002"
-
-  defmodule FakeRepo do
-    use Agent
-
-    def child_spec(_), do: %{id: __MODULE__, start: {__MODULE__, :start_link, [[]]}}
-    def start_link(_ \\ []), do: Agent.start_link(fn -> [] end, name: __MODULE__)
-
-    def install do
-      prev = Application.get_env(:reactive_dag, :repo)
-      Application.put_env(:reactive_dag, :repo, __MODULE__)
-
-      ExUnit.Callbacks.on_exit(fn ->
-        if prev,
-          do: Application.put_env(:reactive_dag, :repo, prev),
-          else: Application.delete_env(:reactive_dag, :repo)
-      end)
-
-      :ok
-    end
-
-    def query!("INSERT INTO " <> _, _params), do: %{rows: [], num_rows: 1}
-    def query!("SELECT" <> _, _params), do: %{rows: [], num_rows: 0}
-    def query!(_sql, _params), do: %{rows: [], num_rows: 0}
-    def transaction(fun), do: {:ok, fun.()}
-  end
 
   defmodule Ran do
     def child_spec(_), do: %{id: __MODULE__, start: {__MODULE__, :start_link, [[]]}}
@@ -104,7 +92,7 @@ defmodule ReactiveDag.FeedbackEdgeTest do
   end
 
   # The dishonest schedule: reports a change every time, whatever it is asked.
-  # An op like this cannot converge, and is what the guard must catch.
+  # An op like this cannot converge, and is what the bounds must catch.
   defmodule AnnouncesForever do
     @behaviour ReactiveDag.Op
     @impl true
@@ -119,8 +107,8 @@ defmodule ReactiveDag.FeedbackEdgeTest do
 
   setup do
     start_supervised!(Ran)
-    start_supervised!(FakeRepo)
-    FakeRepo.install()
+    start_supervised!(FakeSuspensionRepo)
+    FakeSuspensionRepo.install()
     :ok
   end
 
@@ -136,64 +124,121 @@ defmodule ReactiveDag.FeedbackEdgeTest do
 
   # meetings ──→ minutes ──→ schedule ──(feedback)──→ meetings
   #
-  # `feedback_inputs` is the declaration the library does not yet honour. It is
-  # written here as the proposed shape so the tests below say exactly what is
-  # missing.
-  defp looped_plan(schedule_op) do
+  # `suspend_minutes?` puts a `suspends` declaration on the loop's middle cell,
+  # which is the motivating production shape: the extraction of minutes from a
+  # document is the expensive step.
+  defp looped_plan(schedule_op, suspend_minutes? \\ false) do
+    minutes_meta =
+      if suspend_minutes?,
+        do: %{compute: PassThrough, suspends: %{expensive: []}},
+        else: %{compute: PassThrough}
+
     ReactiveDag.Graph.build([
       cell("docs", []),
       cell("meetings", ["docs", "schedule"], %{
         compute: PassThrough,
         feedback_inputs: ["schedule"]
       }),
-      cell("minutes", ["meetings"], %{compute: PassThrough}),
+      cell("minutes", ["meetings"], minutes_meta),
       cell("schedule", ["minutes"], %{compute: schedule_op})
     ])
   end
 
-  describe "the loop cannot be expressed today" do
-    test "a back-edge raises at assembly, however it is declared" do
-      # THE GAP. `build_depths` is a DFS with an on-stack set (`graph.ex:177-183`)
-      # and does not consult `feedback_inputs`, so the declaration is inert and
-      # the plan cannot be built at all.
-      assert_raise ArgumentError, ~r/cycle at cell/, fn ->
-        looped_plan(AnnouncesOnce)
-      end
-    end
+  # The worker test hands its plan over as an MFA, the way a real Oban job does.
+  def worker_plan, do: looped_plan(AnnouncesForever, true)
 
-    test "the same shape WITHOUT the back-edge assembles, so only that edge is at issue" do
-      plan =
+  describe "the declaration" do
+    test "an UNDECLARED back-edge still raises at assembly" do
+      # `build_depths` is a DFS with an on-stack set, and only a declared
+      # feedback edge is excluded from it — so an accidental cycle fails
+      # exactly as before.
+      assert_raise ArgumentError, ~r/cycle at cell/, fn ->
         ReactiveDag.Graph.build([
           cell("docs", []),
-          cell("meetings", ["docs"], %{compute: PassThrough}),
+          cell("meetings", ["docs", "schedule"], %{compute: PassThrough}),
           cell("minutes", ["meetings"], %{compute: PassThrough}),
           cell("schedule", ["minutes"], %{compute: AnnouncesOnce})
         ])
-
-      assert plan.depths["meetings"] == 1
-      assert plan.depths["schedule"] == 3
+      end
     end
 
-    @tag :skip
-    test "TODO depth comes from the NON-feedback inputs" do
-      # THE TARGET. `meetings` must be ordered by `docs` alone — depth 1, where a
+    test "depth comes from the NON-feedback inputs" do
+      # THE TARGET. `meetings` is ordered by `docs` alone — depth 1, where a
       # canonical record belongs — with the schedule edge present but not
-      # counted. Fails today at `Graph.build`, so it is skipped rather than
-      # written against a graph missing the edge under test.
+      # counted.
       plan = looped_plan(AnnouncesOnce)
 
       assert plan.depths["meetings"] == 1
       assert plan.depths["schedule"] == 3
+
       assert "schedule" in plan.cells["meetings"].inputs,
              "the edge must remain a real input: validated, readable, propagating"
+
+      # …and PROPAGATING is literal: a schedule change claims meetings. This is
+      # the difference from a `context` edge, which is excluded from parents.
+      assert [{"meetings", [@future]}] = ReactiveDag.Graph.claims_for(plan, "schedule", [@future])
+    end
+
+    test "a feedback edge that closes no real cycle is refused" do
+      # `minutes` is UPSTREAM of `schedule`, not derived from it. Accepting the
+      # declaration would leave the input unordered — schedule could run before
+      # minutes settles, silently reading stale rows — so it fails at assembly.
+      assert_raise ArgumentError, ~r/closes no cycle/, fn ->
+        ReactiveDag.Graph.build([
+          cell("docs", []),
+          cell("meetings", ["docs"], %{compute: PassThrough}),
+          cell("minutes", ["meetings"], %{compute: PassThrough}),
+          cell("schedule", ["minutes"], %{
+            compute: AnnouncesOnce,
+            feedback_inputs: ["minutes"]
+          })
+        ])
+      end
+    end
+
+    test "feedback naming a non-input is refused" do
+      # Only reachable on a hand-built cell (the DSL emits the input and the
+      # meta from one entity) — but inert protection must not read as
+      # protection, so the drift is loud.
+      assert_raise ArgumentError, ~r/not one of its inputs/, fn ->
+        ReactiveDag.Graph.build([
+          cell("docs", []),
+          cell("meetings", ["docs"], %{
+            compute: PassThrough,
+            feedback_inputs: ["schedule"]
+          }),
+          cell("minutes", ["meetings"], %{compute: PassThrough}),
+          cell("schedule", ["minutes"], %{compute: AnnouncesOnce})
+        ])
+      end
     end
   end
 
-  describe "convergence, on the machinery that already exists" do
-    test "an honest schedule settles: no change reported means nothing propagates" do
-      # The rule the whole design leans on (`cascade.ex:444-447`). Demonstrated
-      # on a straight line, since the loop will not assemble: the schedule
-      # announces once, and says nothing when asked about what it announced.
+  describe "convergence" do
+    test "an honest loop settles: the second trip around reports nothing" do
+      # The whole feature in one cascade: docs move for the known meeting, its
+      # minutes announce the future one, the announcement travels the back-edge
+      # and lands as a REAL meeting — and the loop closes because the schedule,
+      # asked about the meeting it just announced, has nothing to add.
+      plan = looped_plan(AnnouncesOnce)
+
+      {:ok, report} = Cascade.run(plan, [%{cell: "docs", keys: [@known]}])
+
+      # meetings ran twice: once for the known id (from docs), once for the
+      # future id (over the feedback edge). Same cell, both identities real.
+      assert Ran.count("meetings") == 2
+      assert {"meetings", [@future]} in Ran.all()
+
+      # the schedule's second run — asked about @future — announced nothing,
+      # which is what ended the walk. No runaway, no budget consumed.
+      schedule_runs = Enum.filter(report.steps, &(&1.cell == "schedule"))
+      assert [%{changed: [@future]}, %{changed: []}] = schedule_runs
+    end
+
+    test "a straight line still shows the rule the design leans on" do
+      # No loop at all: a recompute reporting no change propagates nothing.
+      # Kept from the original worked example because everything above rests
+      # on it staying unconditional.
       plan =
         ReactiveDag.Graph.build([
           cell("docs", []),
@@ -206,8 +251,6 @@ defmodule ReactiveDag.FeedbackEdgeTest do
       sched = Enum.find(report.steps, &(&1.cell == "schedule"))
       assert sched.changed == [@future], "the first pass announces the future meeting"
 
-      # A second cascade FROM that announcement reports nothing, so a loop would
-      # close here rather than going round again.
       {:ok, again} = Cascade.run(plan, [%{cell: "minutes", keys: [@future]}])
       sched2 = Enum.find(again.steps, &(&1.cell == "schedule"))
 
@@ -215,40 +258,195 @@ defmodule ReactiveDag.FeedbackEdgeTest do
              "asked about what it just announced, an honest schedule adds nothing"
     end
 
-    test "a dishonest schedule never settles — and this is what must be caught" do
-      # `AnnouncesForever` reports the same key changed whatever it is asked, so
-      # each pass re-dirties its own consumer. On a straight line that is one
-      # wasted step; around a loop it is unbounded.
-      plan =
-        ReactiveDag.Graph.build([
-          cell("docs", []),
-          cell("minutes", ["docs"], %{compute: PassThrough}),
-          cell("schedule", ["minutes"], %{compute: AnnouncesForever})
-        ])
+    test "a dishonest loop fails fast, naming the edge and the key" do
+      # `AnnouncesForever` reports the same key changed on every pass, so the
+      # loop cannot settle. The per-(edge, key) budget catches it in a handful
+      # of steps — not 100,000 — and the error names what a fix needs: which
+      # edge, which key, and that the op's change reporting is the defect.
+      plan = looped_plan(AnnouncesForever)
 
-      {:ok, report} = Cascade.run(plan, [%{cell: "docs", keys: [@known]}])
-      sched = Enum.find(report.steps, &(&1.cell == "schedule"))
+      err =
+        assert_raise Cascade.RunawayError, fn ->
+          Cascade.run(plan, [%{cell: "docs", keys: [@known]}])
+        end
 
-      assert sched.changed == [@future],
-             "it reports a change unconditionally — the property no guard can infer"
+      assert err.message =~ "feedback edge schedule → meetings"
+      assert err.message =~ @future
+      assert err.message =~ "max_feedback_passes"
+
+      # the partial report is attached, and shows the loop's cells spinning
+      spinning = err.report.steps |> Enum.map(& &1.cell) |> Enum.uniq() |> Enum.sort()
+      assert ["docs", "meetings", "minutes", "schedule"] == spinning
+
+      # a budget of 3 means the whole failure cost ~a dozen steps
+      assert length(err.report.steps) < 20
+    end
+
+    test "the budget never binds on a monotone loop, however small" do
+      # The honest loop above crossed the edge once per key. Run it again with
+      # the tightest possible budget to pin that the bound is per (edge, KEY):
+      # a loop minting new keys each pass must never be charged for them.
+      plan = looped_plan(AnnouncesOnce)
+
+      {:ok, _} =
+        Cascade.run(plan, [%{cell: "docs", keys: [@known]}], max_feedback_passes: 1)
     end
   end
 
-  describe "the holes a review found, stated as tests" do
-    @tag :skip
-    test "TODO a loop crossing a suspending cell escapes the runaway guard" do
-      # `max_steps` (`cascade.ex:326-341`) is per-cascade. A loop through a cell
-      # declaring `suspends true` stops, commits, and ends the cascade CLEANLY;
-      # the resumption starts a fresh one with a fresh counter
-      # (`resumption_worker.ex:176`). So an oscillating loop trips neither
-      # `max_steps` nor any per-cascade budget — it becomes an unbounded chain of
-      # individually-successful jobs flipping the same rows.
-      #
-      # That looks exactly like normal operation, which is the failure class this
-      # engine should least tolerate. The durable detector is `derived_row_versions`:
-      # one row per REAL change, so a key accruing many versions in a window is
-      # oscillation, visible across cascades and restarts.
-      flunk("unimplemented")
+  # the suspension tests hand the cascade a no-op scheduler: there is no Oban
+  # here, and the default scheduler's failure warning is noise, not signal.
+  def no_scheduler(_point, _opts), do: :ok
+
+  describe "the loop through a suspension" do
+    # This is THE HOLE the per-cascade budget cannot see: a loop crossing a
+    # `suspends` cell stops there, commits, and ends the cascade CLEANLY. The
+    # resumption starts a fresh cascade with a fresh step counter, so an
+    # oscillating loop becomes an unbounded chain of individually-successful
+    # jobs flipping the same rows — indistinguishable from normal operation.
+    # The lap count on the suspension row is what survives the chain.
+
+    test "work that never crossed the back-edge suspends at lap 0" do
+      plan = looped_plan(AnnouncesForever, true)
+
+      {:ok, report} =
+        Cascade.run(plan, [%{cell: "docs", keys: [@known]}], resumption_scheduler: &__MODULE__.no_scheduler/2)
+
+      assert [%{reason: :expensive}] = report.suspended
+      assert [%{waiting: "minutes", row_uuid: @known, lap: 0}] = FakeSuspensionRepo.recorded()
+    end
+
+    test "a resumption whose work comes back around the loop suspends one lap deeper" do
+      plan = looped_plan(AnnouncesForever, true)
+
+      # As `ResumptionWorker` would run it: `resuming:` lets the suspended cell
+      # itself recompute, and `feedback_lap:` is the count read off the
+      # suspensions being cleared.
+      {:ok, report} =
+        Cascade.run(plan, [%{cell: "minutes", keys: [@known]}],
+          resuming: "minutes",
+          feedback_lap: 3,
+          resumption_scheduler: &__MODULE__.no_scheduler/2
+        )
+
+      # the walk went minutes → schedule → (feedback) → meetings → minutes,
+      # and stopped at the suspension again — one full lap.
+      assert [%{waiting: "minutes"}] = report.suspended
+      assert [%{row_uuid: @future, lap: 4}] = FakeSuspensionRepo.recorded()
+    end
+
+    test "an honest loop resumes and settles with nothing left suspended" do
+      plan = looped_plan(AnnouncesOnce, true)
+
+      {:ok, report} =
+        Cascade.run(plan, [%{cell: "minutes", keys: [@future]}],
+          resuming: "minutes",
+          feedback_lap: 1
+        )
+
+      # asked about the future meeting, the schedule announced nothing, so the
+      # loop never re-reached the suspending cell: no suspension, no lap.
+      assert report.suspended == []
+      assert FakeSuspensionRepo.recorded() == []
+    end
+
+    test "the lap budget turns an unbounded chain into one loud failure" do
+      plan = looped_plan(AnnouncesForever, true)
+
+      err =
+        assert_raise Cascade.RunawayError, fn ->
+          Cascade.run(plan, [%{cell: "minutes", keys: [@known]}],
+            resuming: "minutes",
+            feedback_lap: 20
+          )
+        end
+
+      assert err.message =~ "lap"
+      assert err.message =~ "max_feedback_laps"
+
+      # raised BEFORE recording, so the over-budget suspension does not land —
+      # the cascade rolls back, the job fails, and the PREVIOUS lap's rows
+      # (discharged only on success) remain as durable evidence.
+      assert FakeSuspensionRepo.recorded() == []
+    end
+
+    test "a suspending cell that FEEDS the back-edge itself still advances the lap" do
+      # The resumed cell's own propagation runs BEFORE the walk begins
+      # (`run_outside_transaction/6`), so its crossing is the one the in-walk
+      # counter never sees. If that crossing didn't mark its origins, a loop
+      # whose suspending cell sits at the tail — schedule itself expensive,
+      # feeding meetings directly — would reset its lap count every resumption.
+      plan =
+        ReactiveDag.Graph.build([
+          cell("docs", []),
+          cell("meetings", ["docs", "schedule"], %{
+            compute: PassThrough,
+            feedback_inputs: ["schedule"]
+          }),
+          cell("minutes", ["meetings"], %{compute: PassThrough}),
+          cell("schedule", ["minutes"], %{
+            compute: AnnouncesForever,
+            suspends: %{expensive: []}
+          })
+        ])
+
+      {:ok, _} =
+        Cascade.run(plan, [%{cell: "schedule", keys: [@known]}],
+          resuming: "schedule",
+          feedback_lap: 7,
+          resumption_scheduler: &__MODULE__.no_scheduler/2
+        )
+
+      assert [%{waiting: "schedule", row_uuid: @future, lap: 8}] =
+               FakeSuspensionRepo.recorded()
+    end
+
+    test "merged work is loop work if EITHER route to it was" do
+      # Two origins land on the suspending cell and MERGE before it runs — one
+      # plain, one already around the loop (`looped:` is how a resumption's own
+      # propagation arrives, see `run_outside_transaction/6`). If "first
+      # arrival wins" decided the flag, an oscillation could hide behind a
+      # merge with ordinary work and reset its lap count every time.
+      plan = looped_plan(AnnouncesOnce, true)
+
+      {:ok, _} =
+        Cascade.run(
+          plan,
+          [
+            %{cell: "minutes", keys: [@known]},
+            %{cell: "minutes", keys: [@future], looped: true}
+          ],
+          feedback_lap: 5,
+          resumption_scheduler: &__MODULE__.no_scheduler/2
+        )
+
+      # one suspension per key, both on the merged work's lap
+      assert [%{lap: 6}, %{lap: 6}] = FakeSuspensionRepo.recorded()
+    end
+
+    @tag capture_log: true
+    test "ResumptionWorker reads the lap off the rows and hands it back" do
+      # The full production chain, minus Oban's queue: a suspension recorded at
+      # lap 2 is resumed by the worker, comes back around the loop, and lands
+      # at lap 3. This is the handoff that makes the count durable — remove
+      # `feedback_lap:` from the worker's opts and every resumption restarts
+      # at lap 0.
+      point = %{tenant: "*", waiting: "minutes", resource: "meetings", row_uuid: @future}
+      ReactiveDag.Suspension.record(point, "*", :expensive, 2)
+
+      job = %Oban.Job{
+        args: %{
+          "tenant" => "*",
+          "waiting" => "minutes",
+          "resource" => "meetings",
+          "row_uuid" => @future,
+          "plan_mfa" => ["ReactiveDag.FeedbackEdgeTest", "worker_plan", []]
+        }
+      }
+
+      assert :ok = ReactiveDag.ResumptionWorker.perform(job)
+
+      # the lap-2 row was discharged; the new suspension is one lap deeper.
+      assert [%{waiting: "minutes", lap: 3}] = FakeSuspensionRepo.recorded()
     end
   end
 end

@@ -162,7 +162,18 @@ if Code.ensure_loaded?(Oban.Worker) do
         %{waiting: point.waiting, cell: cell_id, tenant: point.tenant, reasons: reasons}
       )
 
-      opts = [tenant: point.tenant] ++ Keyword.take(cascade_opts(args), [:plan_mfa])
+      # `feedback_lap:` hands the loop accounting back to the cascade. The lap
+      # count survives ONLY on the suspension rows — each trip around a loop
+      # through this cell is a separate, individually-successful cascade — so
+      # if it is not read here and passed on, every resumption starts at lap 0
+      # and an oscillating loop runs forever as a chain of healthy-looking
+      # jobs. Max, not first: several suspensions coalescing into this one
+      # recompute must not let a fresh lap-0 row launder an over-budget chain.
+      feedback_lap = suspensions |> Enum.map(&Map.get(&1, :lap, 0)) |> Enum.max()
+
+      opts =
+        [tenant: point.tenant, feedback_lap: feedback_lap] ++
+          Keyword.take(cascade_opts(args), [:plan_mfa])
 
       # The origin for the onward cascade: this cell, the keys the suspensions
       # named, and their versions.

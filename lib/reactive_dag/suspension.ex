@@ -84,7 +84,8 @@ defmodule ReactiveDag.Suspension do
   @type t :: %{
           id: String.t(),
           version_id: String.t(),
-          reason: reason()
+          reason: reason(),
+          lap: non_neg_integer()
         }
 
   @doc """
@@ -99,17 +100,27 @@ defmodule ReactiveDag.Suspension do
   honest. This gives the whole-cell marker a principled meaning it has never
   had — not "something happened somewhere", but "this suspension could not be
   narrowed".
+
+  `lap` is how many consecutive resumption-driven trips around a declared
+  `feedback` loop led to this suspension — 0 (the default, and the value for
+  every suspension outside a loop) means the work arrived here from an external
+  change. The column exists because a loop through a suspending cell ends every
+  CASCADE cleanly: no in-memory counter survives the suspend → commit → resume
+  chain, so the count must ride on the one thing that does — this row.
+  `ReactiveDag.Cascade` refuses to record a lap past its budget, which is what
+  bounds the chain.
   """
-  @spec record(point(), String.t(), reason()) :: String.t()
-  def record(%{} = point, version_id, reason)
-      when is_binary(version_id) and reason in [:expensive, :approval] do
+  @spec record(point(), String.t(), reason(), non_neg_integer()) :: String.t()
+  def record(%{} = point, version_id, reason, lap \\ 0)
+      when is_binary(version_id) and reason in [:expensive, :approval] and is_integer(lap) and
+             lap >= 0 do
     id = uuid_v7()
 
     query!(
       """
       INSERT INTO #{table()}
-        (id, tenant, waiting, resource, row_uuid, version_id, reason, inserted_at)
-      VALUES ($1, $2, $3, $4, $5, $6, $7, now())
+        (id, tenant, waiting, resource, row_uuid, version_id, reason, lap, inserted_at)
+      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, now())
       """,
       [
         id,
@@ -118,7 +129,8 @@ defmodule ReactiveDag.Suspension do
         point.resource,
         point.row_uuid,
         version_id,
-        Atom.to_string(reason)
+        Atom.to_string(reason),
+        lap
       ]
     )
 
@@ -140,15 +152,15 @@ defmodule ReactiveDag.Suspension do
     %{rows: rows} =
       query!(
         """
-        SELECT id, version_id, reason FROM #{table()}
+        SELECT id, version_id, reason, lap FROM #{table()}
         WHERE tenant = $1 AND waiting = $2 AND resource = $3 AND row_uuid = $4
         ORDER BY id
         """,
         [point.tenant, point.waiting, point.resource, point.row_uuid]
       )
 
-    Enum.map(rows, fn [id, version_id, reason] ->
-      %{id: id, version_id: version_id, reason: String.to_existing_atom(reason)}
+    Enum.map(rows, fn [id, version_id, reason, lap] ->
+      %{id: id, version_id: version_id, reason: String.to_existing_atom(reason), lap: lap || 0}
     end)
   end
 

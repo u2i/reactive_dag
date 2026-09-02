@@ -87,7 +87,8 @@ defmodule ReactiveDag.RealPostgresSuspensionTest do
           row_uuid    text NOT NULL DEFAULT '*',
           version_id  text NOT NULL DEFAULT '*',
           reason      text NOT NULL,
-          inserted_at timestamp NOT NULL DEFAULT now()
+          inserted_at timestamp NOT NULL DEFAULT now(),
+          lap         integer NOT NULL DEFAULT 0
         )
         """,
         []
@@ -221,6 +222,19 @@ defmodule ReactiveDag.RealPostgresSuspensionTest do
         Suspension.record(point(), "v-2", :expensive)
 
         assert ["v-1", "v-2"] == Enum.map(Suspension.at(point()), & &1.version_id)
+      end
+    end
+
+    test "the feedback lap survives the round trip" do
+      if @url do
+        # The lap column is what bounds a loop through a suspending cell: the
+        # count survives ONLY here, so a write that dropped it (or a read that
+        # didn't return it) would silently unbound every declared loop. The
+        # default matters too — a record with no lap is lap 0, not NULL.
+        Suspension.record(point(), "v-1", :expensive)
+        Suspension.record(point(), "v-2", :expensive, 7)
+
+        assert [0, 7] == Enum.map(Suspension.at(point()), & &1.lap)
       end
     end
 

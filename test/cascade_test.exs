@@ -43,7 +43,10 @@ defmodule ReactiveDag.CascadeTest do
 
     def recorded, do: Agent.get(__MODULE__, &Enum.reverse/1)
 
-    def query!("INSERT INTO " <> _, [id, tenant, waiting, resource, row_uuid, version_id, reason]) do
+    def query!(
+          "INSERT INTO " <> _,
+          [id, tenant, waiting, resource, row_uuid, version_id, reason, lap]
+        ) do
       Agent.update(__MODULE__, &[
         %{
           id: id,
@@ -52,7 +55,8 @@ defmodule ReactiveDag.CascadeTest do
           resource: resource,
           row_uuid: row_uuid,
           version_id: version_id,
-          reason: reason
+          reason: reason,
+          lap: lap
         }
         | &1
       ])

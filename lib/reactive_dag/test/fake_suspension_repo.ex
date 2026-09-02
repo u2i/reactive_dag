@@ -90,7 +90,10 @@ defmodule ReactiveDag.Test.FakeSuspensionRepo do
 
   def query!(sql, params \\ [])
 
-  def query!("INSERT INTO " <> _, [id, tenant, waiting, resource, row_uuid, version_id, reason]) do
+  def query!(
+        "INSERT INTO " <> _,
+        [id, tenant, waiting, resource, row_uuid, version_id, reason, lap]
+      ) do
     Agent.update(
       __MODULE__,
       &[
@@ -101,7 +104,8 @@ defmodule ReactiveDag.Test.FakeSuspensionRepo do
           resource: resource,
           row_uuid: row_uuid,
           version_id: version_id,
-          reason: reason
+          reason: reason,
+          lap: lap
         }
         | &1
       ]
@@ -118,7 +122,7 @@ defmodule ReactiveDag.Test.FakeSuspensionRepo do
         &(&1.tenant == tenant and &1.waiting == waiting and &1.resource == resource and
             &1.row_uuid == row_uuid)
       )
-      |> Enum.map(&[&1.id, &1.version_id, &1.reason])
+      |> Enum.map(&[&1.id, &1.version_id, &1.reason, &1.lap])
 
     %{rows: rows, num_rows: length(rows)}
   end

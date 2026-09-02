@@ -127,6 +127,13 @@ defmodule ReactiveDag.Approval do
       # ever propagate.
       cell = Keyword.fetch!(opts, :cell)
 
+      # No `feedback_lap:` handoff here, unlike `ResumptionWorker` —
+      # deliberately. A release runs on a person's sign-off, and a human action
+      # is an EXTERNAL event: the same thing that resets the loop accounting
+      # everywhere else. An approval gate sitting inside a declared feedback
+      # loop is bounded by the person at it — each lap costs a signature, which
+      # is a stronger brake than any counter.
+
       result =
         Cascade.run(
           plan,

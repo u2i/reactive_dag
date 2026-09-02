@@ -14,6 +14,7 @@ defmodule ReactiveDag.Node.Verifiers.VerifyReactive do
     Compose,
     Compute,
     Context,
+    Feedback,
     Join,
     PerKey,
     RecomputeBy,
@@ -46,6 +47,7 @@ defmodule ReactiveDag.Node.Verifiers.VerifyReactive do
 
     with :ok <- one_computation(dsl, computations),
          :ok <- some_computation(dsl, computations),
+         :ok <- verify_feedback(dsl, computations),
          :ok <- verify_augmented_by(dsl),
          :ok <- verify_lapse(dsl),
          :ok <- verify_fingerprint_reaches_something(dsl, computations),
@@ -103,6 +105,112 @@ defmodule ReactiveDag.Node.Verifiers.VerifyReactive do
 
       true ->
         :ok
+    end
+  end
+
+  # A `feedback` edge is confined, in v1, to the shapes where it is KNOWN to be
+  # sound: a `compute`/`run` node (or a leafless node whose claims are key-for-
+  # key). Each refusal below is a specific silent failure found by review, not
+  # caution for its own sake — the combination would assemble, run, and be
+  # wrong with no error anywhere:
+  #
+  #   * `per_key` — `per_key_read_spec/1` (node.ex) matches EXACTLY ONE input;
+  #     a second edge made the read spec fall through to nil and the node read
+  #     nothing. Assembly now raises on that shape too, but the author should
+  #     hear it here, at `defmodule`, naming the declaration that caused it.
+  #   * declarative combinators (`reduce`/`join`/`union`/`aggregate`) — the
+  #     combinator MINTS its own input edge from `over:`/`from:`
+  #     (`combinator_refs`, node.ex), so `feedback :x` where `:x` is also the
+  #     `over` produces a duplicate input; and a combinator's claim translation
+  #     (`recompute_by` lowering) reads its single declared input, so a change
+  #     arriving over a second, feedback edge has no defined unit mapping.
+  #   * `poll` (a scan node) — `Source.scanners/2` orders POLLS by cell depth.
+  #     A feedback edge changes the depth math on the node that declares it,
+  #     so a scan node declaring one would have its polls silently reordered —
+  #     behaviour, not display.
+  #   * `leaf?` — a leaf's "recompute" echoes its claimed keys as changed
+  #     (`Cascade.recompute/3`), so a propagating input edge into a leaf
+  #     reports a change on every pass unconditionally: the exact dishonest
+  #     shape the loop budgets exist to catch, built into the topology.
+  #
+  # The target being genuinely downstream (the edge closing a REAL cycle) is
+  # checked at assembly by `Graph.build/1` — a cross-node fact this verifier
+  # cannot see.
+  defp verify_feedback(dsl, computations) do
+    feedbacks =
+      Verifier.get_entities(dsl, [:reactive]) |> Enum.filter(&match?(%Feedback{}, &1))
+
+    if feedbacks == [] do
+      :ok
+    else
+      targets = Enum.map(feedbacks, & &1.to)
+
+      other_edges =
+        (Verifier.get_entities(dsl, [:reactive])
+         |> Enum.filter(&(match?(%Ref{}, &1) or match?(%Context{}, &1)))
+         |> Enum.map(& &1.to)) ++
+          List.wrap(Verifier.get_option(dsl, [:reactive], :depends_on))
+
+      declarative? =
+        Enum.any?(
+          computations,
+          &(match?(%Reduce{}, &1) or match?(%Join{}, &1) or match?(%Union{}, &1) or
+              match?(%ReactiveDag.Node.Aggregate{}, &1))
+        )
+
+      cond do
+        Enum.any?(computations, &match?(%PerKey{}, &1)) ->
+          error(
+            dsl,
+            "`feedback #{inspect(hd(targets))}` on a `per_key` node — a per_key node " <>
+              "reads exactly ONE input (its `recompute_by … to:`), and a second edge " <>
+              "silently costs it its read spec. Put the feedback edge on a `compute` " <>
+              "node instead."
+          )
+
+        declarative? ->
+          error(
+            dsl,
+            "`feedback #{inspect(hd(targets))}` on a declarative combinator " <>
+              "(reduce/join/union/aggregate) — the combinator derives its input edge " <>
+              "and its claim translation from ONE declared input, so a feedback edge " <>
+              "would duplicate that edge or arrive with no defined unit mapping. Use a " <>
+              "`compute` node for the cell that closes the loop."
+          )
+
+        Enum.any?(Verifier.get_entities(dsl, [:reactive]), &match?(%ReactiveDag.Node.Poll{}, &1)) ->
+          error(
+            dsl,
+            "`feedback #{inspect(hd(targets))}` on a `poll` node — scanner polls run " <>
+              "in depth order, and a feedback edge changes this node's depth, so the " <>
+              "declaration would silently reorder polls. A source is written from " <>
+              "outside the graph; close the loop on a derived node downstream of it."
+          )
+
+        Verifier.get_option(dsl, [:reactive], :leaf?) == true ->
+          error(
+            dsl,
+            "`feedback #{inspect(hd(targets))}` on a leaf — a leaf's recompute echoes " <>
+              "every claimed key as changed, so a propagating input edge into it " <>
+              "reports a change on every pass and the loop never settles. Close the " <>
+              "loop on a derived node that reports honestly."
+          )
+
+        (dup = Enum.find(targets, &(&1 in other_edges))) != nil ->
+          error(
+            dsl,
+            "#{inspect(dup)} is declared as `feedback` AND as an ordinary edge " <>
+              "(`ref`/`context`/`depends_on`) — the same input both ordered and " <>
+              "unordered. Declare it once: `feedback` if it closes a cycle, an " <>
+              "ordinary edge if it doesn't."
+          )
+
+        (dup = Enum.find(targets, fn t -> Enum.count(targets, &(&1 == t)) > 1 end)) != nil ->
+          error(dsl, "`feedback #{inspect(dup)}` is declared twice — declare it once.")
+
+        true ->
+          :ok
+      end
     end
   end
 

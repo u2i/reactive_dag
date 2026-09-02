@@ -111,6 +111,28 @@ defmodule ReactiveDag.Migration do
       add(:inserted_at, :utc_datetime_usec, null: false, default: fragment("now()"))
     end
 
+    # WHICH LAP of a declared feedback loop this suspension is on — 0 for every
+    # suspension outside a loop, and for loop work triggered by a fresh
+    # external change.
+    #
+    # A loop through a suspending cell ends each cascade CLEANLY: suspend,
+    # commit, resume, repeat — each pass an individually-successful job, so no
+    # per-cascade counter can see the chain. The suspension row is the only
+    # thing that survives from one lap to the next, so the count lives here;
+    # `ReactiveDag.Cascade` raises rather than record a lap past
+    # `max_feedback_laps`, which is what bounds an oscillating loop.
+    #
+    # In an ALTER rather than inside the create above, and only here, so that
+    # BOTH kinds of install get the column from one declaration: a fresh
+    # install creates the table and then adds it, and an install migrated
+    # before this column existed picks it up by re-running `up/1` in a new
+    # host migration — where `create_if_not_exists` skips the whole table and
+    # would silently leave the column missing, failing every
+    # `Suspension.record/4` after that on an unknown column.
+    alter table(name) do
+      add_if_not_exists(:lap, :integer, null: false, default: 0)
+    end
+
     # NOT UNIQUE, and that is the design.
     #
     # Suspensions are append-only: a second change to the same stopping point
