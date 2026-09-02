@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.17.0-rc.63](https://github.com/u2i/reactive_dag/compare/v0.17.0-rc.62...v0.17.0-rc.63) (2026-09-02)
+
+
+### Bug Fixes
+
+* detect resumption jobs that are `available` but unfetchable ([#241](https://github.com/u2i/reactive_dag/issues/241)) ([b2cbc92](https://github.com/u2i/reactive_dag/commit/b2cbc92f7f006213ae41dfc09c715201b173ee91))
+
 ## [0.17.0-rc.62](https://github.com/u2i/reactive_dag/compare/v0.17.0-rc.61...v0.17.0-rc.62) (2026-09-02)
 
 
