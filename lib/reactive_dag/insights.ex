@@ -76,7 +76,7 @@ defmodule ReactiveDag.Insights do
       has to infer it from a nil `cell` or an empty `changed`.
 
   The drain is `run.report` — `nil` when a scan never drained (see
-  `ReactiveDag.ScanRun.drained?/1`), so a consumer reading it must handle nil.
+  the cascade reports itself), so a consumer reading it must handle nil.
   """
   @type entry :: %{
           run: ScanRun.t(),

@@ -38,22 +38,6 @@ defmodule ReactiveDag.Graph do
   end
 
   @doc """
-  Deprecated. Renamed to `claims_for/5`.
-
-  "Dirty" was the vocabulary of the queue this engine no longer has: a write
-  MARKED cells dirty and a drain later walked the frontier. A cascade is told
-  what changed and walks immediately, so what this returns is a CLAIM — what
-  each parent says it needs recomputed — not a mark left for someone else.
-
-  Kept as a delegate because the seam is public and hosts call it directly.
-  """
-  @deprecated "Use claims_for/5 instead"
-  @spec dirty_parents(Plan.t(), Cell.id(), [String.t()], module(), map()) ::
-          [{Cell.id(), [String.t()]}]
-  def dirty_parents(plan, child_id, keys, key_rule \\ ReactiveDag.Node.KeyRule, diffs \\ %{}),
-    do: claims_for(plan, child_id, keys, key_rule, diffs)
-
-  @doc """
   What each parent CLAIMS when `child`'s keys change, applying the key rule
   each parent DECLARED. The rule sees the parent, the specific child input, and
   the changed keys, and returns `:all` (whole-cell recompute, the `"*"`

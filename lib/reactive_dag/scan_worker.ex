@@ -354,7 +354,7 @@ if Code.ensure_loaded?(Oban.Worker) do
           report: nil,
           not_scannable: reason,
           # `report: nil` — an unscannable source completes WITHOUT draining, so
-          # `ScanRun.drained?/1` says false rather than a host inferring it from
+          # `report` stays nil rather than a host inferring propagation from
           # a zero pass count that means something else.
           run: %ReactiveDag.ScanRun{
             cell: cell_id,

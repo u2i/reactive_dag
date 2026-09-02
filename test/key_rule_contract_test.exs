@@ -118,8 +118,4 @@ defmodule ReactiveDag.KeyRuleContractTest do
              ReactiveDag.Graph.claims_for(plan(), "lines", ["l1"], ReactiveDag.Node.KeyRule)
   end
 
-  test "the old name still works, for hosts that call the public seam" do
-    assert ReactiveDag.Graph.dirty_parents(plan(), "lines", ["l1"], ReactiveDag.Node.KeyRule) ==
-             ReactiveDag.Graph.claims_for(plan(), "lines", ["l1"], ReactiveDag.Node.KeyRule)
-  end
 end

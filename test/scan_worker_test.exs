@@ -571,7 +571,6 @@ defmodule ReactiveDag.ScanWorkerTest do
       # a cascade and returns — the propagation reports itself separately, and
       # cannot reach back into the scan that started it.
       assert is_nil(run.report)
-      refute ReactiveDag.ScanRun.drained?(run)
 
       # The poll's own spend is still reported, which is what a cost line
       # actually reads.
@@ -844,11 +843,10 @@ defmodule ReactiveDag.ScanWorkerTest do
       # could infer.
       assert meta.detail == %{}
 
-      # A completed scan that never drained. `drained?` says so, rather than a
+      # A completed scan that never propagated: `report` is nil, rather than a
       # host inferring it from a zero pass count — which means something else.
       assert %ReactiveDag.ScanRun{} = run = meta.run
       assert run.not_scannable == {:not_scannable, :no_credential}
-      refute ReactiveDag.ScanRun.drained?(run)
       refute ReactiveDag.ScanRun.changed?(run)
       assert ReactiveDag.ScanRun.total(run, :tokens_in) == 0
     end
