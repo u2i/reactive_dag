@@ -100,6 +100,19 @@ defmodule ReactiveDag.Cascade do
 
   Returns the trace. `report.suspended` names every point where the cascade
   stopped, which is the only part of it the database also knows.
+
+  ## Options
+
+    * `:key_rule` — the module answering "what does this parent claim", default
+      `ReactiveDag.Node.KeyRule`. Supply one when a node's mapping is beyond
+      what the built-in rules can derive: they cover key-for-key, a field on
+      this node's own rows, and a declarative `reduce`/`join`'s grouping. A
+      node whose claim lives somewhere else — a join table, a many-to-many
+      re-key — otherwise falls back to claiming the whole cell, which is
+      correct and expensive. Delegate to `ReactiveDag.Node.KeyRule.rule/3` for
+      every cell the host has nothing special to say about.
+
+    * `:resumption_scheduler` — how a recorded suspension becomes a job.
   """
   @spec run(Plan.t(), [origin()], keyword()) :: {:ok, Report.t()}
   def run(%Plan{} = plan, origins, opts \\ []) when is_list(origins) do
@@ -274,7 +287,12 @@ defmodule ReactiveDag.Cascade do
 
             changed ->
               plan
-              |> Graph.claims_for(cell_id, changed, ReactiveDag.Node.KeyRule, Map.merge(origin_diffs, diffs))
+              |> Graph.claims_for(
+                cell_id,
+                changed,
+                key_rule(opts),
+                Map.merge(origin_diffs, diffs)
+              )
               |> Enum.map(fn {parent_id, mapped} ->
                 %{
                   cell: parent_id,
@@ -424,7 +442,7 @@ defmodule ReactiveDag.Cascade do
         parents =
           if changed == [],
             do: [],
-            else: Graph.claims_for(plan, cell_id, changed, ReactiveDag.Node.KeyRule, merged)
+            else: Graph.claims_for(plan, cell_id, changed, key_rule(opts), merged)
 
         pending =
           Enum.reduce(parents, pending, fn {parent_id, mapped}, acc ->
@@ -879,6 +897,17 @@ defmodule ReactiveDag.Cascade do
 
   # nil when Oban is absent — the library works without it, and a host that
   # drives resumptions itself passes `resumption_scheduler:`.
+  # WHICH RULE ANSWERS "what does this parent claim".
+  #
+  # `Graph.claims_for/5` has always taken the module — the seam is public and
+  # documented for hosts to implement — but this module named the default at
+  # its two call sites, so a cascade could not reach it. A host whose mapping
+  # the built-in rules cannot express (one whose claim comes from a join table,
+  # say) had nowhere to put it.
+  #
+  # Same shape as `resumption_scheduler:`: an opt, defaulted here.
+  defp key_rule(opts), do: Keyword.get(opts, :key_rule) || ReactiveDag.Node.KeyRule
+
   defp default_scheduler do
     if Code.ensure_loaded?(ReactiveDag.ResumptionWorker) do
       &ReactiveDag.ResumptionWorker.enqueue/2

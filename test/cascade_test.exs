@@ -494,6 +494,55 @@ defmodule ReactiveDag.CascadeTest do
     end
   end
 
+  describe "the key rule a cascade uses" do
+    defmodule HostRule do
+      @moduledoc false
+      # One cell's claim comes from somewhere the built-in rules cannot see —
+      # a host's join table, in the case this was written for. Everything else
+      # delegates.
+      def rule(%{id: "top"}, _child, _changed), do: {:keys, ["from-the-host"]}
+      def rule(parent, child, changed), do: ReactiveDag.Node.KeyRule.rule(parent, child, changed)
+    end
+
+    test "a host can supply its own, and it decides the claim" do
+      # `Graph.claims_for/5` always took the rule module — the seam is public
+      # and documented for hosts to implement — but this module named the
+      # default at both its call sites, so a cascade could never reach it. A
+      # node whose mapping the built-in rules cannot express (its claim comes
+      # from a join table, its input re-keys many-to-many) had nowhere to put
+      # the answer and fell back to claiming the whole cell.
+      plan =
+        plan_of([
+          cell("leaf", []),
+          compute("mid", ["leaf"]),
+          compute("top", ["mid"])
+        ])
+
+      {:ok, report} =
+        Cascade.run(plan, [%{cell: "leaf", keys: ["k1"]}], key_rule: HostRule)
+
+      top = Enum.find(report.steps, &(&1.cell == "top"))
+
+      assert top, "the cascade did not reach the parent at all"
+
+      assert top.claimed == ["from-the-host"],
+             "the host rule did not decide the claim: #{inspect(top.claimed)}"
+    end
+
+    test "omitting it keeps the built-in rule" do
+      plan =
+        plan_of([
+          cell("leaf", []),
+          compute("mid", ["leaf"])
+        ])
+
+      {:ok, report} = Cascade.run(plan, [%{cell: "leaf", keys: ["k1"]}])
+
+      mid = Enum.find(report.steps, &(&1.cell == "mid"))
+      assert mid.claimed == ["k1"], "the default is key-for-key"
+    end
+  end
+
   describe "scheduling the resumption" do
     test "every distinct stopping point is scheduled, once" do
       # A suspension nobody resumes is a cascade that stopped forever. This
