@@ -48,6 +48,7 @@ defmodule ReactiveDag.RealPostgresSuspensionTest do
 
   @url System.get_env("REACTIVE_DAG_TEST_DATABASE_URL")
   @table "rd_test_suspension"
+  @oban "rd_test_oban_jobs"
 
   # A repo shim: the library calls `query!/2`, Postgrex offers `query!/3`.
   defmodule Repo do
@@ -421,6 +422,154 @@ defmodule ReactiveDag.RealPostgresSuspensionTest do
         GenServer.stop(other)
 
         assert count() == 2
+      end
+    end
+  end
+
+  describe "stranded/1 and revive/1, against real Postgres" do
+    @describetag :real_postgres
+
+    setup do
+      if @url do
+        Postgrex.query!(Repo.conn(), "DROP TABLE IF EXISTS #{@oban}", [])
+
+        # Only the columns the two statements touch. `state` is text here
+        # rather than Oban's enum: the queries compare it to a literal, so the
+        # type is irrelevant to what is being tested, and the enum would need
+        # its own CREATE TYPE.
+        Postgrex.query!(
+          Repo.conn(),
+          """
+          CREATE TABLE #{@oban} (
+            id            bigserial PRIMARY KEY,
+            worker        text NOT NULL,
+            state         text NOT NULL,
+            attempt       integer NOT NULL DEFAULT 0,
+            max_attempts  integer NOT NULL DEFAULT 3,
+            scheduled_at  timestamp NOT NULL DEFAULT now(),
+            args          jsonb NOT NULL DEFAULT '{}'
+          )
+          """,
+          []
+        )
+
+        prev = Application.get_env(:reactive_dag, :oban_table)
+        Application.put_env(:reactive_dag, :oban_table, @oban)
+
+        on_exit(fn ->
+          if prev,
+            do: Application.put_env(:reactive_dag, :oban_table, prev),
+            else: Application.delete_env(:reactive_dag, :oban_table)
+        end)
+      end
+
+      :ok
+    end
+
+    defp job!(state, attempt, max_attempts, args) do
+      %{rows: [[id]]} =
+        Postgrex.query!(
+          Repo.conn(),
+          "INSERT INTO #{@oban} (worker, state, attempt, max_attempts, args) " <>
+            "VALUES ($1, $2, $3, $4, $5) RETURNING id",
+          ["ReactiveDag.ResumptionWorker", state, attempt, max_attempts, args]
+        )
+
+      id
+    end
+
+    @tag :real_postgres
+    test "finds the job that is `available` but can never be fetched" do
+      if @url do
+        point = %{
+          "tenant" => "red_hook_village",
+          "waiting" => "Derived.TranscriptRecord",
+          "resource" => "Derived.TranscriptDocsLeaf",
+          "row_uuid" => "_07132026-743"
+        }
+
+        stranded_id = job!("available", 3, 3, point)
+
+        # Each of these is FETCHABLE or already visible as failed, so none is
+        # stranded. Without them the query could be `state = 'available'` alone
+        # and still pass.
+        _fresh = job!("available", 0, 3, point)
+        _mid_retry = job!("available", 1, 3, point)
+        _discarded = job!("discarded", 3, 3, point)
+        _executing = job!("executing", 3, 3, point)
+        _retryable = job!("retryable", 2, 3, point)
+
+        assert [found] = Suspension.stranded()
+        assert found.job_id == stranded_id
+        assert found.tenant == "red_hook_village"
+        assert found.waiting == "Derived.TranscriptRecord"
+        assert found.row_uuid == "_07132026-743"
+      end
+    end
+
+    @tag :real_postgres
+    test "a max_attempts: 1 worker strands on its FIRST failure" do
+      # `ReprocessWorker` and `ScanWorker` both run `max_attempts: 1`, so
+      if @url do
+        # `attempt >= max_attempts` the moment one attempt is recorded — there is
+        # no retry budget to absorb it.
+        id = job!("available", 1, 1, %{})
+
+        assert [%{job_id: ^id}] = Suspension.stranded()
+      end
+    end
+
+    @tag :real_postgres
+    test "revive/1 makes it fetchable, and is idempotent" do
+      if @url do
+        id = job!("available", 3, 3, %{})
+
+        assert Suspension.revive() == [id]
+
+        %{rows: [[attempt, max_attempts]]} =
+          Postgrex.query!(
+            Repo.conn(),
+            "SELECT attempt, max_attempts FROM #{@oban} WHERE id = $1",
+            [id]
+          )
+
+        # The fetch predicate is `attempt < max_attempts` (Oban.Engines.Basic),
+        # so this is the assertion that matters: not that a column changed, but
+        # that the job now satisfies the query that had been excluding it.
+        assert attempt < max_attempts
+
+        # Nothing is stranded any more, so a second pass is a no-op rather than
+        # an ever-climbing max_attempts.
+        assert Suspension.stranded() == []
+        assert Suspension.revive() == []
+      end
+    end
+
+    @tag :real_postgres
+    test "revive/1 leaves a healthy job's budget alone" do
+      if @url do
+        id = job!("available", 0, 3, %{})
+
+        assert Suspension.revive() == []
+
+        %{rows: [[max_attempts]]} =
+          Postgrex.query!(Repo.conn(), "SELECT max_attempts FROM #{@oban} WHERE id = $1", [id])
+
+        assert max_attempts == 3
+      end
+    end
+
+    @tag :real_postgres
+    test "another worker's stranded job is not touched" do
+      if @url do
+        Postgrex.query!(
+          Repo.conn(),
+          "INSERT INTO #{@oban} (worker, state, attempt, max_attempts) VALUES ($1, $2, $3, $4)",
+          ["MyApp.SomeOtherWorker", "available", 3, 3]
+        )
+
+        assert Suspension.stranded() == []
+        assert Suspension.revive() == []
       end
     end
   end
