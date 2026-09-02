@@ -252,6 +252,23 @@ defmodule ReactiveDag.Cascade do
       end)
 
     case outcome do
+      # Same hazard as in the walk below: a rolled-back savepoint is
+      # `{:error, reason}`, a 2-tuple, and must not be bound as `changed`.
+      # Handled like a failed resumption — the suspensions stay for the retry.
+      {:error, reason} ->
+        Logger.warning(
+          "reactive_dag: resuming #{cell_id} rolled back (#{brief(reason)}); its " <>
+            "suspensions stay for the next attempt"
+        )
+
+        :telemetry.execute(
+          [:reactive_dag, :cascade, :cell_failed],
+          %{duration_us: us},
+          %{cell: cell_id, step: 0, reason: reason, claimed: keys}
+        )
+
+        throw({:resumption_failed, cell_id, reason})
+
       {:failed, reason} ->
         # NOT discharged by the caller: this returns without changed keys, so
         # the resumption's suspensions stay and the job retries. That is the
@@ -468,6 +485,29 @@ defmodule ReactiveDag.Cascade do
       end)
 
     case outcome do
+      # A ROLLED-BACK SAVEPOINT, not a recompute's answer.
+      # `Suspension.savepoint/1` returns `{:error, reason}` when the repo aborts
+      # the transaction — the database's decision, not the op's. That is a
+      # 2-tuple, so the `{changed, meta}` clause below accepted it and bound
+      # `changed = :error`, which then died in `length(changed)`.
+      #
+      # Clause ORDER is the fix: this has to precede `{changed, meta}`. Treated
+      # as a contained failure, which is what a rolled-back cell is — nothing it
+      # wrote survived, so nothing downstream should run.
+      {:error, reason} ->
+        Logger.warning(
+          "reactive_dag: #{cell_id}'s savepoint rolled back (#{brief(reason)}); " <>
+            "its branch stops, the rest of this cascade continues"
+        )
+
+        :telemetry.execute(
+          [:reactive_dag, :cascade, :cell_failed],
+          %{duration_us: us},
+          %{cell: cell_id, step: n, reason: reason, claimed: keys}
+        )
+
+        {pending, steps, cause, crossings}
+
       {:failed, reason} ->
         # CONTAINED. The savepoint rolled this cell back; the rest of the
         # cascade keeps going and commits. The branch below it does not run —
