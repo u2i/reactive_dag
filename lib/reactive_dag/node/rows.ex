@@ -117,11 +117,27 @@ defmodule ReactiveDag.Node.Rows do
   Rows with no status are counted under `nil`, so the counts always sum to the
   cell's key count and a node without a `:status` column reports
   `%{nil => n}` rather than lying with `%{}`.
-  """
-  @spec status_histogram(Cell.t() | source()) :: %{(String.t() | nil) => non_neg_integer()}
-  def status_histogram(%Cell{meta: meta}), do: status_histogram(meta)
 
-  def status_histogram(%{} = source) do
+  ## `tenant:`
+
+  A TENANTED resource refuses to be counted without one — Ash raises
+  `"Queries against … require a tenant to be specified"`. Pass the plan's
+  tenant (`opts[:tenant]`), and omit it for a host whose resources are not
+  multitenant; `nil` is the untenanted read, not a wildcard.
+
+  This is not optional polish. Every count here went through an unscoped
+  `Ash.count!/1`, so once a host made its resources tenanted EVERY cell raised,
+  `Insights` caught it into `rows: :unreadable`, and the dashboard rendered a
+  benign-looking `?` in place of all 33 counts.
+  """
+  @spec status_histogram(Cell.t() | source(), keyword()) :: %{
+          (String.t() | nil) => non_neg_integer()
+        }
+  def status_histogram(cell_or_source, opts \\ [])
+
+  def status_histogram(%Cell{meta: meta}, opts), do: status_histogram(meta, opts)
+
+  def status_histogram(%{} = source, opts) do
     case queryable(source) do
       nil ->
         %{}
@@ -136,12 +152,12 @@ defmodule ReactiveDag.Node.Rows do
           # in the BEAM at all), so this is the closest pushdown available. The
           # vocabulary is small — a handful of statuses — so N stays tiny.
           resource
-          |> distinct_statuses()
-          |> Map.new(&{&1, count_with_status(resource, &1)})
+          |> distinct_statuses(opts)
+          |> Map.new(&{&1, count_with_status(resource, &1, opts)})
         else
           # no status column: every row counts under `nil`, and the count is one
           # query rather than a table read
-          case Ash.count!(resource) do
+          case Ash.count!(resource, query_opts(opts)) do
             0 -> %{}
             n -> %{nil => n}
           end
@@ -149,20 +165,30 @@ defmodule ReactiveDag.Node.Rows do
     end
   end
 
-  defp distinct_statuses(resource) do
+  defp distinct_statuses(resource, opts) do
     resource
     |> Ash.Query.select([:status])
     |> Ash.Query.distinct([:status])
-    |> Ash.read!()
+    |> Ash.read!(query_opts(opts))
     |> Enum.map(& &1.status)
     |> Enum.uniq()
   end
 
-  defp count_with_status(resource, nil),
-    do: resource |> Ash.Query.filter(is_nil(status)) |> Ash.count!()
+  defp count_with_status(resource, nil, opts),
+    do: resource |> Ash.Query.filter(is_nil(status)) |> Ash.count!(query_opts(opts))
 
-  defp count_with_status(resource, status),
-    do: resource |> Ash.Query.filter(status == ^status) |> Ash.count!()
+  defp count_with_status(resource, status, opts),
+    do: resource |> Ash.Query.filter(status == ^status) |> Ash.count!(query_opts(opts))
+
+  # Only the keys Ash accepts on a read/count, and only when set: passing
+  # `tenant: nil` to an untenanted resource is fine, but passing unknown keys
+  # is not, and the caller's opts also carry `:limit` and friends.
+  defp query_opts(opts) do
+    case Keyword.get(opts, :tenant) do
+      nil -> []
+      tenant -> [tenant: tenant]
+    end
+  end
 
   @doc """
   The keys whose status is in `statuses`, at most `limit` of them (sorted, so a
@@ -185,7 +211,7 @@ defmodule ReactiveDag.Node.Rows do
         # ones that matched, and only up to the limit, rather than the table.
         resource
         |> filter_statuses(statuses)
-        |> Ash.read!()
+        |> Ash.read!(query_opts(opts))
         |> Enum.map(keyer(source))
         |> Enum.sort()
         |> take(opts[:limit])

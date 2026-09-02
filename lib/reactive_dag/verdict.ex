@@ -58,9 +58,13 @@ defmodule ReactiveDag.Verdict do
   def for_cell(%ReactiveDag.Cell{} = cell, opts \\ []) do
     limit = Keyword.get(opts, :sample_limit, 5)
 
+    # `tenant:` passes straight through to the reads — a tenanted resource
+    # refuses to be counted without one.
+    tenant_opts = Keyword.take(opts, [:tenant])
+
     rollup(
-      Rows.status_histogram(cell),
-      Rows.keys_by_status(cell, ["failing"], limit: limit)
+      Rows.status_histogram(cell, tenant_opts),
+      Rows.keys_by_status(cell, ["failing"], Keyword.merge(tenant_opts, limit: limit))
     )
   end
 

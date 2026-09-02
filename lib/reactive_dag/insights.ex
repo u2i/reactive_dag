@@ -62,6 +62,8 @@ defmodule ReactiveDag.Insights do
 
   alias ReactiveDag.{Report, Node.Rows, Plan, ScanRun}
 
+  require Logger
+
   @default_keep 20
   @failing_sample 10
 
@@ -142,14 +144,14 @@ defmodule ReactiveDag.Insights do
   many round trips. That is the remaining cost, and it is a different one.
   """
   @spec cell_status(Plan.t(), String.t()) :: cell_status() | nil
-  def cell_status(%Plan{cells: cells, depths: depths}, cell_id) do
+  def cell_status(%Plan{cells: cells, depths: depths} = plan, cell_id) do
     case Map.get(cells, cell_id) do
       nil -> nil
-      cell -> build_status(cell, Map.get(depths, cell_id, 0))
+      cell -> build_status(cell, Map.get(depths, cell_id, 0), tenant_opts(plan))
     end
   end
 
-  defp build_status(cell, depth) do
+  defp build_status(cell, depth, opts) do
     {statuses, rows} =
       case rows_kind(cell) do
         # No table of its own — a `compose` node, whose nested legs hold the rows.
@@ -159,9 +161,22 @@ defmodule ReactiveDag.Insights do
           {%{}, :elsewhere}
 
         :stored ->
-          case safe(fn -> Rows.status_histogram(cell) end) do
-            {:ok, statuses} -> {statuses, :stored}
-            :error -> {%{}, :unreadable}
+          case safe(fn -> Rows.status_histogram(cell, opts) end) do
+            {:ok, statuses} ->
+              {statuses, :stored}
+
+            {:error, e} ->
+              # LOUD. This used to be a bare `:error`, so a graph whose every
+              # count failed looked exactly like a graph with nothing to count:
+              # the dashboard rendered `?` for all 33 cells and nobody could
+              # tell it was broken. The commonest cause is a tenanted resource
+              # counted without a tenant.
+              Logger.warning(fn ->
+                "reactive_dag: could not read #{cell.id}'s rows (#{Exception.message(e)}); " <>
+                  "its count shows as unknown"
+              end)
+
+              {%{}, :unreadable}
           end
       end
 
@@ -181,7 +196,7 @@ defmodule ReactiveDag.Insights do
       # its rows elsewhere, and a read that failed are three different states,
       # and a consumer collapsing them shows an alarm for two non-problems.
       rows: rows,
-      failing_sample: failing_sample(cell, statuses)
+      failing_sample: failing_sample(cell, statuses, opts)
     }
   end
 
@@ -198,13 +213,14 @@ defmodule ReactiveDag.Insights do
 
   # only pay for the sample when something is actually failing. A nil status is
   # "this node has no status column", not a failure, so it never samples.
-  defp failing_sample(cell, statuses) do
+  defp failing_sample(cell, statuses, opts) do
     failing = Map.keys(statuses) -- ["present", nil]
 
     if failing == [] do
       []
     else
-      safe(fn -> Rows.keys_by_status(cell, failing, limit: @failing_sample) end, [])
+      sample_opts = Keyword.merge(opts, limit: @failing_sample)
+      safe(fn -> Rows.keys_by_status(cell, failing, sample_opts) end, [])
     end
   end
 
@@ -215,12 +231,21 @@ defmodule ReactiveDag.Insights do
   (tens of cells); for a very large graph, page it with `cell_status/2` instead.
   """
   @spec summary(Plan.t()) :: [cell_status()]
-  def summary(%Plan{cells: cells, depths: depths}) do
+  def summary(%Plan{cells: cells, depths: depths} = plan) do
+    opts = tenant_opts(plan)
+
     cells
     |> Map.values()
     |> Enum.sort_by(&{Map.get(depths, &1.id, 0), &1.id})
-    |> Enum.map(&build_status(&1, Map.get(depths, &1.id, 0)))
+    |> Enum.map(&build_status(&1, Map.get(depths, &1.id, 0), opts))
   end
+
+  # The plan already knows which graph it is, so nothing new has to be passed in
+  # to count a tenanted resource. `"*"` is the frontier's spelling for "no
+  # tenant" and must NOT be sent to Ash as one — it is not a wildcard there, and
+  # a resource that is not multitenant rejects the key outright.
+  defp tenant_opts(%Plan{tenant: t}) when is_binary(t) and t != "*", do: [tenant: t]
+  defp tenant_opts(_plan), do: []
 
   @doc """
   Resources with work SUSPENDED — a cascade reached them and stopped.
@@ -481,16 +506,16 @@ defmodule ReactiveDag.Insights do
   defp safe(fun) do
     {:ok, fun.()}
   rescue
-    _ -> :error
+    e -> {:error, e}
   catch
-    _, _ -> :error
+    kind, reason -> {:error, %RuntimeError{message: inspect({kind, reason})}}
   end
 
   # the degrade-to-a-default form, for reads whose failure needs no distinction
   defp safe(fun, default) do
     case safe(fun) do
       {:ok, value} -> value
-      :error -> default
+      {:error, _} -> default
     end
   end
 end
