@@ -6,8 +6,10 @@ defmodule ReactiveDag.Graph do
   every referenced input exists and the graph is acyclic (raises `ArgumentError`
   on a dangling input or cycle; a host's DSL transformer should catch these at
   compile time, but the runtime builder re-checks so a hand-built plan can't
-  wedge the drain).
+  wedge a cascade).
   """
+
+  require Logger
 
   alias ReactiveDag.{Cell, Plan}
 
@@ -30,24 +32,44 @@ defmodule ReactiveDag.Graph do
   end
 
   @doc """
-  The parents whose keys should be dirtied when `child` changed, applying the
-  key rule each parent DECLARED. The rule sees the parent, the specific child
-  input, and the changed keys, and returns `:all` (whole-cell recompute, the
-  `"*"` wildcard) or `{:keys, mapped}`.
+  Deprecated. Renamed to `claims_for/5`.
+
+  "Dirty" was the vocabulary of the queue this engine no longer has: a write
+  MARKED cells dirty and a drain later walked the frontier. A cascade is told
+  what changed and walks immediately, so what this returns is a CLAIM — what
+  each parent says it needs recomputed — not a mark left for someone else.
+
+  Kept as a delegate because the seam is public and hosts call it directly.
+  """
+  @deprecated "Use claims_for/5 instead"
+  @spec dirty_parents(Plan.t(), Cell.id(), [String.t()], module(), map()) ::
+          [{Cell.id(), [String.t()]}]
+  def dirty_parents(plan, child_id, keys, key_rule \\ ReactiveDag.Node.KeyRule, diffs \\ %{}),
+    do: claims_for(plan, child_id, keys, key_rule, diffs)
+
+  @doc """
+  What each parent CLAIMS when `child`'s keys change, applying the key rule
+  each parent DECLARED. The rule sees the parent, the specific child input, and
+  the changed keys, and returns `:all` (whole-cell recompute, the `"*"`
+  wildcard) or `{:keys, mapped}`.
 
   Returns `[{parent_id, [key]}]`. `key_rule` defaults to
   `ReactiveDag.Node.KeyRule`, which reads `:identity | :all | :group` off the
-  authored block — the drain always uses that one, and the parameter exists so a
-  host calling this directly (to pre-mark a re-run, say) gets the same answer.
+  authored block — a cascade always uses that one, and the parameter exists so
+  a host calling this directly gets the same answer.
 
-  `diffs` maps a changed key to the DIFF of that change — both sides (see
-  `ReactiveDag.Frontier`). A rule that implements `rule/4` receives it and can
-  derive a claim from a row that no longer exists; one implementing only
-  `rule/3` is called exactly as before.
+  A rule that returns anything outside its contract is answered `:all` and
+  logged, rather than passed on: an out-of-contract value used to travel into
+  the walk and fail several frames away, naming neither the rule nor the edge.
+
+  `diffs` maps a changed key to the DIFF of that change — both sides, as
+  captured by the payload write that produced it. A rule implementing `rule/4`
+  receives it and can derive a claim from a row that no longer exists; one
+  implementing only `rule/3` is called exactly as before.
   """
-  @spec dirty_parents(Plan.t(), Cell.id(), [String.t()], module(), map()) ::
+  @spec claims_for(Plan.t(), Cell.id(), [String.t()], module(), map()) ::
           [{Cell.id(), [String.t()]}]
-  def dirty_parents(
+  def claims_for(
         %Plan{} = plan,
         child_id,
         keys,
@@ -60,8 +82,37 @@ defmodule ReactiveDag.Graph do
       parent = Map.fetch!(plan.cells, parent_id)
 
       case apply_rule(key_rule, parent, child_id, keys, diffs, Plan.frontier_opts(plan)) do
-        :all -> {parent_id, ["*"]}
-        {:keys, mapped} -> {parent_id, mapped}
+        :all ->
+          {parent_id, ["*"]}
+
+        {:keys, mapped} when is_list(mapped) ->
+          {parent_id, mapped}
+
+        # OUT OF CONTRACT — degrade to a whole-cell claim rather than pass it on.
+        #
+        # A rule returns `:all | {:keys, [key]}`. Anything else used to fall
+        # through this `case` unmatched and travel on as if it were a key list,
+        # detonating several frames later inside `Cascade.entries_for/6` on
+        # `"*" in mapped_keys` — a `Protocol.UndefinedError` naming neither the
+        # rule nor the cell that produced it. Seen in production as a resumption
+        # failing with `Enumerable not implemented for Atom, got :error`, where
+        # `:error` is this module's own internal sentinel for a key that does
+        # not fit its grain.
+        #
+        # `:all` rather than a raise, matching what every degradation in
+        # `KeyRule` already does: a claim that cannot be narrowed is answered
+        # wide, which is correct and expensive, never wrong and cheap. Logged at
+        # warning because a rule breaking its contract is a defect even when the
+        # fallback is safe — silence here is what made the original crash hard
+        # to attribute.
+        other ->
+          Logger.warning(fn ->
+            "reactive_dag: #{inspect(key_rule)} returned #{inspect(other, limit: 5)} for " <>
+              "#{child_id} -> #{parent_id}; expected `:all` or `{:keys, keys}`. " <>
+              "Claiming the whole cell."
+          end)
+
+          {parent_id, ["*"]}
       end
     end)
   end
@@ -89,7 +140,7 @@ defmodule ReactiveDag.Graph do
   # ---- parents: inverse of each cell's inputs, EXCLUDING context edges ----
   # A cell's `inputs` are every edge — used for validation + depth ordering +
   # reading. But a CONTEXT input (listed in `meta.context_inputs`) is read as
-  # settled context, not recomputed on: a change to it must NOT dirty this cell
+  # settled context, not recomputed on: a change to it must NOT claim this cell
   # (e.g. an expensive/non-deterministic LLM node that consults mutable context
   # data). So the propagation graph (`parents`) omits context edges — the node
   # still reads the current value when it recomputes for other reasons, it just

@@ -145,7 +145,7 @@ defmodule ReactiveDag.GroupClaimsTenantTest do
   test "a changed line claims its FUND, not the whole cell" do
     seed("org_a", "l1", "A", 10)
 
-    assert ReactiveDag.Graph.dirty_parents(plan("org_a"), "lines", ["l1"]) ==
+    assert ReactiveDag.Graph.claims_for(plan("org_a"), "lines", ["l1"]) ==
              [{"rollup", ["A"]}]
   end
 
@@ -156,10 +156,10 @@ defmodule ReactiveDag.GroupClaimsTenantTest do
     seed("org_a", "shared", "A", 10)
     seed("org_b", "shared", "ES", 99)
 
-    assert ReactiveDag.Graph.dirty_parents(plan("org_a"), "lines", ["shared"]) ==
+    assert ReactiveDag.Graph.claims_for(plan("org_a"), "lines", ["shared"]) ==
              [{"rollup", ["A"]}]
 
-    assert ReactiveDag.Graph.dirty_parents(plan("org_b"), "lines", ["shared"]) ==
+    assert ReactiveDag.Graph.claims_for(plan("org_b"), "lines", ["shared"]) ==
              [{"rollup", ["ES"]}]
   end
 
@@ -170,7 +170,7 @@ defmodule ReactiveDag.GroupClaimsTenantTest do
     # graph — would be silently wrong.
     seed("org_b", "only_b", "ES", 99)
 
-    assert ReactiveDag.Graph.dirty_parents(plan("org_a"), "lines", ["only_b"]) ==
+    assert ReactiveDag.Graph.claims_for(plan("org_a"), "lines", ["only_b"]) ==
              [{"rollup", ["*"]}]
   end
 
@@ -181,7 +181,7 @@ defmodule ReactiveDag.GroupClaimsTenantTest do
     # still resolves through the same path.
     seed("*", "star", "GF", 5)
 
-    assert ReactiveDag.Graph.dirty_parents(ReactiveDag.Node.graph([Lines, Rollup]), "lines", [
+    assert ReactiveDag.Graph.claims_for(ReactiveDag.Node.graph([Lines, Rollup]), "lines", [
              "star"
            ]) == [{"rollup", ["GF"]}]
   end

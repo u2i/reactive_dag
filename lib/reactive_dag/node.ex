@@ -372,7 +372,7 @@ defmodule ReactiveDag.Node do
         "Ash-first: declare `recompute_by` (the unit a change invalidates — it supplies " <>
         "the edge, the grouping and the claim rule), or name `over:` a node id with an " <>
         "explicit `group_by:`; omit `read:` (the library reads the over node's resource, " <>
-        "dirty-key scoped) and declare the fold in `into:` — each slot has a fn escape " <>
+        "claim-scoped) and declare the fold in `into:` — each slot has a fn escape " <>
         "hatch when the shape outgrows attributes.",
     schema: [
       over: [
@@ -388,7 +388,7 @@ defmodule ReactiveDag.Node do
         required: false,
         doc:
           "OMIT for the default: the library reads the OVER node's resource via its " <>
-            "primary read action, automatically scoped to the claimed dirty keys by " <>
+            "primary read action, automatically scoped to the claimed keys by " <>
             "filtering its payload key. An atom names a different `:read` ACTION on the " <>
             "over resource (same auto-scoping). Combinator reads are ALWAYS Ash reads — " <>
             "shape them with `query:`; a non-Ash read belongs on the `run`/`compute` rungs."
@@ -397,10 +397,10 @@ defmodule ReactiveDag.Node do
         type: {:fun, 2},
         required: false,
         doc:
-          "`(Ash.Query.t(), dirty_keys | nil -> Ash.Query.t())` — SHAPE the read (filter, " <>
+          "`(Ash.Query.t(), claimed_keys | nil -> Ash.Query.t())` — SHAPE the read (filter, " <>
             "sort, load) without leaving Ash's pipeline; the library still executes it and " <>
             "applies the dirty-key scope afterwards (scoping stays library-owned). " <>
-            "`dirty_keys` is nil for a whole-cell recompute."
+            "`claimed_keys` is nil for a whole-cell recompute."
       ],
       group_by: [
         type: {:or, [{:fun, 1}, :atom, {:list, :any}]},
@@ -561,7 +561,7 @@ defmodule ReactiveDag.Node do
         type: :atom,
         required: false,
         doc:
-          "OMIT for the default (the over node's primary read, dirty-key scoped); an " <>
+          "OMIT for the default (the over node's primary read, claim-scoped); an " <>
             "atom names a different `:read` action on it. Always an Ash read — see `query:`. " <>
             "ONE-INPUT form only."
       ],
@@ -569,7 +569,7 @@ defmodule ReactiveDag.Node do
         type: {:fun, 2},
         required: false,
         doc:
-          "`(Ash.Query.t(), dirty_keys | nil -> Ash.Query.t())` — shape the read inside " <>
+          "`(Ash.Query.t(), claimed_keys | nil -> Ash.Query.t())` — shape the read inside " <>
             "Ash's pipeline (see `reduce`); the library executes and scopes it."
       ],
       left: [
@@ -1387,7 +1387,7 @@ defmodule ReactiveDag.Node do
         required: false,
         doc:
           "make ordinary Ash writes trigger the cascade: a `:create`/`:update`/`:destroy` " <>
-            "on THIS resource marks the written record's key dirty on this cell, so the " <>
+            "on THIS resource claims the written record's key on this cell, so the " <>
             "next drain picks it up. Without it a host must call " <>
             "`ReactiveDag.CascadeWorker.enqueue/3` at every write site, and a missed call " <>
             "is silent staleness. Wired as an `after_action` change, so the mark runs " <>

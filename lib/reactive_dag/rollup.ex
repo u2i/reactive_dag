@@ -4,7 +4,7 @@ defmodule ReactiveDag.Rollup do
   this cost" line, wherever the numbers came from.
 
   Both phases report what their work cost, and they report it the same way. A
-  drain step carries `meta` (`ReactiveDag.Report`); a poll carries
+  recompute carries `meta` (`ReactiveDag.Report`); a poll carries
   `detail:` (`ReactiveDag.Source`). The containers differ because the phases do,
   but the arithmetic over them does not, and it used to be written twice — two
   implementations of one fold, which have to agree and have no mechanism forcing

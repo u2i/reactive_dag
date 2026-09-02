@@ -259,7 +259,7 @@ defmodule ReactiveDag.Cascade do
         # is not re-queued: it has just run, and queueing it would suspend it
         # again.
         #
-        # NOTHING CHANGED means nothing to propagate. `Graph.dirty_parents/5`
+        # NOTHING CHANGED means nothing to propagate. `Graph.claims_for/5`
         # does not short-circuit on an empty key list — it returns every parent
         # paired with `[]` — so without this a resumption whose work produced no
         # change would still recompute everything below it. The ordinary case
@@ -274,7 +274,7 @@ defmodule ReactiveDag.Cascade do
 
             changed ->
               plan
-              |> Graph.dirty_parents(cell_id, changed, ReactiveDag.Node.KeyRule, Map.merge(origin_diffs, diffs))
+              |> Graph.claims_for(cell_id, changed, ReactiveDag.Node.KeyRule, Map.merge(origin_diffs, diffs))
               |> Enum.map(fn {parent_id, mapped} ->
                 %{
                   cell: parent_id,
@@ -418,13 +418,13 @@ defmodule ReactiveDag.Cascade do
         versions = Map.merge(work.versions, new_versions)
 
         # A recompute reporting NO change propagates nothing — the point of
-        # reporting changed keys rather than claimed ones. `dirty_parents/5`
+        # reporting changed keys rather than claimed ones. `claims_for/5`
         # pairs every parent with `[]` rather than returning none, so this has
         # to be checked here.
         parents =
           if changed == [],
             do: [],
-            else: Graph.dirty_parents(plan, cell_id, changed, ReactiveDag.Node.KeyRule, merged)
+            else: Graph.claims_for(plan, cell_id, changed, ReactiveDag.Node.KeyRule, merged)
 
         pending =
           Enum.reduce(parents, pending, fn {parent_id, mapped}, acc ->
