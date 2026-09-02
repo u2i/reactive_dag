@@ -410,8 +410,6 @@ defmodule ReactiveDag.Source do
           | {:error, term()}
   def refresh(graph, cell_id, opts \\ []) do
     {reason, poll_opts} = Keyword.pop(opts, :reason, "scan")
-    key_rule = Keyword.get(poll_opts, :key_rule, ReactiveDag.Node.KeyRule)
-    poll_opts = Keyword.delete(poll_opts, :key_rule)
 
     # COLLECTING, so a version a leaf's write recorded reaches the cascade it
     # originates. A poll writes its rows through the host's own code — which is
@@ -431,7 +429,7 @@ defmodule ReactiveDag.Source do
         # on it — the reported crash was only the first of them, so fixing that
         # site alone would have moved the failure rather than removed it.
         result = normalise(raw)
-        marked = mark(graph, cell_id, result, reason, key_rule, versions)
+        marked = mark(graph, cell_id, result, reason, versions)
 
         {:ok,
          %{
@@ -486,7 +484,7 @@ defmodule ReactiveDag.Source do
   end
 
   # A flat list belongs to the cell that was polled; a map names its own leaves.
-  defp mark(graph, cell_id, result, _reason, _key_rule, versions) do
+  defp mark(graph, cell_id, result, _reason, versions) do
     by_leaf = by_leaf(result, cell_id)
 
     # A poll originates THIS graph's cascade. Without the tenant a tenanted scan

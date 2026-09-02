@@ -45,8 +45,15 @@ defmodule ReactiveDag.Graph do
 
   Returns `[{parent_id, [key]}]`. `key_rule` defaults to
   `ReactiveDag.Node.KeyRule`, which reads `:identity | :all | :group` off the
-  authored block — a cascade always uses that one, and the parameter exists so
-  a host calling this directly gets the same answer.
+  authored block. A cascade always uses that one; the parameter exists for a
+  host or test inspecting claims directly.
+
+  It is NOT a seam for a host rule module. `apply_rule/6` picks the widest arity
+  the module exports, MODULE-WIDE — so a module implementing only `rule/3`
+  silently loses the diff path and tenant-scoped `:group` reads for every cell,
+  not only the ones it meant to answer for. What a node claims is declared on
+  the node (`key_rule`, `recompute_by`), where assembly resolves it and the
+  verifier checks it. See `guides/seams.md`.
 
   A rule that returns anything outside its contract is answered `:all` and
   logged, rather than passed on: an out-of-contract value used to travel into

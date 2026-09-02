@@ -22,7 +22,6 @@ config :reactive_dag, repo: MyApp.Repo
 | [`:plan_mfa`](#plan_mfa) | — | only with `ScanWorker` | `ScanWorker` |
 | [`:insights_keep`](#insights_keep) | `20` | no | `Insights` |
 | [`:cascade_enqueuer`](#cascade_enqueuer) | `CascadeWorker.enqueue/3` | no | `dirties_on`, `augmented_by`, `Source` |
-| [`:key_rule`](#key_rule) | `Node.KeyRule` | no | `Cascade` |
 | [`:max_feedback_passes`](#max_feedback_passes) | `3` | no | `Cascade` |
 | [`:max_feedback_laps`](#max_feedback_laps) | `20` | no | `Cascade` |
 | [`:around_poll`](#around_poll) | — | no | `ScanWorker` |
@@ -55,35 +54,6 @@ config :reactive_dag, suspension_table: "my_suspensions"
 Resolved identically by `ReactiveDag.Suspension` and `ReactiveDag.Migration`,
 and validated against an identifier grammar at read time, so a typo fails
 loudly rather than as a syntax error deep inside a query.
-
-### `:key_rule`
-
-The module answering "what does this parent claim when its input changed".
-
-```elixir
-config :reactive_dag, key_rule: MyApp.KeyRules
-```
-
-The built-in rules cover three shapes: key-for-key (`:identity`), a field on
-this node's own rows (`recompute_by ... from:`), and a declarative
-`reduce`/`join`'s grouping (`:group`). A node whose mapping is none of those —
-one that re-keys many-to-many, or whose claim lives in a join table — falls
-back to claiming the whole cell, which is correct and expensive.
-
-A host module implements `rule/3` for the cells it knows about and delegates
-the rest:
-
-```elixir
-def rule(%{id: "resolutions"}, _child, changed),
-  do: {:keys, resolutions_for_meetings(changed)}
-
-def rule(parent, child, changed),
-  do: ReactiveDag.Node.KeyRule.rule(parent, child, changed)
-```
-
-CONFIGURED rather than passed, for the same reason as `:plan_mfa`: cascades run
-from Oban workers in production, and a job argument cannot carry a module. A
-`key_rule:` option on `Cascade.run/3` overrides it for one call.
 
 ### `:max_feedback_passes`
 

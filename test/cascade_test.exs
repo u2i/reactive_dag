@@ -499,54 +499,20 @@ defmodule ReactiveDag.CascadeTest do
   end
 
   describe "the key rule a cascade uses" do
-    defmodule HostRule do
-      @moduledoc false
-      # One cell's claim comes from somewhere the built-in rules cannot see —
-      # a host's join table, in the case this was written for. Everything else
-      # delegates.
-      def rule(%{id: "top"}, _child, _changed), do: {:keys, ["from-the-host"]}
-      def rule(parent, child, changed), do: ReactiveDag.Node.KeyRule.rule(parent, child, changed)
-    end
-
-    test "a host can supply its own, and it decides the claim" do
-      # `Graph.claims_for/5` always took the rule module — the seam is public
-      # and documented for hosts to implement — but this module named the
-      # default at both its call sites, so a cascade could never reach it. A
-      # node whose mapping the built-in rules cannot express (its claim comes
-      # from a join table, its input re-keys many-to-many) had nowhere to put
-      # the answer and fell back to claiming the whole cell.
-      plan =
-        plan_of([
-          cell("leaf", []),
-          compute("mid", ["leaf"]),
-          compute("top", ["mid"])
-        ])
-
-      {:ok, report} =
-        Cascade.run(plan, [%{cell: "leaf", keys: ["k1"]}], key_rule: HostRule)
-
-      top = Enum.find(report.steps, &(&1.cell == "top"))
-
-      assert top, "the cascade did not reach the parent at all"
-
-      assert top.claimed == ["from-the-host"],
-             "the host rule did not decide the claim: #{inspect(top.claimed)}"
-    end
-
-    test "config supplies it too, which is how a WORKER gets one" do
-      # The production callers are Oban workers, and a job argument cannot
-      # carry a module — the same reason `plan_mfa` is configured. Without this
-      # the opt would only reach cascades started by hand, which is not where
-      # the claims that matter are made.
-      prev = Application.get_env(:reactive_dag, :key_rule)
-      Application.put_env(:reactive_dag, :key_rule, HostRule)
-
-      on_exit(fn ->
-        if prev,
-          do: Application.put_env(:reactive_dag, :key_rule, prev),
-          else: Application.delete_env(:reactive_dag, :key_rule)
-      end)
-
+    test "the built-in rule decides every claim" do
+      # There is no host-supplied rule any more. `Cascade` names
+      # `ReactiveDag.Node.KeyRule` directly, and a node says what it needs
+      # through its own `key_rule` declaration — data the DSL can carry, which
+      # assembly resolves and the verifier checks.
+      #
+      # A `key_rule:` opt and a `config :reactive_dag, key_rule:` existed
+      # briefly. Both are gone: `guides/seams.md` already recorded that
+      # per-call rule modules were removed once before, because every host
+      # passed the library's own module and "a pluggable engine everyone plugs
+      # the same thing into is an indirection" — and the reintroduced version
+      # carried a hazard on top. `Graph.apply_rule` picks the widest arity
+      # MODULE-WIDE, so a host implementing only `rule/3` silently lost the
+      # diff path and tenant-scoped `:group` reads for every cell in the graph.
       plan =
         plan_of([
           cell("leaf", []),
@@ -556,42 +522,10 @@ defmodule ReactiveDag.CascadeTest do
 
       {:ok, report} = Cascade.run(plan, [%{cell: "leaf", keys: ["k1"]}])
 
-      top = Enum.find(report.steps, &(&1.cell == "top"))
+      assert Enum.find(report.steps, &(&1.cell == "mid")).claimed == ["k1"],
+             "the built-in rule is key-for-key by default"
 
-      assert top.claimed == ["from-the-host"],
-             "the configured rule did not decide the claim: #{inspect(top.claimed)}"
-    end
-
-    test "an explicit opt beats the config" do
-      prev = Application.get_env(:reactive_dag, :key_rule)
-      Application.put_env(:reactive_dag, :key_rule, HostRule)
-
-      on_exit(fn ->
-        if prev,
-          do: Application.put_env(:reactive_dag, :key_rule, prev),
-          else: Application.delete_env(:reactive_dag, :key_rule)
-      end)
-
-      plan = plan_of([cell("leaf", []), compute("mid", ["leaf"]), compute("top", ["mid"])])
-
-      {:ok, report} =
-        Cascade.run(plan, [%{cell: "leaf", keys: ["k1"]}], key_rule: ReactiveDag.Node.KeyRule)
-
-      top = Enum.find(report.steps, &(&1.cell == "top"))
-      assert top.claimed == ["k1"], "the opt must win over the config"
-    end
-
-    test "omitting it keeps the built-in rule" do
-      plan =
-        plan_of([
-          cell("leaf", []),
-          compute("mid", ["leaf"])
-        ])
-
-      {:ok, report} = Cascade.run(plan, [%{cell: "leaf", keys: ["k1"]}])
-
-      mid = Enum.find(report.steps, &(&1.cell == "mid"))
-      assert mid.claimed == ["k1"], "the default is key-for-key"
+      assert Enum.find(report.steps, &(&1.cell == "top")).claimed == ["k1"]
     end
   end
 

@@ -114,18 +114,6 @@ defmodule ReactiveDag.Cascade do
 
   ## Options
 
-    * `:key_rule` — the module answering "what does this parent claim", else
-      `config :reactive_dag, key_rule:`, else `ReactiveDag.Node.KeyRule`.
-      Configure it rather than passing it if the host's cascades run from Oban
-      workers, which cannot carry a module in their job args. Supply one when a
-      node's mapping is beyond
-      what the built-in rules can derive: they cover key-for-key, a field on
-      this node's own rows, and a declarative `reduce`/`join`'s grouping. A
-      node whose claim lives somewhere else — a join table, a many-to-many
-      re-key — otherwise falls back to claiming the whole cell, which is
-      correct and expensive. Delegate to `ReactiveDag.Node.KeyRule.rule/3` for
-      every cell the host has nothing special to say about.
-
     * `:resumption_scheduler` — how a recorded suspension becomes a job.
 
     * `:max_feedback_passes` — how many times ONE key may cross ONE declared
@@ -323,7 +311,7 @@ defmodule ReactiveDag.Cascade do
               |> Graph.claims_for(
                 cell_id,
                 changed,
-                key_rule(opts),
+                ReactiveDag.Node.KeyRule,
                 Map.merge(origin_diffs, diffs)
               )
               |> Enum.map(fn {parent_id, mapped} ->
@@ -515,7 +503,7 @@ defmodule ReactiveDag.Cascade do
         parents =
           if changed == [],
             do: [],
-            else: Graph.claims_for(plan, cell_id, changed, key_rule(opts), merged)
+            else: Graph.claims_for(plan, cell_id, changed, ReactiveDag.Node.KeyRule, merged)
 
         {pending, crossings} =
           Enum.reduce(parents, {pending, crossings}, fn {parent_id, mapped}, {acc, xacc} ->
@@ -1211,24 +1199,6 @@ defmodule ReactiveDag.Cascade do
 
   # nil when Oban is absent — the library works without it, and a host that
   # drives resumptions itself passes `resumption_scheduler:`.
-
-  # WHICH RULE ANSWERS "what does this parent claim".
-  #
-  # `Graph.claims_for/5` has always taken the module — the seam is public and
-  # documented for hosts to implement — but this module named the default at
-  # its two call sites, so a cascade could not reach it. A host whose mapping
-  # the built-in rules cannot express (one whose claim comes from a join table,
-  # say) had nowhere to put it.
-  #
-  # Opt first, then CONFIG, for the same reason `plan_mfa` is configured rather
-  # than passed: the production callers are Oban workers, and a job argument
-  # cannot carry a module reference. A host that needs its own rule needs it on
-  # every cascade, not the handful it starts by hand.
-  defp key_rule(opts) do
-    Keyword.get(opts, :key_rule) ||
-      Application.get_env(:reactive_dag, :key_rule) ||
-      ReactiveDag.Node.KeyRule
-  end
 
   defp default_scheduler do
     if Code.ensure_loaded?(ReactiveDag.ResumptionWorker) do
