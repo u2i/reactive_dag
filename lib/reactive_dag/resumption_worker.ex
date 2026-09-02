@@ -213,8 +213,58 @@ if Code.ensure_loaded?(Oban.Worker) do
           # Doing it here as well would enqueue each point twice: harmless,
           # because the second job finds the suspensions already discharged and
           # exits, but wasteful and misleading in the queue.
+          #
+          # THIS point is the exception, and it is the one case `Cascade.run/3`
+          # cannot cover. Step 4 discharges by ID, so a suspension written while
+          # the slow work ran survives — that is the whole reason it discharges
+          # by id. But the cascade's own enqueue for this point happened while
+          # THIS job was still `executing`, and the worker's uniqueness is
+          # `states: :incomplete`, which includes `:executing`: the request was
+          # deduped against the job making it, and lost.
+          #
+          # The surviving suspension then waited for an unrelated cascade to
+          # re-reach the point — recoverable at the next scan, and stale until
+          # then. Enqueuing HERE, after the discharge, is late enough that the
+          # row is visible and early enough that nothing else has to notice it.
+          # Still deduped if a sibling job is genuinely queued for the point,
+          # which is what the uniqueness is for.
+          reschedule_if_outstanding(point, args)
           :ok
       end
+    end
+
+    # Anything left at this point after the discharge is work that arrived while
+    # this job ran. It is only ever a NEW row — the ones read in step 1 are gone
+    # — so this cannot re-enqueue what was just finished.
+    defp reschedule_if_outstanding(point, args) do
+      case Suspension.at(point) do
+        [] ->
+          :ok
+
+        _outstanding ->
+          # NEVER fatal. The work is committed and the discharge is done; a
+          # queue that cannot take the follow-up must not undo either, and the
+          # suspension stays visible for the next cascade regardless. A sibling
+          # job already queued for this point is the uniqueness doing its job,
+          # not a failure — so both outcomes are logged, not raised.
+          try do
+            case enqueue(point, Keyword.take(cascade_opts(args), [:plan_mfa])) do
+              {:ok, _job} -> :ok
+              {:error, reason} -> log_not_requeued(point, reason)
+            end
+          rescue
+            e -> log_not_requeued(point, e)
+          end
+      end
+    end
+
+    defp log_not_requeued(point, reason) do
+      Logger.debug(fn ->
+        "reactive_dag: #{point.waiting} has work outstanding after a resumption " <>
+          "and was not re-enqueued (#{inspect(reason, limit: 3)})"
+      end)
+
+      :ok
     end
 
     # `"*"` subsumes: one unattributable suspension means the whole cell.

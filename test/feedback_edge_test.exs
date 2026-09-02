@@ -105,9 +105,25 @@ defmodule ReactiveDag.FeedbackEdgeTest do
   def known, do: @known
   def future, do: @future
 
+  # What the cascade ASKED to be enqueued — the observation point for whether a
+  # surviving suspension gets a job. Oban's own dedup is not modelled here; the
+  # question is whether the request is made at all.
+  defmodule Scheduled do
+    def child_spec(_), do: %{id: __MODULE__, start: {__MODULE__, :start_link, [[]]}}
+    def start_link(_ \\ []), do: Agent.start_link(fn -> [] end, name: __MODULE__)
+    def note(point), do: Agent.update(__MODULE__, &[point | &1])
+    def waiting, do: Agent.get(__MODULE__, &Enum.reverse(&1)) |> Enum.map(& &1.waiting)
+  end
+
+  def recording_scheduler(point, _opts) do
+    Scheduled.note(point)
+    :ok
+  end
+
   setup do
     start_supervised!(Ran)
     start_supervised!(FakeSuspensionRepo)
+    start_supervised!(Scheduled)
     FakeSuspensionRepo.install()
     :ok
   end
@@ -297,6 +313,7 @@ defmodule ReactiveDag.FeedbackEdgeTest do
   # here, and the default scheduler's failure warning is noise, not signal.
   def no_scheduler(_point, _opts), do: :ok
 
+
   describe "the loop through a suspension" do
     # This is THE HOLE the per-cascade budget cannot see: a loop crossing a
     # `suspends` cell stops there, commits, and ends the cascade CLEANLY. The
@@ -424,6 +441,49 @@ defmodule ReactiveDag.FeedbackEdgeTest do
     end
 
     @tag capture_log: true
+    test "a suspension that survives the discharge gets a job scheduled for it" do
+      # THE ORPHAN. Step 4 discharges by ID, never by point — deliberately, so a
+      # suspension written while the slow work ran is not swept away with the
+      # ones being cleared. The moduledoc's promise is that "the next job picks
+      # it up".
+      #
+      # There is no next job unless something enqueues one. `Cascade.run`'s own
+      # scheduling happens while THIS job is still `executing`, and the worker's
+      # uniqueness is `states: :incomplete`, which includes `:executing` — so an
+      # enqueue for its own point is deduped against itself and lost. The
+      # surviving suspension then waits for an unrelated cascade to re-reach the
+      # point: recoverable, but only at the next scan, with the page stale until
+      # then.
+      point = %{tenant: "*", waiting: "minutes", resource: "meetings", row_uuid: @future}
+      ReactiveDag.Suspension.record(point, "*", :expensive, 2)
+
+      job = %Oban.Job{
+        args: %{
+          "tenant" => "*",
+          "waiting" => "minutes",
+          "resource" => "meetings",
+          "row_uuid" => @future,
+          "plan_mfa" => ["ReactiveDag.FeedbackEdgeTest", "worker_plan", []]
+        }
+      }
+
+      log =
+        ExUnit.CaptureLog.capture_log(fn ->
+          assert :ok = ReactiveDag.ResumptionWorker.perform(job)
+        end)
+
+      # A new suspension survived at the SAME point the job just finished.
+      assert [%{waiting: "minutes"}] = FakeSuspensionRepo.recorded()
+
+      # The worker enqueues through Oban, which is not running here — so the
+      # observable is the DEBUG line it logs when the enqueue cannot be made.
+      # Its presence proves the worker looked for outstanding work and tried to
+      # queue it; its absence means the surviving suspension was never noticed.
+      assert log =~ "has work outstanding after a resumption",
+             "a suspension outlived the discharge and the worker never tried " <>
+               "to queue anything for it — it waits for an unrelated cascade"
+    end
+
     test "ResumptionWorker reads the lap off the rows and hands it back" do
       # The full production chain, minus Oban's queue: a suspension recorded at
       # lap 2 is resumed by the worker, comes back around the loop, and lands
