@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.17.0-rc.64](https://github.com/u2i/reactive_dag/compare/v0.17.0-rc.63...v0.17.0-rc.64) (2026-09-02)
+
+
+### Bug Fixes
+
+* a rolled-back savepoint was bound as a recompute's changed keys ([#243](https://github.com/u2i/reactive_dag/issues/243)) ([cbc5833](https://github.com/u2i/reactive_dag/commit/cbc5833c721fb617e74e38ebae20ed40328f3309))
+
 ## [0.17.0-rc.63](https://github.com/u2i/reactive_dag/compare/v0.17.0-rc.62...v0.17.0-rc.63) (2026-09-02)
 
 
