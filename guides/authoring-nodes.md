@@ -656,8 +656,9 @@ reactive do
 end
 ```
 
-One boundary: a `context` edge still participates in depth ordering (that is
-what guarantees the target settles first), so it cannot form a cycle —
+One boundary: a `context` edge is still a scheduling input — the cascade will
+not run this node while the target is pending, which is the whole of what makes
+"settled context" true — so it cannot form a cycle —
 `Graph.build` raises. It reads settled upstream context; a cycle needs the
 third edge kind.
 

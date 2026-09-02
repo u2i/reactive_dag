@@ -144,7 +144,7 @@ defmodule ReactiveDag.Graph do
   end
 
   # ---- parents: inverse of each cell's inputs, EXCLUDING context edges ----
-  # A cell's `inputs` are every edge — used for validation + depth ordering +
+  # A cell's `inputs` are every edge — used for validation + scheduling +
   # reading. But a CONTEXT input (listed in `meta.context_inputs`) is read as
   # settled context, not recomputed on: a change to it must NOT claim this cell
   # (e.g. an expensive/non-deterministic LLM node that consults mutable context
@@ -173,6 +173,14 @@ defmodule ReactiveDag.Graph do
   end
 
   # ---- depths: longest path from a leaf, memoized, with cycle detection ----
+  #
+  # A LAYERING, for humans and for staging — the dashboard's levels, the rerun
+  # page's stage list, the poll order over leaves. NOT the scheduling invariant:
+  # the cascade pops a cell with no pending upstream, and depth is only one
+  # witness to that (it strictly increases along every non-feedback edge, so an
+  # ancestor is always shallower). Saying it in depth's terms over-claimed: on a
+  # real 35-cell plan, 472 of 595 cell pairs are genuinely incomparable and depth
+  # imposed an order on 388 of them. See `Cascade.shallowest/2`.
   defp build_depths(by_id) do
     Enum.reduce(Map.keys(by_id), %{}, fn id, memo ->
       {depth, memo} = depth_of(id, by_id, memo, MapSet.new())

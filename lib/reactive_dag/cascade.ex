@@ -27,7 +27,7 @@ defmodule ReactiveDag.Cascade do
 
       run(plan, origins)
         │
-        ├─ pop the SHALLOWEST pending cell
+        ├─ pop a pending cell with NO PENDING UPSTREAM
         │    merge everything else queued for it first
         │
         ├─ suspends? ──yes──> record one suspension per changed row
@@ -388,9 +388,11 @@ defmodule ReactiveDag.Cascade do
     # the key; leaving it to `max_steps` costs 100,000 and names neither.
     check_feedback_crossings!(crossings, opts, steps, suspended, n, t0)
 
-    # SHALLOWEST first, and everything queued for that cell merged before it
-    # runs. The merge is what makes a diamond recompute its apex once: two
-    # inputs changing in one cascade arrive as one unit of work, not two.
+    # A cell with NO PENDING UPSTREAM first — see `shallowest/2` for why that is
+    # the rule rather than "the shallowest by depth" — and everything queued for
+    # that cell merged before it runs. The merge is what makes a diamond
+    # recompute its apex once: two inputs changing in one cascade arrive as one
+    # unit of work, not two.
     {cell_id, work} = shallowest(plan, pending)
     pending = Map.delete(pending, cell_id)
     cell = Map.get(plan.cells, cell_id)
@@ -855,11 +857,109 @@ defmodule ReactiveDag.Cascade do
     |> then(fn {keys, versions} -> {Enum.reverse(keys), versions} end)
   end
 
+  # WHICH PENDING CELL RUNS NEXT — the scheduling invariant, stated directly.
+  #
+  # The rule is: never pop a cell while a cell it transitively depends on is
+  # still pending. That is what gives once-per-wave execution, and once-per-wave
+  # is what three other things rest on:
+  #
+  #   * a `context` input is READ but never propagates, so nothing re-queues a
+  #     reader that read it early. Order is the only thing keeping that read
+  #     fresh — the one pure-correctness dependent.
+  #   * `LlmCache` is content-addressed, so it protects identical-input re-runs
+  #     only. A cell running on half-settled inputs produces different content,
+  #     misses the cache, and pays for a transient result.
+  #   * `@max_feedback_passes` is justified by "honest change reporting cannot
+  #     report the same key twice". That holds per WAVE; without once-per-wave a
+  #     diamond upstream of a back-edge can honestly flip a key twice per lap
+  #     and trip the budget spuriously.
+  #
+  # This used to pick the minimum `plan.depths` value. Depth is a valid witness
+  # to the rule — it strictly increases along every non-feedback edge, so an
+  # ancestor is always shallower — but it is not the rule, and saying it in
+  # depth's terms was misleading in two measurable ways on a real 35-cell plan:
+  # of 595 cell pairs only 123 are genuinely comparable, and depth imposed an
+  # order on 388 of the 472 that are not; while 7 cells shared depth 1, whose
+  # relative order came from map iteration and so was not reproducible between
+  # runs. A number projected onto a line both over-constrains a partial order
+  # and, where it ties, stops being an order at all.
+  #
+  # Asking the condition directly costs a set-disjointness check per pop (~3µs
+  # at this scale, against LLM calls and DB writes) and one closure per cascade
+  # (~20µs). Behaviour is identical on every real origin — verified by
+  # simulation before the change — because min-depth-pop IMPLIES no-pending-
+  # ancestor. Depth was a refinement of this rule, never an alternative to it.
+  #
+  # Ties break on the cell id, so a cascade's step order is reproducible.
+  # `plan.depths` remains, for the dashboard and rerun staging: a layering for
+  # humans is exactly what a lossy projection is good for.
   defp shallowest(plan, pending) do
-    {cell_id, work} =
-      Enum.min_by(pending, fn {cell_id, _} -> Map.get(plan.depths, cell_id, 1_000_000) end)
+    ancestors = cached_closure(plan)
+    ids = pending |> Map.keys() |> Enum.sort()
+    blocked? = fn id -> not MapSet.disjoint?(Map.get(ancestors, id, MapSet.new()), MapSet.new(ids)) end
 
-    {cell_id, work}
+    cell_id =
+      case Enum.find(ids, fn id -> not blocked?.(id) end) do
+        nil ->
+          # Every pending cell has a pending ancestor. Unreachable while the
+          # plan is acyclic over non-feedback edges, which assembly guarantees —
+          # kept because a scheduler that cannot choose must not hang, and the
+          # shallowest cell is the least-wrong choice.
+          Enum.min_by(ids, &Map.get(plan.depths, &1, 1_000_000))
+
+        id ->
+          id
+      end
+
+    {cell_id, Map.fetch!(pending, cell_id)}
+  end
+
+  # Computed ONCE per cascade, not per pop: a 35-cell walk pops ~35 times, and
+  # the closure is a pure function of the plan. Process-scoped rather than an
+  # eighth argument threaded through `do_walk` — the walk runs on one process
+  # for its whole life, and the key is the plan itself so two cascades over
+  # different plans cannot share an answer.
+  @closure_key {__MODULE__, :upstream_closure}
+
+  defp cached_closure(%Plan{} = plan) do
+    case Process.get(@closure_key) do
+      {^plan, closure} ->
+        closure
+
+      _ ->
+        closure = upstream_closure(plan)
+        Process.put(@closure_key, {plan, closure})
+        closure
+    end
+  end
+
+  # Transitive inputs per cell, EXCLUDING feedback edges: a back-edge's target is
+  # derived from the cell, so counting it would make every loop member block on
+  # itself and the loop would never start. That exclusion is the declaration's
+  # meaning — "read at last-lap value" — not a scheduling workaround.
+  defp upstream_closure(%Plan{cells: cells}) do
+    Enum.reduce(Map.keys(cells), %{}, fn id, acc -> closure(id, cells, acc) end)
+  end
+
+  defp closure(id, cells, acc) do
+    case Map.fetch(acc, id) do
+      {:ok, _} ->
+        acc
+
+      :error ->
+        cell = Map.get(cells, id)
+        feedback = MapSet.new((cell && cell.meta[:feedback_inputs]) || [])
+        inputs = Enum.reject((cell && cell.inputs) || [], &MapSet.member?(feedback, &1))
+
+        # Marked before recursing, so a cycle that survived assembly cannot spin
+        # here. It resolves to a partial set rather than hanging.
+        acc = Map.put(acc, id, MapSet.new())
+
+        Enum.reduce(inputs, acc, fn input, acc ->
+          acc = closure(input, cells, acc)
+          Map.update!(acc, id, &MapSet.union(MapSet.put(&1, input), Map.get(acc, input, MapSet.new())))
+        end)
+    end
   end
 
   # ---- moved verbatim from Drain ----

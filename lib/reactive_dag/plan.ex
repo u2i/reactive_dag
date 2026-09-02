@@ -7,9 +7,10 @@ defmodule ReactiveDag.Plan do
     * `cells`   — %{id => Cell}
     * `parents` — %{child_id => [parent_id]} — forward propagation index
       (inverse of each cell's inputs); a change to a child enqueues its parents.
-    * `depths`  — %{id => longest path from a leaf}; a cascade walks cells in
-      ascending depth, so a cell never recomputes while an input is still
-      pending (topological order, no external scheduler).
+    * `depths`  — %{id => longest path from a leaf}. A LAYERING, for display and
+      for staging a whole-cell rerun. The cascade's actual rule is "pop a cell
+      with no pending upstream" (`Cascade.shallowest/2`); depth is one witness
+      to it, not the rule itself.
     * `tenant`  — which GRAPH this plan is, `"*"` for a host running one.
 
   ## Tenant
