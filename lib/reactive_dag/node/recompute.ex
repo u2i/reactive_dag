@@ -473,8 +473,12 @@ defmodule ReactiveDag.Node.Recompute do
   # `want` is what this pass produced. The baseline it is subtracted from is the
   # CLAIM: a whole-cell pass reconciles every key the cell has, a scoped pass
   # only the units it claimed (reconciling wider would retire live units that
-  # simply weren't visited). Destroying the row IS the retirement — the key is
+  # simply weren't visited). Destroying the row IS the retirement — that key is
   # returned as changed, so propagation carries it downstream.
+  #
+  # A claimed key with NO row is not a retirement and is not returned. It used to
+  # be, which made a scoped claim for an absent unit report a change forever —
+  # harmless once in a DAG, non-terminating around a cycle.
   #
   # A write-elsewhere node used to return early here — `[]`, unconditionally, for
   # any node supplying its own `upsert:`. So the one shape that could not be
@@ -494,24 +498,39 @@ defmodule ReactiveDag.Node.Recompute do
             []
 
           vanished ->
-            if resource = meta[:resource] do
-              ReactiveDag.Node.Payload.retire(
-                resource,
-                meta[:payload_key] || :key,
-                meta[:identity_fields],
-                vanished,
-                meta[:payload_destroy] || :destroy,
-                opts
-                |> Keyword.take([:tenant])
-                # So a retire can find its row by the unit's own columns rather
-                # than by a stored key. A node whose `row_key` names real columns
-                # then needs no `"|"`-joined key column at all.
-                |> Keyword.put(:groups, opts[:claimed_groups] || %{})
-                |> Keyword.put(:row_key_fields, retire_key_fields(meta, resource))
-              )
-            end
+            # WHAT WAS ACTUALLY RETIRED, not what was eligible to be.
+            #
+            # `retire/6` filters to the keys whose row it found and destroyed. A
+            # claimed key with no row comes back excluded, and that distinction
+            # is load-bearing: returning the whole `vanished` list reported a
+            # change for a key nothing happened to.
+            #
+            # In a DAG that is one wasted step downstream. Around a cycle it
+            # never terminates — claim k, produce nothing, "retire" the absent k,
+            # report k changed, propagate, claim k again — and the pass looks
+            # successful every time round.
+            #
+            # A node with no resource retires nothing, so it reports nothing.
+            case meta[:resource] do
+              nil ->
+                []
 
-            vanished
+              resource ->
+                ReactiveDag.Node.Payload.retire(
+                  resource,
+                  meta[:payload_key] || :key,
+                  meta[:identity_fields],
+                  vanished,
+                  meta[:payload_destroy] || :destroy,
+                  opts
+                  |> Keyword.take([:tenant])
+                  # So a retire can find its row by the unit's own columns rather
+                  # than by a stored key. A node whose `row_key` names real columns
+                  # then needs no `"|"`-joined key column at all.
+                  |> Keyword.put(:groups, opts[:claimed_groups] || %{})
+                  |> Keyword.put(:row_key_fields, retire_key_fields(meta, resource))
+                )
+            end
         end
     end
   end

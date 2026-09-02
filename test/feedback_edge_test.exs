@@ -26,8 +26,13 @@ defmodule ReactiveDag.FeedbackEdgeTest do
   ## What these tests establish
 
   Read in order, they say: the engine already has the machinery for this, EXCEPT
-  for two holes — one in change reporting, one in the runaway guard — and both
-  are the library's to close, not the host's.
+  for the runaway guard, which a loop crossing a suspending cell escapes.
+
+  A second hole — a scoped claim for a key with no row reporting itself changed
+  forever — WAS a precondition for this feature and is now closed; see
+  `retire_vanished_test.exs`, "a SCOPED claim for a key with no row reports
+  nothing". That one mattered most because an identity-keyed loop could not
+  terminate while it stood.
   """
   use ExUnit.Case, async: false
 
@@ -230,19 +235,6 @@ defmodule ReactiveDag.FeedbackEdgeTest do
   end
 
   describe "the holes a review found, stated as tests" do
-    @tag :skip
-    test "TODO retire echo: a claimed key with no row must not report as changed" do
-      # `retire_vanished/4` (`recompute.ex:455-520`) returns `vanished`
-      # unconditionally, discarding whether `Payload.retire` removed anything. In
-      # a DAG that is one wasted step. Around an identity-keyed loop a deleted
-      # slot echoes forever: claim k, produce nothing, "retire" the absent k,
-      # report k changed, go round.
-      #
-      # Not the host's fault and not fixable by monotonicity. Needs a real
-      # resource to exercise, so it belongs with the payload tests.
-      flunk("unimplemented")
-    end
-
     @tag :skip
     test "TODO a loop crossing a suspending cell escapes the runaway guard" do
       # `max_steps` (`cascade.ex:326-341`) is per-cascade. A loop through a cell

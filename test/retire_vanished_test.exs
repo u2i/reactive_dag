@@ -255,6 +255,47 @@ defmodule ReactiveDag.RetireVanishedTest do
     assert rows() == [{"travel", 100.0, 1}]
   end
 
+  test "a SCOPED claim for a key with no row reports nothing — no echo" do
+    # THE RETIRE ECHO. A scoped pass reconciles against its CLAIM
+    # (`vanished_baseline/3`), not against the node's rows — correctly, since
+    # reconciling wider would retire live units it never visited.
+    #
+    # But a claimed key the pass neither produced nor holds a row for was
+    # reported vanished UNCONDITIONALLY: `Payload.retire`'s result was discarded
+    # and the whole claim returned. In a DAG that is one wasted step downstream.
+    # Around a feedback loop with identity key mapping it never terminates —
+    # claim k, produce nothing, "retire" the absent k, report k changed,
+    # propagate, claim k again.
+    #
+    # `retire/6` already answers this precisely: it filters to the keys whose row
+    # it actually found and destroyed (`payload.ex:703-719`). Using its return
+    # value instead of throwing it away is the whole fix.
+    c = cell()
+    {:ok, _} = Recompute.recompute(c, ["*"])
+
+    # A unit that never existed, claimed explicitly.
+    {:ok, changed} = Recompute.recompute(c, ["no-such-unit"])
+
+    assert changed == [],
+           "a claim for a unit with no row retired nothing, so it changed nothing"
+  end
+
+  test "a scoped claim for a key that DID have a row still reports it" do
+    # The other side: real retirement must keep working, or reconcile stops
+    # reconciling. `travel` has a row; deleting its input leaves the unit with
+    # nothing to produce, so the claim genuinely retires it.
+    c = cell()
+    {:ok, _} = Recompute.recompute(c, ["*"])
+    assert {"travel", _, _} = List.keyfind(rows(), "travel", 0)
+
+    Expenses |> Ash.read!() |> Enum.each(&Ash.destroy!/1)
+
+    {:ok, changed} = Recompute.recompute(c, ["travel"])
+
+    assert changed == ["travel"], "a unit whose row was destroyed IS a change"
+    refute List.keyfind(rows(), "travel", 0)
+  end
+
   # This replaces "a node with a custom `upsert:` owns its own writes — the library
   # does not reconcile", which asserted that a write-elsewhere node retired
   # NOTHING: `retire_vanished/4` returned `[]` for any node supplying its own
