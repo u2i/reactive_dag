@@ -37,7 +37,10 @@ defmodule ReactiveDag.ScanRun do
   The field is kept rather than removed because a host may still populate it —
   a wrapper that runs a cascade synchronously for a test, say — and because
   removing it would break every host reading `run.report` for a nil check.
-  `drained?/1` accordingly answers `false` for anything the library produces.
+  There is no `drained?/1`: it answered "did the propagation run?", which became
+  a constant `false` the moment a poll stopped propagating. A constant that
+  reads as a question is worse than a missing function, so it is gone rather
+  than deprecated — read the cascade's own report instead.
   """
 
   alias ReactiveDag.Report
@@ -67,28 +70,11 @@ defmodule ReactiveDag.ScanRun do
   @doc """
   Did the poll find anything?
 
-  Distinct from `drained?/1`: a poll can change keys whose recompute produced
+  Distinct from propagation: a poll can change keys whose recompute produced
   nothing downstream, and a drain can run over marks another source left.
   """
   @spec changed?(t()) :: boolean()
   def changed?(%__MODULE__{changed: changed}), do: changed != []
-
-  @doc """
-  Did a drain run at all?
-
-  `false` for an unscannable source, which completes without draining. A host
-  rendering "0 passes" for that would be reporting a drain that never happened.
-  """
-  # `@deprecated`, not just `@doc deprecated:` — the latter only marks the docs,
-  # and what matters here is that a HOST compiling against this gets told. Its
-  # "did the work propagate?" check silently became a constant `false` when
-  # scans stopped propagating, and a constant that reads as a question is worse
-  # than a missing function.
-  @deprecated "A scan no longer propagates; read the cascade's own report instead"
-  @doc deprecated: "A scan no longer propagates; this is false for any run the library builds."
-  @spec drained?(t()) :: boolean()
-  def drained?(%__MODULE__{report: %Report{}}), do: true
-  def drained?(%__MODULE__{}), do: false
 
   @doc """
   Could the poll see everything it meant to?

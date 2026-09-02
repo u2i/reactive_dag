@@ -7,9 +7,10 @@ defmodule ReactiveDag.Plan do
     * `cells`   — %{id => Cell}
     * `parents` — %{child_id => [parent_id]} — forward propagation index
       (inverse of each cell's inputs); a change to a child enqueues its parents.
-    * `depths`  — %{id => longest path from a leaf}; the drain processes cells
-      in ascending depth, so a cell never recomputes while an input is still
-      dirty (topological order, no external scheduler).
+    * `depths`  — %{id => longest path from a leaf}. A LAYERING, for display and
+      for staging a whole-cell rerun. The cascade's actual rule is "pop a cell
+      with no pending upstream" (`Cascade.shallowest/2`); depth is one witness
+      to it, not the rule itself.
     * `tenant`  — which GRAPH this plan is, `"*"` for a host running one.
 
   ## Tenant
@@ -17,7 +18,7 @@ defmodule ReactiveDag.Plan do
   A host may run the same topology for several independent tenants. Each is its
   own plan with its own cells, and `tenant` is what the drain passes to the
   frontier so its claims, marks and cell selection see only that tenant's work
-  (`ReactiveDag.Frontier`).
+  (captured by the payload write that produced the change).
 
   It lives on the PLAN rather than on each cell because it is a property of the
   run, not of the declaration: the same resource lowers to the same cell in every

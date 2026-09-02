@@ -113,12 +113,6 @@ defmodule ReactiveDag.ScanRunTest do
       refute ScanRun.changed?(%ScanRun{changed: []})
     end
 
-    test "drained? distinguishes 'no drain ran' from 'a drain did nothing'" do
-      # An unscannable source completes WITHOUT draining. Rendering "0 passes"
-      # for it would report a drain that never happened.
-      refute ScanRun.drained?(%ScanRun{report: nil})
-      assert ScanRun.drained?(%ScanRun{report: report([])})
-    end
 
     test "complete? is the honest-gap predicate" do
       # A scan that could not look must never render as a scan that found

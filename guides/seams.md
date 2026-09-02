@@ -23,7 +23,7 @@ drain needs, it reads off the plan.
 |---|---|---|
 | the combinator — `reduce` / `join` / `aggregate` / `union` / `per_key` / `run` / `compute Mod` | how this cell recomputes | one entity in `reactive do` |
 | `recompute_by` (or `key_rule` on a node with no combinator) | what unit a change invalidates, hence what propagates | one declaration in `reactive do` |
-| `ref` / `context` / `over:` / `recompute_by to:` | the input edges, hence the depth order | edges in `reactive do` |
+| `ref` / `context` / `over:` / `recompute_by to:` | the input edges, hence the scheduling order | edges in `reactive do` |
 | `poll Mod` | which module fetches from outside, in the poll phase | an edge to a `ReactiveDag.Source` |
 
 The combinators are covered in [Authoring nodes](authoring-nodes.md); this guide

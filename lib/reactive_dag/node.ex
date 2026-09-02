@@ -110,11 +110,12 @@ defmodule ReactiveDag.Node do
   ## Config
 
       config :reactive_dag,
-        repo:        MyApp.Repo,   # REQUIRED (raises if unset)
-        dirty_table: "my_dirty"    # frontier table (must match your migration)
+        repo:             MyApp.Repo,        # REQUIRED (raises if unset)
+        suspension_table: "my_suspensions"   # must match your migration
 
-  `dirty_table` defaults silently, so a name that doesn't match your migration
-  yields empty results with no error — set it explicitly.
+  `suspension_table` defaults silently, so a name that doesn't match your
+  migration yields empty results with no error — `ReactiveDag.Config.validate!/0`
+  at boot is what turns that into a stop.
   """
 
   defmodule Ref do
@@ -176,6 +177,50 @@ defmodule ReactiveDag.Node do
     describe: "A by-name CONTEXT edge: read the target as settled context; its changes do NOT recompute this node.",
     schema: [
       to: [type: :atom, required: true, doc: "the target node's id (read-only context)"]
+    ]
+  }
+
+  defmodule Feedback do
+    @moduledoc """
+    A by-name FEEDBACK input edge (`feedback :scheduled_meetings`): a declared
+    back-edge, closing a loop that is real in the graph but never real in TIME.
+
+    The motivating shape: a board's minutes contain the calendar for the year
+    ahead, so future meetings are DERIVED from past meetings — and a scheduled
+    meeting IS a meeting, same table, same identity. The graph flattens time
+    away, which is the only reason that looks circular; a resolution passed at
+    meeting M can only ever schedule meetings strictly after M.
+
+    A feedback edge is a real input in every way but one: it is validated, it
+    is read at recompute, and a change on it PROPAGATES (contrast `context`,
+    which never propagates). The one thing it does not do is order this node —
+    `ReactiveDag.Graph` excludes it from depth, because the target is derived
+    from this node and counting the edge would make the node's depth depend on
+    itself. An undeclared back-edge still fails assembly with "cycle at cell".
+
+    Termination around the loop rests on honest change reporting — a recompute
+    reporting no change propagates nothing — plus two bounds the cascade
+    enforces for cells reached through a feedback edge: a per-(edge, key)
+    crossing budget within one cascade, and a durable lap count on suspensions
+    so a loop through a `suspends` cell cannot oscillate across resumption
+    jobs unobserved. See `ReactiveDag.Cascade`.
+    """
+    defstruct [:to, :__identifier__, :__spark_metadata__]
+  end
+
+  @feedback %Spark.Dsl.Entity{
+    name: :feedback,
+    target: Feedback,
+    args: [:to],
+    describe:
+      "A by-name FEEDBACK edge: a declared back-edge — a real, propagating input excluded " <>
+        "from depth ordering. The target must be (transitively) derived from this node.",
+    schema: [
+      to: [
+        type: :atom,
+        required: true,
+        doc: "the target node's id — a node transitively derived from this one"
+      ]
     ]
   }
 
@@ -371,7 +416,7 @@ defmodule ReactiveDag.Node do
         "Ash-first: declare `recompute_by` (the unit a change invalidates — it supplies " <>
         "the edge, the grouping and the claim rule), or name `over:` a node id with an " <>
         "explicit `group_by:`; omit `read:` (the library reads the over node's resource, " <>
-        "dirty-key scoped) and declare the fold in `into:` — each slot has a fn escape " <>
+        "claim-scoped) and declare the fold in `into:` — each slot has a fn escape " <>
         "hatch when the shape outgrows attributes.",
     schema: [
       over: [
@@ -387,7 +432,7 @@ defmodule ReactiveDag.Node do
         required: false,
         doc:
           "OMIT for the default: the library reads the OVER node's resource via its " <>
-            "primary read action, automatically scoped to the claimed dirty keys by " <>
+            "primary read action, automatically scoped to the claimed keys by " <>
             "filtering its payload key. An atom names a different `:read` ACTION on the " <>
             "over resource (same auto-scoping). Combinator reads are ALWAYS Ash reads — " <>
             "shape them with `query:`; a non-Ash read belongs on the `run`/`compute` rungs."
@@ -396,10 +441,10 @@ defmodule ReactiveDag.Node do
         type: {:fun, 2},
         required: false,
         doc:
-          "`(Ash.Query.t(), dirty_keys | nil -> Ash.Query.t())` — SHAPE the read (filter, " <>
+          "`(Ash.Query.t(), claimed_keys | nil -> Ash.Query.t())` — SHAPE the read (filter, " <>
             "sort, load) without leaving Ash's pipeline; the library still executes it and " <>
             "applies the dirty-key scope afterwards (scoping stays library-owned). " <>
-            "`dirty_keys` is nil for a whole-cell recompute."
+            "`claimed_keys` is nil for a whole-cell recompute."
       ],
       group_by: [
         type: {:or, [{:fun, 1}, :atom, {:list, :any}]},
@@ -560,7 +605,7 @@ defmodule ReactiveDag.Node do
         type: :atom,
         required: false,
         doc:
-          "OMIT for the default (the over node's primary read, dirty-key scoped); an " <>
+          "OMIT for the default (the over node's primary read, claim-scoped); an " <>
             "atom names a different `:read` action on it. Always an Ash read — see `query:`. " <>
             "ONE-INPUT form only."
       ],
@@ -568,7 +613,7 @@ defmodule ReactiveDag.Node do
         type: {:fun, 2},
         required: false,
         doc:
-          "`(Ash.Query.t(), dirty_keys | nil -> Ash.Query.t())` — shape the read inside " <>
+          "`(Ash.Query.t(), claimed_keys | nil -> Ash.Query.t())` — shape the read inside " <>
             "Ash's pipeline (see `reduce`); the library executes and scopes it."
       ],
       left: [
@@ -1239,6 +1284,7 @@ defmodule ReactiveDag.Node do
     entities: [
       @ref,
       @context,
+      @feedback,
       @recompute_by,
       @compose,
       @reduce,
@@ -1386,7 +1432,7 @@ defmodule ReactiveDag.Node do
         required: false,
         doc:
           "make ordinary Ash writes trigger the cascade: a `:create`/`:update`/`:destroy` " <>
-            "on THIS resource marks the written record's key dirty on this cell, so the " <>
+            "on THIS resource claims the written record's key on this cell, so the " <>
             "next drain picks it up. Without it a host must call " <>
             "`ReactiveDag.CascadeWorker.enqueue/3` at every write site, and a missed call " <>
             "is silent staleness. Wired as an `after_action` change, so the mark runs " <>
@@ -2120,6 +2166,23 @@ defmodule ReactiveDag.Node do
   defp per_key_read_spec(%{meta: %{per_key: %PerKey{}}, inputs: [over]}),
     do: %{read: nil, over: String.to_atom(over)}
 
+  # LOUD, never nil. The clause above matches exactly one input, and the
+  # fallthrough below matches EVERY cell — so a per_key cell with any other
+  # input shape used to slide through both and lose its read spec silently:
+  # the node then read nothing and reported nothing, with no error anywhere
+  # naming the cause. A per_key node reads exactly one input — the one its
+  # `recompute_by to:` stamped — and any second edge (a stray `ref`, a
+  # `feedback`) is a defect to refuse at assembly, not a shape to accommodate.
+  # The compile-time verifier refuses the declarations that produce this; the
+  # raise stands behind it for hand-built cells and future entities.
+  defp per_key_read_spec(%{meta: %{per_key: %PerKey{}}} = cell) do
+    raise ArgumentError,
+          "reactive_dag: #{cell.id} is a `per_key` node with inputs " <>
+            "#{inspect(cell.inputs)} — a per_key node reads exactly ONE input, the " <>
+            "node its `recompute_by … to:` names. Remove the other edge(s); a " <>
+            "per_key node cannot take extra `ref`/`feedback` inputs."
+  end
+
   defp per_key_read_spec(_cell), do: nil
 
   # the ONE cross-node fact behind every `:group` capability — an ordered plan
@@ -2282,7 +2345,10 @@ defmodule ReactiveDag.Node do
   defp root_node(resource, root_id) do
     legs =
       Ext.get_entities(resource, [:reactive])
-      |> Enum.filter(&(match?(%Ref{}, &1) or match?(%Context{}, &1) or match?(%Compose{}, &1)))
+      |> Enum.filter(
+        &(match?(%Ref{}, &1) or match?(%Context{}, &1) or match?(%Feedback{}, &1) or
+            match?(%Compose{}, &1))
+      )
 
     flat_refs =
       Ext.get_opt(resource, [:reactive], :depends_on, [])
@@ -2838,7 +2904,8 @@ defmodule ReactiveDag.Node do
         slices: slices(resource),
         lapse: lapses(resource),
         identity_fields: identity_fields(resource),
-        context_inputs: context_inputs(resource)
+        context_inputs: context_inputs(resource),
+        feedback_inputs: feedback_inputs(resource)
       }
       |> Enum.reject(fn {_k, v} -> is_nil(v) end)
       |> Map.new()
@@ -2882,6 +2949,17 @@ defmodule ReactiveDag.Node do
     end
   end
 
+  # STRINGS, like `context_inputs/1` above: the consumers compare against
+  # `cell.inputs`, which are strings by the time a plan exists —
+  # `Graph.compute_depth/5` (skip from depth) and `Cascade` (crossing budgets)
+  # both read this list, and an atom here would silently match nothing.
+  defp feedback_inputs(resource) do
+    case Ext.get_entities(resource, [:reactive]) |> Enum.filter(&match?(%Feedback{}, &1)) do
+      [] -> nil
+      refs -> Enum.map(refs, &to_string(&1.to))
+    end
+  end
+
   defp walk_cbs do
     %{
       classify: fn
@@ -2889,6 +2967,10 @@ defmodule ReactiveDag.Node do
         # a context edge is an input edge too — it just won't propagate (the
         # non-propagation is enforced in Graph.build_parents via context_inputs).
         %Context{} -> :ref
+        # a feedback edge is likewise an ordinary input edge here — its ONE
+        # difference (exclusion from depth ordering) is enforced in
+        # Graph.compute_depth via feedback_inputs, not in the lowering.
+        %Feedback{} -> :ref
         # a composed LEAF (leaf? true) is terminal — no leg recursion.
         %Compose{leaf?: true} -> :leaf
         %Compose{} -> :op
@@ -2909,6 +2991,9 @@ defmodule ReactiveDag.Node do
           to_string(to)
 
         %Context{to: to} ->
+          to_string(to)
+
+        %Feedback{to: to} ->
           to_string(to)
       end,
       to_cell: &build_cell/3

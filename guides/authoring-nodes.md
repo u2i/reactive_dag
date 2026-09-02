@@ -633,6 +633,7 @@ it.
 ```elixir
 ref :transcripts                  # recompute edge: a change dirties this node
 context :people                   # read-as-context: consulted, never triggers
+feedback :schedule                # declared back-edge: propagates, never orders
 depends_on [:a, :b]               # flat sugar — one ref per id
 reduce over: :x, ...              # a combinator's `over:` implies a ref
 recompute_by :x, to: :xs, ...     # ...as does `recompute_by to:`
@@ -655,10 +656,48 @@ reactive do
 end
 ```
 
-One boundary: a `context` edge still participates in depth ordering (that is
-what guarantees the target settles first), so it cannot form a cycle —
-`Graph.build` raises. It reads settled upstream context; it is not a feedback
-mechanism.
+One boundary: a `context` edge is still a scheduling input — the cascade will
+not run this node while the target is pending, which is the whole of what makes
+"settled context" true — so it cannot form a cycle —
+`Graph.build` raises. It reads settled upstream context; a cycle needs the
+third edge kind.
+
+**`feedback`** is that third kind: a DECLARED back-edge, for the loop that is
+real in the graph but never real in time. The motivating shape — a board's
+minutes contain the calendar for the year ahead, so future meetings are derived
+from past ones, and a scheduled meeting IS a meeting, same table, same
+identity:
+
+```elixir
+reactive do
+  id :meetings
+  compute MyApp.CanonicalMeeting
+  depends_on [:meeting_docs]
+  feedback :schedule             # derived FROM this node, months later
+end
+```
+
+It is `ref`'s exact complement to `context`: a `context` edge orders but never
+propagates; a `feedback` edge propagates but never orders. Everything else
+about it is an ordinary input — validated, read at recompute — and the node's
+depth comes from its forward edges alone. An UNDECLARED cycle still fails
+assembly, and a `feedback` edge that closes no real cycle is refused too: on
+an acyclic edge it would only leave the input silently unordered.
+
+Termination around the loop rests on honest change reporting — a recompute
+reporting no change propagates nothing, so an honest loop settles the first
+time it is asked about a key it already answered. Two bounds catch the loop
+that cannot converge: within one cascade a key may cross a feedback edge
+`max_feedback_passes` times (default 3) before `RunawayError` names the edge
+and the key; and across cascades — a loop through a `suspends` cell ends every
+cascade cleanly — the lap count rides on the suspension rows and
+`max_feedback_laps` (default 20) bounds the chain. Both are per-key/per-chain,
+not per-loop: a legitimate pass mints *new* keys and is never charged.
+
+`feedback` is confined, in v1, to nodes whose recompute is a `compute`/`run`:
+it is refused on `per_key`, on declarative combinators
+(`reduce`/`join`/`union`/`aggregate`), on `poll` nodes and on leaves — each
+refusal names a specific silent failure the combination would cause.
 
 ## Nested expressions: `compose`
 

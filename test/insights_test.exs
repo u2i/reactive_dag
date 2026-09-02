@@ -633,7 +633,6 @@ defmodule ReactiveDag.InsightsTest do
       assert run.detail == %{}
       # …and empty `unreachable` here is honest rather than a claim of
       # completeness: there was no poll to be incomplete.
-      assert ScanRun.drained?(run)
     end
 
     test "a scan that never drained is retained, and says so" do
@@ -649,7 +648,6 @@ defmodule ReactiveDag.InsightsTest do
       run = Insights.last_run().run
 
       assert run.report == nil
-      refute ScanRun.drained?(run)
       assert Insights.last_run().polled?
     end
   end

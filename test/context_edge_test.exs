@@ -88,11 +88,11 @@ defmodule ReactiveDag.ContextEdgeTest do
 
     # a transcript change → enhanced_minutes is dirtied (the LLM should re-run)
     assert [{"enhanced_minutes", _}] =
-             ReactiveDag.Graph.dirty_parents(p, "transcripts", ["m1"], ReactiveDag.Node.KeyRule)
+             ReactiveDag.Graph.claims_for(p, "transcripts", ["m1"], ReactiveDag.Node.KeyRule)
 
     # a PEOPLE change → NO parent dirtied (editing the people list must not re-fire
     # the expensive LLM node; it'll read current people when it next runs anyway)
-    assert [] = ReactiveDag.Graph.dirty_parents(p, "people", ["smythe"], ReactiveDag.Node.KeyRule)
+    assert [] = ReactiveDag.Graph.claims_for(p, "people", ["smythe"], ReactiveDag.Node.KeyRule)
   end
 
   test "a node with only a context edge to a leaf is never triggered by that leaf" do

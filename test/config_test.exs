@@ -16,7 +16,7 @@ defmodule ReactiveDag.ConfigTest do
 
   @keys [
     :repo,
-    :dirty_table,
+    :suspension_table,
     :insights_keep
   ]
 
@@ -90,28 +90,28 @@ defmodule ReactiveDag.ConfigTest do
 
   describe "table names" do
     test "a name that isn't a SQL identifier" do
-      Application.put_env(:reactive_dag, :dirty_table, "my dirty")
+      Application.put_env(:reactive_dag, :suspension_table, "my dirty")
 
       assert [problem] = Config.problems()
-      assert problem =~ ":dirty_table"
+      assert problem =~ ":suspension_table"
       assert problem =~ "not a valid SQL identifier"
     end
 
     test "a name starting with a digit" do
-      Application.put_env(:reactive_dag, :dirty_table, "2dirty")
+      Application.put_env(:reactive_dag, :suspension_table, "2dirty")
 
       assert [problem] = Config.problems()
-      assert problem =~ ":dirty_table"
+      assert problem =~ ":suspension_table"
     end
 
     test "a legal custom name passes — this is how a host keeps its table" do
-      Application.put_env(:reactive_dag, :dirty_table, "my_existing_dirty")
+      Application.put_env(:reactive_dag, :suspension_table, "my_existing_dirty")
 
       assert Config.problems() == []
     end
 
     test "not a string" do
-      Application.put_env(:reactive_dag, :dirty_table, :my_dirty)
+      Application.put_env(:reactive_dag, :suspension_table, :my_dirty)
 
       assert [problem] = Config.problems()
       assert problem =~ "must be a string"
@@ -139,7 +139,7 @@ defmodule ReactiveDag.ConfigTest do
   describe "validate!/0" do
     test "reports EVERY problem at once — one deploy to fix, not two" do
       Application.delete_env(:reactive_dag, :repo)
-      Application.put_env(:reactive_dag, :dirty_table, "my dirty")
+      Application.put_env(:reactive_dag, :suspension_table, "my dirty")
 
       err = assert_raise Config.Error, fn -> Config.validate!() end
       msg = Exception.message(err)
