@@ -574,6 +574,93 @@ defmodule ReactiveDag.RealPostgresSuspensionTest do
     end
   end
 
+  describe "LIMIT/OFFSET without ORDER BY, against real Postgres" do
+    @describetag :real_postgres
+
+    # The assumption `Node.Rows.page_by_status/3` rests on, asserted where it can
+    # actually fail. `rows_page_test.exs` pins the contract but cannot catch a
+    # regression: Ash's Ets data layer returns rows in primary-key order on its
+    # own, so removing the datastore sort still passes there — verified by
+    # mutation.
+    #
+    # This is not a test OF `page_by_status/3` (that would need an AshPostgres
+    # repo, migrations and a resource, none of which this library has). It is a
+    # test of the property the function exists to satisfy.
+
+    @paged "rd_test_paging"
+
+    setup do
+      if @url do
+        Postgrex.query!(Repo.conn(), "DROP TABLE IF EXISTS #{@paged}", [])
+
+        Postgrex.query!(
+          Repo.conn(),
+          "CREATE TABLE #{@paged} (k text PRIMARY KEY, n integer)",
+          []
+        )
+
+        # Inserted in an order unlike key order, and updated afterwards so
+        # Postgres has a reason to move rows in the heap — which is what makes
+        # unordered paging unstable rather than merely unspecified.
+        for i <- Enum.shuffle(1..300) do
+          Postgrex.query!(
+            Repo.conn(),
+            "INSERT INTO #{@paged} (k, n) VALUES ($1, $2)",
+            ["k#{String.pad_leading(to_string(i), 4, "0")}", i]
+          )
+        end
+
+        Postgrex.query!(Repo.conn(), "UPDATE #{@paged} SET n = n + 1 WHERE n % 3 = 0", [])
+
+        on_exit(fn ->
+          {:ok, c} = Postgrex.start_link(url_opts(@url))
+          Postgrex.query!(c, "DROP TABLE IF EXISTS #{@paged}", [])
+          GenServer.stop(c)
+        end)
+      end
+
+      :ok
+    end
+
+    defp page(order?, limit, offset) do
+      order = if order?, do: " ORDER BY k", else: ""
+
+      %{rows: rows} =
+        Postgrex.query!(
+          Repo.conn(),
+          "SELECT k FROM #{@paged}#{order} LIMIT $1 OFFSET $2",
+          [limit, offset]
+        )
+
+      List.flatten(rows)
+    end
+
+    test "WITH ORDER BY, three pages cover every row exactly once" do
+      if @url do
+        keys = page(true, 100, 0) ++ page(true, 100, 100) ++ page(true, 100, 200)
+
+        assert length(keys) == 300
+        assert keys == Enum.uniq(keys), "a row appeared on two pages"
+        assert keys == Enum.sort(keys)
+      end
+    end
+
+    test "the ORDER BY is what makes the page BOUNDARY meaningful" do
+      if @url do
+        # Not asserting that unordered paging is WRONG — Postgres may return a
+        # stable order by luck, and a test that depended on it being wrong would
+        # be flaky. What is asserted is that the ordered read is the one with a
+        # defined boundary: page 2 begins exactly where page 1 ended.
+        first = page(true, 100, 0)
+        second = page(true, 100, 100)
+
+        assert List.last(first) < List.first(second),
+               "page 2 must begin after page 1 ends"
+      end
+    end
+  end
+
+
   test "the suite says so when this file is inert" do
     unless @url do
       IO.puts(

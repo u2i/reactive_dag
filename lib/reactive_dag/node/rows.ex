@@ -191,6 +191,61 @@ defmodule ReactiveDag.Node.Rows do
   end
 
   @doc """
+  A PAGE of rows in one status — `%{rows:, total:}`.
+
+  For reading what a cell actually holds, where `all/2` reads the whole table
+  and `keys_by_status/3` returns keys without records. A cell can hold 10,000
+  rows, so the limit goes to the DATASTORE rather than being applied after
+  decoding, and the total comes from a COUNT rather than `length/1` on the
+  result — otherwise "showing 50 of 50" is all a caller could ever say.
+
+  Sorted by key, so paging is stable and a row does not move between pages.
+
+  ## Options
+
+    * `:limit` — rows to return, default 50
+    * `:offset` — rows to skip, default 0
+    * `:tenant` — required for a multitenant resource; an unscoped read comes
+      back EMPTY rather than raising, which reads as "holds nothing"
+  """
+  @spec page_by_status(Cell.t() | source(), [String.t() | nil], keyword()) ::
+          %{rows: [row()], total: non_neg_integer()}
+  def page_by_status(cell_or_source, statuses, opts \\ [])
+
+  def page_by_status(%Cell{meta: meta}, statuses, opts),
+    do: page_by_status(meta, statuses, opts)
+
+  def page_by_status(%{} = source, statuses, opts) do
+    case queryable(source) do
+      nil ->
+        %{rows: [], total: 0}
+
+      resource ->
+        limit = Keyword.get(opts, :limit, 50)
+        offset = Keyword.get(opts, :offset, 0)
+        filtered = filter_statuses(resource, statuses)
+
+        # Sort at the DATASTORE, on the fields the key is built from. Sorting
+        # the decoded page instead orders each page internally while leaving the
+        # page BOUNDARY arbitrary, so row 51 could reappear on page 2 — the
+        # bug that makes paging quietly lose rows.
+        #
+        # The key itself cannot be sorted on: it is derived in Elixir from
+        # `row_key`, and no datastore knows that join. Its fields are the same
+        # order, which is what matters.
+        rows =
+          filtered
+          |> sort_by_key_fields(source)
+          |> Ash.Query.limit(limit)
+          |> Ash.Query.offset(offset)
+          |> Ash.read!(query_opts(opts))
+          |> Enum.map(&to_row(&1, keyer(source)))
+
+        %{rows: rows, total: Ash.count!(filtered, query_opts(opts))}
+    end
+  end
+
+  @doc """
   The keys whose status is in `statuses`, at most `limit` of them (sorted, so a
   sample is stable between calls rather than reshuffling on every render).
   """
@@ -752,6 +807,24 @@ defmodule ReactiveDag.Node.Rows do
       resource ->
         if Ash.Resource.Info.multitenancy_strategy(resource) == :attribute,
           do: Ash.Resource.Info.multitenancy_attribute(resource)
+    end
+  end
+
+  # Order by whatever `row_key` names, so the datastore's order matches the key
+  # the reader sees. Falls back to the payload key for a `:uuid`-keyed node, and
+  # to nothing for a source that declares neither — an unsorted page is worse
+  # than a failed one only if it is silent, and `page_by_status/3` says what it
+  # is showing.
+  defp sort_by_key_fields(query, source) do
+    case source[:row_key] do
+      fields when is_list(fields) and fields != [] ->
+        Ash.Query.sort(query, Enum.map(fields, &{&1, :asc}))
+
+      :uuid ->
+        Ash.Query.sort(query, [{source[:payload_key] || :id, :asc}])
+
+      _ ->
+        query
     end
   end
 
