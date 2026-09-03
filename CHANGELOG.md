@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.17.0-rc.67](https://github.com/u2i/reactive_dag/compare/v0.17.0-rc.66...v0.17.0-rc.67) (2026-09-03)
+
+
+### Bug Fixes
+
+* page_by_status/3 on a node with no status column ([#249](https://github.com/u2i/reactive_dag/issues/249)) ([cc876e6](https://github.com/u2i/reactive_dag/commit/cc876e6946e33747c80969b4e45a8f4c35456fa7))
+
 ## [0.17.0-rc.66](https://github.com/u2i/reactive_dag/compare/v0.17.0-rc.65...v0.17.0-rc.66) (2026-09-03)
 
 
