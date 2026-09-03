@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.17.0-rc.66](https://github.com/u2i/reactive_dag/compare/v0.17.0-rc.65...v0.17.0-rc.66) (2026-09-03)
+
+
+### Features
+
+* Rows.page_by_status/3 — a bounded page of what a cell holds ([#247](https://github.com/u2i/reactive_dag/issues/247)) ([a06a925](https://github.com/u2i/reactive_dag/commit/a06a92544f7f5ae4b7d3877f2c1ce8492c12a6a6))
+
 ## [0.17.0-rc.65](https://github.com/u2i/reactive_dag/compare/v0.17.0-rc.64...v0.17.0-rc.65) (2026-09-02)
 
 
