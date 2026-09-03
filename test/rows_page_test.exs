@@ -47,8 +47,40 @@ defmodule ReactiveDag.RowsPageTest do
     end
   end
 
+  defmodule Totals do
+    use Ash.Resource, domain: Domain, data_layer: Ash.DataLayer.Ets, extensions: [ReactiveDag.Node]
+
+    ets do
+    end
+
+    attributes do
+      attribute :key, :string, primary_key?: true, allow_nil?: false, public?: true
+      attribute :total, :integer, public?: true
+    end
+
+    actions do
+      defaults [:read, :destroy]
+
+      create :upsert do
+        upsert?(true)
+        accept([:key, :total])
+      end
+    end
+
+    reactive do
+      id(:totals)
+      leaf?(true)
+      row_key([:key])
+    end
+  end
+
   defp cell do
     [c] = ReactiveDag.Node.cells(Docs)
+    c
+  end
+
+  defp totals_cell do
+    [c] = ReactiveDag.Node.cells(Totals)
     c
   end
 
@@ -131,4 +163,35 @@ defmodule ReactiveDag.RowsPageTest do
     # A `compose` leg has no resource; that is a shape, not a fault.
     assert Rows.page_by_status(%{}, ["present"]) == %{rows: [], total: 0}
   end
+  describe "a node with no status column" do
+    setup do
+      for i <- 1..5 do
+        Totals
+        |> Ash.Changeset.for_create(:upsert, %{key: "t#{i}", total: i})
+        |> Ash.create!()
+      end
+
+      on_exit(fn -> Ash.DataLayer.Ets.stop(Totals) end)
+      :ok
+    end
+
+    test "holds every row under nil, matching status_histogram" do
+      # Filtering on a column the resource does not have raises "Invalid
+      # reference status" — which reached the dashboard as "could not read this
+      # node's rows" rather than as the honest "these are all of them".
+      page = Rows.page_by_status(totals_cell(), [nil])
+
+      assert page.total == 5
+      assert length(page.rows) == 5
+      assert Enum.all?(page.rows, &is_nil(&1.status))
+    end
+
+    test "asking for a named status returns nothing, not an error" do
+      # There is no such status here, and an empty page says that. Raising
+      # would make a node without the column indistinguishable from one the
+      # reader has no permission to see.
+      assert Rows.page_by_status(totals_cell(), ["present"]) == %{rows: [], total: 0}
+    end
+  end
+
 end

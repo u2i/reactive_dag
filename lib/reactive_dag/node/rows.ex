@@ -223,7 +223,18 @@ defmodule ReactiveDag.Node.Rows do
       resource ->
         limit = Keyword.get(opts, :limit, 50)
         offset = Keyword.get(opts, :offset, 0)
-        filtered = filter_statuses(resource, statuses)
+
+        # A node with NO status column holds every row under `nil` — that is
+        # what `status_histogram/2` reports for it, and this has to agree.
+        # Filtering on a column the resource does not have raises "Invalid
+        # reference status", which reaches a display path as an unreadable node
+        # rather than as the honest "these are all of them".
+        filtered =
+          if Ash.Resource.Info.attribute(resource, :status) do
+            filter_statuses(resource, statuses)
+          else
+            if nil in statuses, do: resource, else: nil
+          end
 
         # Sort at the DATASTORE, on the fields the key is built from. Sorting
         # the decoded page instead orders each page internally while leaving the
@@ -233,16 +244,24 @@ defmodule ReactiveDag.Node.Rows do
         # The key itself cannot be sorted on: it is derived in Elixir from
         # `row_key`, and no datastore knows that join. Its fields are the same
         # order, which is what matters.
-        rows =
-          filtered
-          |> sort_by_key_fields(source)
-          |> Ash.Query.limit(limit)
-          |> Ash.Query.offset(offset)
-          |> Ash.read!(query_opts(opts))
-          |> Enum.map(&to_row(&1, keyer(source)))
-
-        %{rows: rows, total: Ash.count!(filtered, query_opts(opts))}
+        page_of(filtered, source, limit, offset, opts)
     end
+  end
+
+  # `nil` here means "this node has no status column and the caller asked for a
+  # status other than nil" — an empty page, not an error.
+  defp page_of(nil, _source, _limit, _offset, _opts), do: %{rows: [], total: 0}
+
+  defp page_of(filtered, source, limit, offset, opts) do
+    rows =
+      filtered
+      |> sort_by_key_fields(source)
+      |> Ash.Query.limit(limit)
+      |> Ash.Query.offset(offset)
+      |> Ash.read!(query_opts(opts))
+      |> Enum.map(&to_row(&1, keyer(source)))
+
+    %{rows: rows, total: Ash.count!(filtered, query_opts(opts))}
   end
 
   @doc """
