@@ -50,6 +50,43 @@ defmodule ReactiveDag.Run do
 
   @statuses ~w(queued running done failed suspended blocked)
 
+  @context_key {__MODULE__, :current}
+
+  @doc """
+  The run this process is currently executing, or nil.
+
+  PROCESS-LOCAL because that is the only place it can live. A child job is
+  enqueued from deep inside the parent's work — `Source` enqueuing a cascade,
+  `Cascade` scheduling a resumption — and threading a run id down through every
+  call between would mean changing signatures the whole way. The parent is a
+  fact about the PROCESS, not about any one call in it.
+
+  Set by `executing/3` and read by `queued/2`, so a job enqueued while another
+  runs names it as parent without either knowing about the other.
+  """
+  @spec current() :: String.t() | nil
+  def current, do: Process.get(@context_key)
+
+  @doc """
+  Mark `id` as running, and make it the parent of anything this process enqueues.
+
+  The bracket around a job's work: everything `queued/2` sees while this is set
+  becomes a child of `id`. Restores the previous value afterwards rather than
+  clearing it, so a nested call cannot orphan its caller's context.
+  """
+  @spec executing(String.t() | nil, keyword(), (-> result)) :: result when result: term()
+  def executing(id, opts \\ [], fun) do
+    previous = Process.get(@context_key)
+    Process.put(@context_key, id)
+    started(id, opts)
+
+    try do
+      fun.()
+    after
+      if previous, do: Process.put(@context_key, previous), else: Process.delete(@context_key)
+    end
+  end
+
   @doc """
   Record that a job was CREATED, and return the new row's id.
 
@@ -80,7 +117,7 @@ defmodule ReactiveDag.Run do
           tenant(opts),
           to_string(kind),
           opts[:cell] && to_string(opts[:cell]),
-          opts[:parent],
+          Keyword.get(opts, :parent, current()),
           opts[:oban_job_id],
           encode(opts[:detail] || %{})
         ]

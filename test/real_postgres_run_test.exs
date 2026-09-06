@@ -166,6 +166,66 @@ defmodule ReactiveDag.RealPostgresRunTest do
     end
   end
 
+  describe "the ambient parent" do
+    test "a job enqueued while another runs becomes its child" do
+      if @url do
+        # THE MECHANISM THE STACK RESTS ON. A cascade is enqueued from deep
+        # inside a scan's work — `Source.enqueue_cascade/3` — and threading a
+        # run id down through every call between would mean changing signatures
+        # the whole way. The parent is a fact about the PROCESS.
+        parent = Run.queued(:scan, tenant: "t", cell: "agenda_docs")
+
+        child =
+          Run.executing(parent, [], fn ->
+            assert Run.current() == parent
+            Run.queued(:cascade, tenant: "t", cell: "agenda_items")
+          end)
+
+        assert %{^parent => [%{id: ^child, kind: "cascade"}]} = Run.children([parent], tenant: "t")
+      end
+    end
+
+    test "the context is restored, so a nested job cannot orphan its caller" do
+      if @url do
+        outer = Run.queued(:scan, tenant: "t")
+        inner = Run.queued(:cascade, tenant: "t")
+
+        Run.executing(outer, [], fn ->
+          Run.executing(inner, [], fn -> :ok end)
+
+          # Still the outer one: a nested bracket that cleared rather than
+          # restored would send every later sibling to the top level.
+          assert Run.current() == outer
+        end)
+
+        assert Run.current() == nil, "the bracket must not leak out of the job"
+      end
+    end
+
+    test "an explicit parent beats the ambient one" do
+      if @url do
+        ambient = Run.queued(:scan, tenant: "t")
+        stated = Run.queued(:scan, tenant: "t")
+
+        child =
+          Run.executing(ambient, [], fn ->
+            Run.queued(:cascade, tenant: "t", parent: stated)
+          end)
+
+        assert %{^stated => [%{id: ^child}]} = Run.children([stated], tenant: "t")
+        assert Run.children([ambient], tenant: "t") == %{}
+      end
+    end
+
+    test "a nil run still brackets, and its children are top-level" do
+      if @url do
+        # `queued/2` returns nil when the log is unavailable. The bracket must
+        # still run the work — the engine does not depend on this table.
+        assert Run.executing(nil, [], fn -> Run.current() end) == nil
+      end
+    end
+  end
+
   describe "retention" do
     test "prune removes finished rows and keeps outstanding ones" do
       if @url do
