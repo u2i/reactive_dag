@@ -226,6 +226,56 @@ defmodule ReactiveDag.RealPostgresRunTest do
     end
   end
 
+  describe "what the workers record" do
+    # These assert the STATUS VOCABULARY the workers use, because the choice of
+    # status is the whole editorial content of this feature: a page that renders
+    # "stopped on purpose" and "crashed" alike teaches its reader to ignore both.
+    test "stopped-on-purpose is not failure" do
+      if @url do
+        for {status, note} <- [
+              {:suspended, "a cascade with suspensions; each point has its own row"},
+              {:blocked, "waiting on a person — an unreachable source, a missing scanner"},
+              {:done, "finished, whether or not anything changed"},
+              {:failed, "raised"}
+            ] do
+          id = Run.queued(:cascade, tenant: "t", detail: %{"note" => note})
+          Run.finished(id, status, [])
+
+          assert [%{status: recorded}] = Run.recent(tenant: "t", limit: 1)
+          assert recorded == to_string(status)
+
+          Repo.query!("DELETE FROM #{@table}")
+        end
+      end
+    end
+
+    test "outstanding work is exactly what is not finished" do
+      if @url do
+        # THE STATUS HALF of the page, and the reason for the partial index.
+        # `blocked` counts as outstanding: it is work that has not happened and
+        # will not happen without someone. `failed` does not — Oban either
+        # retries it or it is over.
+        queued = Run.queued(:cascade, tenant: "t")
+
+        running = Run.queued(:cascade, tenant: "t")
+        Run.started(running, [])
+
+        blocked = Run.queued(:scan, tenant: "t")
+        Run.finished(blocked, :blocked, [])
+
+        done = Run.queued(:cascade, tenant: "t")
+        Run.finished(done, :done, [])
+
+        outstanding =
+          Run.recent(tenant: "t", status: ~w(queued running blocked))
+          |> Enum.map(& &1.id)
+          |> Enum.sort()
+
+        assert outstanding == Enum.sort([queued, running, blocked])
+      end
+    end
+  end
+
   describe "retention" do
     test "prune removes finished rows and keeps outstanding ones" do
       if @url do

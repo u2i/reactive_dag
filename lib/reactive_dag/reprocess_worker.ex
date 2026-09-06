@@ -79,11 +79,37 @@ if Code.ensure_loaded?(Oban.Worker) do
       plan = Job.plan(args, __MODULE__)
       reason = Map.get(args, "reason", "reprocess")
 
+      # Host-enqueued, like a scan, so a host that minted its own run puts it in
+      # the args and gets one row for the whole thing. `reason` rides into the
+      # detail because it is the entire distinction between this and a scan —
+      # "the code moved, not the data" — and it is what an operator wrote down.
+      run_id =
+        Map.get(args, "run_id") ||
+          ReactiveDag.Run.queued(:reprocess,
+            tenant: plan.tenant,
+            cell: cell_id,
+            detail: %{"reason" => reason}
+          )
+
+      ReactiveDag.Run.executing(run_id, [], fn ->
+        do_perform(plan, cell_id, args, reason, run_id)
+      end)
+    end
+
+    defp do_perform(plan, cell_id, args, reason, run_id) do
       case plan.cells[cell_id] do
         nil ->
           # Not a failure to retry: the graph will not grow this cell on the next
           # attempt either.
           Logger.warning("reactive_dag: cannot reprocess #{cell_id} — no such cell in this plan")
+
+          # BLOCKED, not done: an operator asked for work that cannot happen,
+          # and nothing will revisit it. Rendering it as success would report a
+          # reprocess that never ran.
+          ReactiveDag.Run.finished(run_id, :blocked,
+            detail: %{"error" => "no such cell in this plan"}
+          )
+
           :ok
 
         cell ->
@@ -126,6 +152,23 @@ if Code.ensure_loaded?(Oban.Worker) do
               passes: report.passes
             },
             %{cell: cell_id, args: args, reason: reason, report: report}
+          )
+
+          # Same rule as a cascade: suspensions mean it STOPPED, not finished,
+          # and each has its own resumption row. A reprocess of an expensive
+          # suspending cell is the common case here — that is exactly what the
+          # per-key fan-out exists for — so getting this wrong would mark the
+          # most interesting runs as done before the work had happened.
+          ReactiveDag.Run.finished(
+            run_id,
+            if(report.suspended == [], do: :done, else: :suspended),
+            duration_us: System.monotonic_time(:microsecond) - t0,
+            detail: %{
+              "claimed" => claimed_count(keys),
+              "invalidated" => length(invalidated),
+              "changed" => ReactiveDag.Report.changed_total(report),
+              "suspended" => length(report.suspended)
+            }
           )
 
           :ok
