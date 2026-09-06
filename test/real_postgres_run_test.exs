@@ -84,6 +84,12 @@ defmodule ReactiveDag.RealPostgresRunTest do
 
   setup do
     if @url, do: Repo.query!("DELETE FROM #{@table}")
+
+    # `available?/0` caches per PROCESS, and ExUnit runs a test module's tests
+    # in one process — so the missing-table test below caches `false` and every
+    # test after it in that process would silently write nothing. Cleared here
+    # rather than in that one test, so the order cannot matter.
+    ReactiveDag.Run.forget_availability()
     :ok
   end
 
@@ -300,6 +306,63 @@ defmodule ReactiveDag.RealPostgresRunTest do
     end
   end
 
+  describe "a missing table must not poison the caller's transaction" do
+    test "a write inside a transaction leaves it usable" do
+      if @url do
+        # THE BUG THIS EXISTS FOR. These calls run inside the caller's
+        # transaction — a cascade's, or an Ash action's. A statement that FAILS
+        # marks the whole Postgres transaction aborted, and rescuing in Elixir
+        # does not un-abort it: every later statement then errors and the caller
+        # rolls back. A missing run table took down the work it was only meant
+        # to describe.
+        #
+        # Measured in cascade: `:correct` / `:uncorrect` failed with
+        # `** (DBConnection.ConnectionError) transaction rolling back` on a
+        # database that had simply not run `runs_up/1` yet.
+        #
+        # A savepoint does NOT fix it — Ecto's nested `transaction/2` issues no
+        # real Postgres SAVEPOINT, so the failed statement still poisons the
+        # outer transaction. The answer is not to ATTEMPT a write that cannot
+        # succeed, which is what `available?/0` decides.
+        prev = Application.get_env(:reactive_dag, :runs_table)
+        Application.put_env(:reactive_dag, :runs_table, "rd_test_absent_table")
+        ReactiveDag.Run.forget_availability()
+
+        # INSIDE A TRANSACTION, which is the whole point: the poisoning only
+        # happens when there is one to poison. An earlier version of this test
+        # called `queued/2` on a bare connection and passed with the guard
+        # REMOVED — it proved nothing.
+        Repo.query!("BEGIN", [])
+
+        assert Run.queued(:cascade, tenant: "t") == nil
+
+        # The transaction must still be usable. Without the guard, the failed
+        # INSERT marks it aborted and this raises `current transaction is
+        # aborted, commands ignored until end of transaction block`.
+        assert %{rows: [[1]]} = Repo.query!("SELECT 1", [])
+
+        Repo.query!("COMMIT", [])
+
+        Application.put_env(:reactive_dag, :runs_table, prev)
+        ReactiveDag.Run.forget_availability()
+      end
+    end
+
+    test "the probe uses query!/2 — the only repo function the library requires" do
+      if @url do
+        # `Suspension` uses `query!/2`, and it was the ONLY repo function this
+        # library needed. A probe asking for `query/2` raised on a host shim
+        # that legitimately exports just the bang version, and answered "no
+        # table" against a database that had one — silently logging nothing.
+        refute function_exported?(Repo, :query, 2),
+               "this shim deliberately exports only query!/2, as a host may"
+
+        ReactiveDag.Run.forget_availability()
+        assert Run.available?(), "the probe must work against a query!-only repo"
+      end
+    end
+  end
+
   describe "an observation must not break what it observes" do
     test "a missing table costs a gap in the log, not an exception" do
       if @url do
@@ -317,6 +380,7 @@ defmodule ReactiveDag.RealPostgresRunTest do
         assert Run.prune(DateTime.utc_now(), tenant: "t") == 0
 
         Application.put_env(:reactive_dag, :runs_table, prev)
+        ReactiveDag.Run.forget_availability()
       end
     end
 

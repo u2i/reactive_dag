@@ -51,6 +51,7 @@ defmodule ReactiveDag.Run do
   @statuses ~w(queued running done failed suspended blocked)
 
   @context_key {__MODULE__, :current}
+  @available_key {__MODULE__, :available}
 
   @doc """
   The run this process is currently executing, or nil.
@@ -323,24 +324,99 @@ defmodule ReactiveDag.Run do
 
   # AN OBSERVATION MUST NOT BREAK THE THING IT OBSERVES.
   #
-  # No table yet (a host that has not run `Migration.runs_up/1`), no repo
-  # configured, a connection lost mid-cascade — none of those are reasons to
-  # fail the work this row describes. The engine reads nothing from this table,
-  # so a missing row costs a gap in the log and nothing else.
+  # These calls run inside the CALLER's transaction — a cascade's, or an Ash
+  # action's — and that makes a rescue insufficient on its own. A statement that
+  # fails marks the whole Postgres transaction aborted; rescuing in Elixir does
+  # not un-abort it, so every later statement errors and the caller rolls back.
+  # A missing run table then takes down the work it was only supposed to
+  # describe.
   #
-  # Deliberately unlike `Suspension`, where a failed write loses the record that
-  # work is outstanding and must therefore take the transaction down with it.
-  # The table name is resolved by the CALLER and passed in, so `table/0`'s
-  # ArgumentError is raised outside this rescue. A config value that is not a
-  # plain identifier is a deployment error a host must see: swallowing it would
-  # leave the log permanently and silently empty, which is the one failure mode
-  # this table exists to remove.
+  # Measured: cascade's `:correct` / `:uncorrect` actions failed with
+  # `** (DBConnection.ConnectionError) transaction rolling back` on a database
+  # that simply had not run `runs_up/1` yet.
+  #
+  # A savepoint does NOT fix this, which was the first thing tried. Ecto's
+  # nested `transaction/2` does not issue a real Postgres `SAVEPOINT`, so a
+  # failed statement inside one still poisons the outer transaction — verified
+  # directly rather than assumed. `Suspension.savepoint/1` works in the cascade
+  # for a different reason, stated in its own docs: it isolates "a failure that
+  # arrives as a VALUE", and an op returning `{:error, _}` never executed a
+  # failing statement in the first place.
+  #
+  # So the only reliable answer is not to ATTEMPT a write that cannot succeed.
+  # `available?/0` asks once per process and caches the answer, and every call
+  # short-circuits when the table is absent. The rescue below stays for what it
+  # can actually catch — no repo configured, a pool checkout timeout, a
+  # connection already lost — none of which involve issuing bad SQL.
   defp safely(fun, default \\ nil) do
-    fun.()
+    if available?() do
+      fun.()
+    else
+      default
+    end
   rescue
     e ->
       Logger.debug(fn -> "reactive_dag: run log unavailable (#{Exception.message(e)})" end)
       default
+  end
+
+  @doc """
+  Is the run table present?
+
+  Asked ONCE per process and cached, because the answer cannot change under a
+  running node — a table is created by a migration, and a release restarts.
+  Caching matters: this is checked before every write, and a query per write
+  would make the log more expensive than the work it records.
+
+  `to_regclass` returns NULL rather than raising for an absent table, which is
+  the whole reason it is used here: asking any other way would be the very
+  failed statement this exists to avoid.
+  """
+  @spec available?() :: boolean()
+  def available? do
+    case :persistent_term.get(@available_key, :unknown) do
+      :unknown ->
+        answer = probe()
+        # NODE-WIDE, not per-process. A cascade runs in a fresh process per job,
+        # so a process-local cache would re-probe on every job — a query per
+        # write, which is what caching was supposed to avoid. `:persistent_term`
+        # is right for a value written once and read constantly.
+        :persistent_term.put(@available_key, answer)
+        answer
+
+      cached ->
+        cached
+    end
+  end
+
+  @doc """
+  Forget whether the table exists, so the next call re-probes.
+
+  For a host that migrates a running node, and for tests that create or drop the
+  table between cases.
+  """
+  @spec forget_availability() :: :ok
+  def forget_availability do
+    :persistent_term.erase(@available_key)
+    :ok
+  end
+
+  # `query!/2`, NOT `query/2`. The library's contract with a host repo is
+  # `query!/2` — it is what `Suspension` uses, and the only function this
+  # library required before this one. A host shim exporting just that is
+  # legitimate, and asking for `query/2` made every probe raise into the rescue
+  # below and answer "no table" against a database that had one.
+  #
+  # `to_regclass` returns NULL rather than raising for an absent table, which is
+  # why it is safe to call at all: any other way of asking would be the very
+  # failed statement this exists to avoid.
+  defp probe do
+    case repo().query!("SELECT to_regclass($1)", [table()]) do
+      %{rows: [[nil]]} -> false
+      _ -> true
+    end
+  rescue
+    _ -> false
   end
 
   defp encode(map) when is_map(map), do: map
