@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.17.0-rc.68](https://github.com/u2i/reactive_dag/compare/v0.17.0-rc.67...v0.17.0-rc.68) (2026-09-06)
+
+
+### Features
+
+* a persistent run log — status and history, one row per job ([#252](https://github.com/u2i/reactive_dag/issues/252)) ([b4a85e0](https://github.com/u2i/reactive_dag/commit/b4a85e010838e06ec513c240d1a1872cb50c6251))
+
 ## [0.17.0-rc.67](https://github.com/u2i/reactive_dag/compare/v0.17.0-rc.66...v0.17.0-rc.67) (2026-09-03)
 
 
