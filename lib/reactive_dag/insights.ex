@@ -454,8 +454,32 @@ defmodule ReactiveDag.Insights do
   @table :reactive_dag_insights_runs
   defp table, do: @table
 
-  defp stamp(run, polled?, tenant),
-    do: %{run: run, at: DateTime.utc_now(), polled?: polled?, tenant: tenant}
+  # `run_id` ties this entry to its row in the run table, so a consumer holding
+  # both can tell they describe ONE job rather than two.
+  #
+  # Without it they cannot: an ETS entry and a table row for the same cascade
+  # have no field in common that is unique — same tenant, same cell, timestamps
+  # microseconds apart — so a page reading both renders every run twice, once
+  # with a step tree and once without. `Run.current/0` is set for the duration
+  # of the job, which is exactly when `record/2` is called.
+  defp stamp(run, polled?, tenant) do
+    %{
+      run: run,
+      at: DateTime.utc_now(),
+      polled?: polled?,
+      tenant: tenant,
+      run_id: safe_run_id()
+    }
+  end
+
+  # The run log is optional — a host may not have the table, or the module may
+  # be absent in a trimmed release. An entry without an id is the old shape and
+  # still renders; it simply cannot be correlated.
+  defp safe_run_id do
+    ReactiveDag.Run.current()
+  rescue
+    _ -> nil
+  end
 
   # `get_env` with an explicitly-stored nil returns nil, not the default (a test
   # or a release config that clears the key does exactly that), so fall back on

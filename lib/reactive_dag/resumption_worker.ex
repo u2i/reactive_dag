@@ -97,6 +97,19 @@ if Code.ensure_loaded?(Oban.Worker) do
         "row_uuid" => point.row_uuid
       }
       |> then(&if opts[:plan_mfa], do: Map.put(&1, "plan_mfa", opts[:plan_mfa]), else: &1)
+      # The run row, minted before the insert so its id rides in the args. The
+      # cascade that suspended is `Run.current/0` here — this is scheduled from
+      # inside it — so the resumption stacks under the cascade that caused it.
+      |> then(fn args ->
+        run =
+          ReactiveDag.Run.queued(:resumption,
+            tenant: point.tenant,
+            cell: point.waiting,
+            detail: %{"row_uuid" => point.row_uuid}
+          )
+
+        if run, do: Map.put(args, "run_id", run), else: args
+      end)
       |> __MODULE__.new(Keyword.take(opts, [:schedule_in, :priority, :queue]))
       |> Oban.insert()
     end
@@ -112,6 +125,14 @@ if Code.ensure_loaded?(Oban.Worker) do
         row_uuid: Map.fetch!(args, "row_uuid")
       }
 
+      run_id = Map.get(args, "run_id")
+
+      ReactiveDag.Run.executing(run_id, [], fn ->
+        perform_resumption(plan, point, args, run_id)
+      end)
+    end
+
+    defp perform_resumption(plan, point, args, run_id) do
       case Suspension.at(point) do
         [] ->
           # ORDINARY, not an error: the work was done and discharged by another
@@ -122,14 +143,16 @@ if Code.ensure_loaded?(Oban.Worker) do
               "this resumption is a duplicate"
           end)
 
+          # DONE, not failed: the work happened, in another run of this job.
+          ReactiveDag.Run.finished(run_id, :done, detail: %{"duplicate" => true})
           :ok
 
         suspensions ->
-          resume(plan, point, suspensions, args)
+          resume(plan, point, suspensions, args, run_id)
       end
     end
 
-    defp resume(plan, point, suspensions, args) do
+    defp resume(plan, point, suspensions, args, run_id) do
       ids = Enum.map(suspensions, & &1.id)
       cell_id = cell_for(plan, point.waiting)
 
@@ -144,14 +167,19 @@ if Code.ensure_loaded?(Oban.Worker) do
           )
 
           Suspension.transaction(fn -> Suspension.discharge(ids) end)
+
+          ReactiveDag.Run.finished(run_id, :failed,
+            detail: %{"error" => "#{point.waiting} is not in the plan"}
+          )
+
           :ok
 
         true ->
-          do_resume(plan, point, cell_id, suspensions, ids, args)
+          do_resume(plan, point, cell_id, suspensions, ids, args, run_id)
       end
     end
 
-    defp do_resume(plan, point, cell_id, suspensions, ids, args) do
+    defp do_resume(plan, point, cell_id, suspensions, ids, args, run_id) do
       reasons = suspensions |> Enum.map(& &1.reason) |> Enum.uniq()
 
       t0 = System.monotonic_time(:microsecond)
@@ -197,10 +225,17 @@ if Code.ensure_loaded?(Oban.Worker) do
               "#{length(ids)} suspension(s) kept for the retry"
           )
 
+          ReactiveDag.Run.finished(run_id, :failed, detail: %{"error" => brief(reason)})
+
           {:error, reason}
 
-        {:ok, _report} ->
+        {:ok, report} ->
           Suspension.transaction(fn -> Suspension.discharge(ids) end)
+
+          ReactiveDag.Run.finished(run_id, resumption_status(report),
+            duration_us: System.monotonic_time(:microsecond) - t0,
+            detail: %{"discharged" => length(ids), "passes" => report.passes}
+          )
 
           :telemetry.execute(
             [:reactive_dag, :cascade, :resumption_done],
@@ -306,6 +341,19 @@ if Code.ensure_loaded?(Oban.Worker) do
         nil -> []
         mfa -> [plan_mfa: mfa]
       end
+    end
+
+    # A resumption that stops AGAIN is suspended, not done — one slow cell
+    # feeding another. It schedules its own next resumption, which gets its own
+    # row, so the stack shows the chain rather than one row claiming all of it.
+    defp resumption_status(%{suspended: [_ | _]}), do: :suspended
+    defp resumption_status(_report), do: :done
+
+    # BOUNDED. The reason that surfaced this carried an entire LLM extraction
+    # once — see `Cascade`'s own `@brief_limit` for the same reasoning. This
+    # column is read on every page load.
+    defp brief(reason) do
+      reason |> inspect() |> String.slice(0, 400)
     end
   end
 end

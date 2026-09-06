@@ -160,6 +160,19 @@ if Code.ensure_loaded?(Oban.Worker) do
       plan = ReactiveDag.Job.plan(args, __MODULE__)
       opts = poll_opts(args)
 
+      # `cell: nil` — a sweep has no single one, which is why the column is
+      # nullable. Recorded HERE rather than at the enqueue because a sweep's
+      # args are built by the host (a cron entry, a hand insert), so there is no
+      # library call site to hook; the row therefore appears when the job starts
+      # rather than when it was created. That is a real difference from the two
+      # workers the library enqueues itself, and `enqueued_at` says so honestly:
+      # it is the moment we first knew, not a queue wait we can see.
+      run_id =
+        ReactiveDag.Run.queued(:scan,
+          tenant: plan.tenant,
+          detail: %{"sweep" => true}
+        )
+
       :telemetry.execute(
         [:reactive_dag, :scan, :start],
         %{system_time: System.system_time()},
@@ -180,18 +193,27 @@ if Code.ensure_loaded?(Oban.Worker) do
       # two different tenants polling their own upstreams is not that, and one
       # global lock would make them queue behind each other — the opposite of
       # why a graph is per tenant.
-      case ReactiveDag.Lock.with_lock(fn -> sweep(plan, opts, args) end,
-             scope: lock_scope(plan)
-           ) do
-        {:ok, result} ->
-          result
+      ReactiveDag.Run.executing(run_id, [], fn ->
+        case ReactiveDag.Lock.with_lock(fn -> sweep(plan, opts, args) end,
+               scope: lock_scope(plan)
+             ) do
+          {:ok, result} ->
+            ReactiveDag.Run.finished(run_id, :done, [])
+            result
 
-        :busy ->
-          # not a failure: another node is running this sweep, and the frontier
-          # is a set — nothing is lost by standing down
-          Logger.info("reactive_dag: sweep skipped, another node holds the lock")
-          :ok
-      end
+          :busy ->
+            # not a failure: another node is running this sweep, and the frontier
+            # is a set — nothing is lost by standing down
+            Logger.info("reactive_dag: sweep skipped, another node holds the lock")
+
+            # DONE, and said so: a sweep that stood down did nothing, which is
+            # different from one that failed and different again from one that
+            # found nothing. A page rendering it as an error teaches its reader
+            # to ignore errors.
+            ReactiveDag.Run.finished(run_id, :done, detail: %{"skipped" => "lock held"})
+            :ok
+        end
+      end)
     end
 
     def perform(%Oban.Job{args: args}) do
@@ -200,6 +222,14 @@ if Code.ensure_loaded?(Oban.Worker) do
       opts = poll_opts(args)
 
       t0 = System.monotonic_time(:microsecond)
+
+      # A HOST-ENQUEUED job, so `run_id` may already be in the args — a host
+      # that mints its own run and puts it there gets one row for the whole
+      # thing. Absent, we record one now. Either way the cascades this poll
+      # enqueues become its children, because `executing/3` holds the id.
+      run_id =
+        Map.get(args, "run_id") ||
+          ReactiveDag.Run.queued(:scan, tenant: plan.tenant, cell: cell_id)
 
       # A poll can run for minutes, so "it started" is a thing a person watches
       # for. Without this the only observable moment is the end, and a page
@@ -210,6 +240,12 @@ if Code.ensure_loaded?(Oban.Worker) do
         %{cell: cell_id, args: args}
       )
 
+      ReactiveDag.Run.executing(run_id, [], fn ->
+        scan_once(plan, cell_id, args, opts, t0, run_id)
+      end)
+    end
+
+    defp scan_once(plan, cell_id, args, opts, t0, run_id) do
       try do
         # The host's wrapper, if it configured one, is present for the POLL
         # only — the part a telemetry handler cannot be inside. It may add
@@ -283,15 +319,50 @@ if Code.ensure_loaded?(Oban.Worker) do
             )
 
             warn_unreachable(cell_id, result)
+
+            # A scan that could not LOOK is not a scan that found nothing —
+            # `ScanRun.complete?/1` is what says which, and the status follows
+            # it: partial coverage is `blocked`, because a person decides
+            # whether a persistently unreachable upstream matters.
+            ReactiveDag.Run.finished(
+              run_id,
+              if(result.unreachable == [], do: :done, else: :blocked),
+              duration_us: System.monotonic_time(:microsecond) - t0,
+              detail: %{
+                "changed" => length(result.changed),
+                "unreachable" => length(result.unreachable)
+              }
+            )
+
             :ok
 
           {:error, :no_scanner} ->
             # The graph says this cell has no scanner, and it will not have one
             # on the next attempt either.
             Logger.warning("reactive_dag: #{cell_id} has no scanner; nothing to poll")
+
+            # A MISCONFIGURATION, not a transient fault — the job is cancelled
+            # rather than retried, so nothing will revisit this. `blocked` is
+            # right: it needs a person, and a row left at `running` forever
+            # would be indistinguishable from a hung job.
+            ReactiveDag.Run.finished(run_id, :blocked,
+              duration_us: System.monotonic_time(:microsecond) - t0,
+              detail: %{"error" => "no scanner declared"}
+            )
+
             {:cancel, :no_scanner}
 
           {:error, reason} ->
+            # NOT a failure of the job: a source that cannot be reached is a
+            # fact about the world, and the worker returns :ok so Oban does not
+            # retry a site that is simply down. `blocked` rather than `failed`
+            # says a person may need to look, which is the distinction the
+            # status page exists to draw.
+            ReactiveDag.Run.finished(run_id, :blocked,
+              duration_us: System.monotonic_time(:microsecond) - t0,
+              detail: %{"unreachable" => inspect(reason) |> String.slice(0, 400)}
+            )
+
             unscannable(reason, cell_id, args, t0)
         end
       rescue
@@ -300,6 +371,11 @@ if Code.ensure_loaded?(Oban.Worker) do
             [:reactive_dag, :scan, :exception],
             %{duration_us: System.monotonic_time(:microsecond) - t0},
             %{cell: cell_id, args: args, reason: e}
+          )
+
+          ReactiveDag.Run.finished(run_id, :failed,
+            duration_us: System.monotonic_time(:microsecond) - t0,
+            detail: %{"error" => Exception.message(e) |> String.slice(0, 400)}
           )
 
           reraise e, __STACKTRACE__

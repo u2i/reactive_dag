@@ -1,0 +1,389 @@
+defmodule ReactiveDag.Run do
+  @moduledoc """
+  What the engine is doing, and what it did — one row per JOB.
+
+  `ReactiveDag.Insights` answers the same question from an ETS buffer, and
+  answers it two ways this cannot: it holds nothing across a restart, and it
+  records only on COMPLETION. A buffer written at the end can say what happened;
+  it can never say what is queued, what is running now, or what stopped waiting
+  for a person. Those are the same question at three moments, and this table is
+  written at all three.
+
+  ## A row is a job, and it appears when the job is created
+
+      queued -> running -> done | failed | suspended | blocked
+
+  `enqueued_at` is the only timestamp that is always set, because a row exists
+  BECAUSE a job was created. Everything else fills in as the job progresses, so
+  the row is a live status line early and a history entry later, without ever
+  being rewritten from scratch.
+
+  ## One job, one row — even when the work continues elsewhere
+
+  A scan enqueues a cascade and returns. That is TWO jobs: two durations, two
+  ways to fail, two retry counts. They get two rows, linked by `parent_run_id`:
+
+      scan agenda_docs           2 changed      1.2s
+      └─ cascade agenda_docs     7 cells        41s
+         └─ resumption transcript_extract       6094s   <- rescued twice
+
+  Collapsing them into one row would have to lie about at least one duration,
+  and would hide exactly the case worth seeing — the child that ran 101 minutes
+  under a parent that finished in one second.
+
+  What happens WITHIN a job is a tree, not more rows: which cells a cascade
+  reached, and by which routes. That belongs in `detail`, and renders as the
+  hierarchy the expressions page already draws.
+
+  ## Not the source of truth for anything
+
+  This table is an observation. Nothing in the engine reads it to decide what to
+  do, and a write here failing must never fail the work it describes — see
+  `safely/1`. The suspension table is the opposite: it IS the record that work is
+  outstanding, and losing a row there loses the work.
+  """
+
+  require Logger
+
+  @type status :: :queued | :running | :done | :failed | :suspended | :blocked
+  @type kind :: :scan | :cascade | :resumption | :reprocess
+
+  @statuses ~w(queued running done failed suspended blocked)
+
+  @context_key {__MODULE__, :current}
+
+  @doc """
+  The run this process is currently executing, or nil.
+
+  PROCESS-LOCAL because that is the only place it can live. A child job is
+  enqueued from deep inside the parent's work — `Source` enqueuing a cascade,
+  `Cascade` scheduling a resumption — and threading a run id down through every
+  call between would mean changing signatures the whole way. The parent is a
+  fact about the PROCESS, not about any one call in it.
+
+  Set by `executing/3` and read by `queued/2`, so a job enqueued while another
+  runs names it as parent without either knowing about the other.
+  """
+  @spec current() :: String.t() | nil
+  def current, do: Process.get(@context_key)
+
+  @doc """
+  Mark `id` as running, and make it the parent of anything this process enqueues.
+
+  The bracket around a job's work: everything `queued/2` sees while this is set
+  becomes a child of `id`. Restores the previous value afterwards rather than
+  clearing it, so a nested call cannot orphan its caller's context.
+  """
+  @spec executing(String.t() | nil, keyword(), (-> result)) :: result when result: term()
+  def executing(id, opts \\ [], fun) do
+    previous = Process.get(@context_key)
+    Process.put(@context_key, id)
+    started(id, opts)
+
+    try do
+      fun.()
+    after
+      if previous, do: Process.put(@context_key, previous), else: Process.delete(@context_key)
+    end
+  end
+
+  @doc """
+  Record that a job was CREATED, and return the new row's id.
+
+  Called at the enqueue, not at the start of work: a job sitting in a queue
+  behind a long one is a fact worth showing, and it is invisible if the row
+  waits for the job to run.
+
+  `parent:` is the run id of the job that created this one, which is what makes
+  the stack. Nil for work nothing else caused — a cron scan, an operator's
+  reprocess.
+  """
+  @spec queued(kind(), keyword()) :: String.t() | nil
+  def queued(kind, opts \\ []) do
+    id = uuid_v7()
+
+    t = table()
+
+    safely(fn ->
+      query!(
+        """
+        INSERT INTO #{t}
+          (id, tenant, kind, cell_id, status, parent_run_id, oban_job_id,
+           enqueued_at, detail)
+        VALUES ($1, $2, $3, $4, 'queued', $5, $6, now(), $7)
+        """,
+        [
+          id,
+          tenant(opts),
+          to_string(kind),
+          opts[:cell] && to_string(opts[:cell]),
+          Keyword.get(opts, :parent, current()),
+          opts[:oban_job_id],
+          encode(opts[:detail] || %{})
+        ]
+      )
+
+      id
+    end)
+  end
+
+  @doc """
+  Mark a job as started.
+
+  Separate from `queued/2` because the gap between them is the queue wait, and
+  a page that cannot show that cannot explain why nothing appears to be
+  happening on a single-concurrency queue.
+  """
+  @spec started(String.t() | nil, keyword()) :: :ok
+  def started(nil, _opts), do: :ok
+
+  def started(id, opts) do
+    t = table()
+
+    safely(fn ->
+      query!(
+        "UPDATE #{t} SET status = 'running', started_at = now(), " <>
+          "detail = detail || $2 WHERE id = $1",
+        [id, encode(opts[:detail] || %{})]
+      )
+    end)
+
+    :ok
+  end
+
+  @doc """
+  Add to what a job has recorded, without changing its status.
+
+  This is what makes the entry "build up": a cascade names each cell as it
+  reaches it, a scan names each source as it finishes. Merged into `detail`
+  rather than replacing it, so an arriving fact never erases an earlier one.
+  """
+  @spec progress(String.t() | nil, map()) :: :ok
+  def progress(nil, _detail), do: :ok
+
+  def progress(id, detail) when is_map(detail) do
+    t = table()
+
+    safely(fn ->
+      query!("UPDATE #{t} SET detail = detail || $2 WHERE id = $1", [id, encode(detail)])
+    end)
+
+    :ok
+  end
+
+  @doc """
+  Close a job out.
+
+  `status` is one of `:done`, `:failed`, `:suspended`, `:blocked`. The last two
+  are not failures: a suspension is work that stopped ON PURPOSE and will be
+  resumed by another job, and `blocked` is work waiting on a person. A page that
+  renders either as an error teaches its reader to ignore errors.
+  """
+  @spec finished(String.t() | nil, status(), keyword()) :: :ok
+  def finished(nil, _status, _opts), do: :ok
+
+  def finished(id, status, opts) when status in [:done, :failed, :suspended, :blocked] do
+    t = table()
+
+    safely(fn ->
+      query!(
+        """
+        UPDATE #{t}
+           SET status = $2,
+               finished_at = now(),
+               duration_us = $3,
+               detail = detail || $4
+         WHERE id = $1
+        """,
+        [id, to_string(status), opts[:duration_us], encode(opts[:detail] || %{})]
+      )
+    end)
+
+    :ok
+  end
+
+  @doc """
+  The most recent runs for a tenant, newest first.
+
+  `status:` narrows to the outstanding ones — which is the STATUS half of the
+  page, and the reason the partial index exists.
+  """
+  @spec recent(keyword()) :: [map()]
+  def recent(opts \\ []) do
+    limit = Keyword.get(opts, :limit, 50)
+
+    {clause, params} =
+      case Keyword.get(opts, :status) do
+        nil -> {"", [tenant(opts), limit]}
+        list when is_list(list) -> {"AND status = ANY($3)", [tenant(opts), limit, list]}
+        one -> {"AND status = $3", [tenant(opts), limit, to_string(one)]}
+      end
+
+    t = table()
+
+    safely(
+      fn ->
+        query!(
+          """
+          SELECT id, tenant, kind, cell_id, status, parent_run_id, oban_job_id,
+                 enqueued_at, started_at, finished_at, duration_us, detail
+            FROM #{t}
+           WHERE tenant = $1 #{clause}
+           ORDER BY enqueued_at DESC
+           LIMIT $2
+          """,
+          params
+        ).rows
+        |> Enum.map(&row/1)
+      end,
+      []
+    )
+  end
+
+  @doc """
+  Every run whose parent is one of `ids` — one level of the stack.
+
+  A level at a time rather than a recursive walk: the page renders a bounded
+  list of parents and then their children, and a `WITH RECURSIVE` over the whole
+  table would read history the page will not show.
+  """
+  @spec children([String.t()], keyword()) :: %{String.t() => [map()]}
+  def children([], _opts), do: %{}
+
+  def children(ids, opts) do
+    t = table()
+
+    safely(
+      fn ->
+        query!(
+          """
+          SELECT id, tenant, kind, cell_id, status, parent_run_id, oban_job_id,
+                 enqueued_at, started_at, finished_at, duration_us, detail
+            FROM #{t}
+           WHERE parent_run_id = ANY($1) AND tenant = $2
+           ORDER BY enqueued_at ASC
+          """,
+          [ids, tenant(opts)]
+        ).rows
+        |> Enum.map(&row/1)
+        |> Enum.group_by(& &1.parent_run_id)
+      end,
+      %{}
+    )
+  end
+
+  @doc """
+  Delete runs finished before `cutoff`.
+
+  Runs accumulate; suspensions do not, because they discharge. Without a prune
+  this table is a slow leak, so the policy is stated here rather than left to
+  each host to discover.
+
+  Only FINISHED rows: an outstanding job is outstanding however old it is, and
+  deleting it would hide exactly the stuck work the page exists to show.
+  """
+  @spec prune(DateTime.t(), keyword()) :: non_neg_integer()
+  def prune(%DateTime{} = cutoff, opts \\ []) do
+    t = table()
+
+    safely(
+      fn ->
+        %{num_rows: n} =
+          query!(
+            "DELETE FROM #{t} WHERE finished_at IS NOT NULL AND finished_at < $1 " <>
+              "AND tenant = $2",
+            [cutoff, tenant(opts)]
+          )
+
+        n
+      end,
+      0
+    )
+  end
+
+  @doc false
+  def statuses, do: @statuses
+
+  defp row([id, tenant, kind, cell, status, parent, job, enq, start, fin, us, detail]) do
+    %{
+      id: id,
+      tenant: tenant,
+      kind: kind,
+      cell_id: cell,
+      status: status,
+      parent_run_id: parent,
+      oban_job_id: job,
+      enqueued_at: enq,
+      started_at: start,
+      finished_at: fin,
+      duration_us: us,
+      detail: detail || %{}
+    }
+  end
+
+  # AN OBSERVATION MUST NOT BREAK THE THING IT OBSERVES.
+  #
+  # No table yet (a host that has not run `Migration.runs_up/1`), no repo
+  # configured, a connection lost mid-cascade — none of those are reasons to
+  # fail the work this row describes. The engine reads nothing from this table,
+  # so a missing row costs a gap in the log and nothing else.
+  #
+  # Deliberately unlike `Suspension`, where a failed write loses the record that
+  # work is outstanding and must therefore take the transaction down with it.
+  # The table name is resolved by the CALLER and passed in, so `table/0`'s
+  # ArgumentError is raised outside this rescue. A config value that is not a
+  # plain identifier is a deployment error a host must see: swallowing it would
+  # leave the log permanently and silently empty, which is the one failure mode
+  # this table exists to remove.
+  defp safely(fun, default \\ nil) do
+    fun.()
+  rescue
+    e ->
+      Logger.debug(fn -> "reactive_dag: run log unavailable (#{Exception.message(e)})" end)
+      default
+  end
+
+  defp encode(map) when is_map(map), do: map
+
+  @doc """
+  The table these reads and writes use.
+
+  VALIDATED, exactly as `Suspension.table/0` is: the name is interpolated into
+  SQL rather than passed as a parameter — a table name cannot be one — so a
+  config value that is not a plain identifier must be refused here rather than
+  concatenated. `safely/1` would otherwise swallow the resulting syntax error
+  and the log would simply stay empty.
+  """
+  @spec table() :: String.t()
+  def table do
+    name = ReactiveDag.Migration.runs_table_name()
+
+    if is_binary(name) and name =~ ~r/\A[a-zA-Z_][a-zA-Z0-9_]*\z/ do
+      name
+    else
+      raise ArgumentError,
+            "reactive_dag: runs_table #{inspect(name)} is not a valid table identifier"
+    end
+  end
+
+  defp tenant(opts), do: ReactiveDag.Suspension.tenant(opts)
+
+  defp query!(sql, params), do: repo().query!(sql, params)
+
+  defp repo do
+    Application.get_env(:reactive_dag, :repo) ||
+      raise "reactive_dag: set `config :reactive_dag, repo: MyApp.Repo`"
+  end
+
+  # Same generator as `Suspension` — UUIDv7, so `ORDER BY id` is chronological.
+  defp uuid_v7 do
+    ms = System.system_time(:millisecond)
+    <<rand_a::12, rand_b::62, _::bitstring>> = :crypto.strong_rand_bytes(10)
+
+    <<ms::48, 7::4, rand_a::12, 2::2, rand_b::62>>
+    |> then(&Base.encode16(&1, case: :lower))
+    |> then(fn <<a::binary-8, b::binary-4, c::binary-4, d::binary-4, e::binary-12>> ->
+      "#{a}-#{b}-#{c}-#{d}-#{e}"
+    end)
+  end
+end

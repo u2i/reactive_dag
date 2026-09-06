@@ -42,6 +42,7 @@ defmodule ReactiveDag.Migration do
 
   @default_table "reactive_dag_suspension"
   @default_dirty "reactive_dag_dirty"
+  @default_runs "reactive_dag_run"
 
   @doc false
   # option > config > default — the same resolution Suspension's reads use, so
@@ -155,6 +156,114 @@ defmodule ReactiveDag.Migration do
     name = table_name(opts)
 
     drop_if_exists(index(name, [:tenant, :waiting, :resource, :row_uuid]))
+    drop_if_exists(table(name))
+  end
+
+  @doc false
+  def runs_table_name(opts \\ []) do
+    Keyword.get_lazy(opts, :runs_table, fn ->
+      Application.get_env(:reactive_dag, :runs_table, @default_runs)
+    end)
+  end
+
+  @doc """
+  Create the run-history table and its indexes.
+
+  ITS OWN ENTRY POINT, not part of `up/1`. Every existing host has already run
+  `up/1`, and it is `create_if_not_exists` — so extending it would be a no-op on
+  exactly the hosts that need the new table. `drop_dirty/1` is the precedent:
+  a change to an already-migrated schema gets a migration a host sequences
+  deliberately.
+
+  ## What a row is
+
+  ONE JOB. It is written when the job is CREATED, not when it runs, and updated
+  in place as the job progresses:
+
+      queued -> running -> done | failed | suspended | blocked
+
+  That is what makes "what is queued right now" and "what happened last week"
+  the same query against the same table, and it is why `enqueued_at` is the only
+  non-null timestamp.
+
+  Work that crosses a job boundary gets its own row, linked by `parent_run_id` —
+  a scan and the cascade it enqueues are two jobs with two durations and two
+  ways to fail, and one row claiming both would have to lie about at least one
+  of them. Work WITHIN a job is a tree, and belongs in `detail`, not in more
+  rows.
+  """
+  def runs_up(opts \\ []) do
+    name = runs_table_name(opts)
+
+    create_if_not_exists table(name, primary_key: false) do
+      # Text UUIDv7, exactly as the suspension table's id — sortable by creation
+      # so `ORDER BY id` is chronological, and text so the library's raw SQL
+      # passes plain strings rather than Postgrex's 16-byte binary form.
+      add(:id, :text, primary_key: true)
+
+      # WHOSE GRAPH, matching the suspension table. `"*"` for an untenanted host.
+      add(:tenant, :text, null: false)
+
+      # scan | cascade | resumption | reprocess. Text rather than an enum: the
+      # library must not need a migration to name a new kind of job.
+      add(:kind, :text, null: false)
+
+      # The origin cell. Null for a sweep, which has no single one.
+      add(:cell_id, :text)
+
+      add(:status, :text, null: false)
+
+      # THE JOB THAT CREATED THIS ONE. Null for work nothing else caused — a
+      # cron scan, an operator's reprocess.
+      #
+      # Deliberately NOT a foreign key: the parent may be pruned before the
+      # child under a retention policy that walks by age, and a cascade delete
+      # would then take live rows with it. A dangling parent renders as an
+      # orphaned row, which is honest.
+      add(:parent_run_id, :text)
+
+      # The Oban job, when there is one. Null where a host drove the work
+      # synchronously.
+      add(:oban_job_id, :bigint)
+
+      # The only timestamp that is always set: a row exists BECAUSE the job was
+      # created.
+      add(:enqueued_at, :utc_datetime_usec, null: false)
+      add(:started_at, :utc_datetime_usec)
+      add(:finished_at, :utc_datetime_usec)
+      add(:duration_us, :bigint)
+
+      # Accumulates as the job runs: claimed keys, changed cells, the report,
+      # the failure, the reason it is blocked. Jsonb rather than columns because
+      # what is worth keeping differs per kind, and a column per kind would be
+      # mostly null.
+      add(:detail, :map, null: false, default: %{})
+    end
+
+    # The history read: one tenant's rows, newest first.
+    create_if_not_exists(index(name, [:tenant, :enqueued_at]))
+
+    # The stack: a row's children.
+    create_if_not_exists(index(name, [:parent_run_id]))
+
+    # The STATUS half of the page, which runs on every load. Partial so it stays
+    # a small index over outstanding work rather than growing with history —
+    # which is the whole difference between a status query and a history one.
+    create_if_not_exists(
+      index(name, [:tenant, :status],
+        where: "status IN ('queued', 'running', 'blocked')",
+        name: :"#{name}_outstanding_index"
+      )
+    )
+  end
+
+  @doc "Drop the run-history table and its indexes."
+  def runs_down(opts \\ []) do
+    name = runs_table_name(opts)
+
+    drop_if_exists(index(name, [:tenant, :status], name: :"#{name}_outstanding_index"))
+    drop_if_exists(index(name, [:parent_run_id]))
+    drop_if_exists(index(name, [:tenant, :enqueued_at]))
     drop_if_exists(table(name))
   end
 

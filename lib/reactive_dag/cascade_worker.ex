@@ -82,6 +82,23 @@ if Code.ensure_loaded?(Oban.Worker) do
         "skip_gate" => Keyword.get(opts, :skip_gate, false)
       }
       |> then(&if opts[:plan_mfa], do: Map.put(&1, "plan_mfa", opts[:plan_mfa]), else: &1)
+      # THE RUN ROW, minted before the insert so its id can ride in the args.
+      # Recorded HERE rather than at the three call sites — `Source`'s poll,
+      # `MarkDirty`'s write, a host's own call — so none of them can forget, and
+      # so a host calling this directly is logged like everything else.
+      #
+      # `Run.current/0` supplies the parent: a cascade enqueued from inside a
+      # scan's job is that scan's child, and neither had to be told.
+      |> then(fn args ->
+        run =
+          ReactiveDag.Run.queued(:cascade,
+            tenant: ReactiveDag.Suspension.tenant(opts),
+            cell: cell,
+            detail: %{"keys" => length(keys)}
+          )
+
+        if run, do: Map.put(args, "run_id", run), else: args
+      end)
       |> __MODULE__.new(Keyword.take(opts, [:schedule_in, :priority, :queue]))
       |> Oban.insert()
     end
@@ -116,9 +133,45 @@ if Code.ensure_loaded?(Oban.Worker) do
           mfa -> Keyword.put(opts, :plan_mfa, mfa)
         end
 
-      {:ok, _report} = Cascade.run(plan, [origin], opts)
+      # BRACKETED, so the row moves queued -> running -> done|failed and anything
+      # this cascade enqueues names it as parent. `run_id` is absent when the
+      # log was unavailable at enqueue, and every `Run` call takes nil.
+      run_id = Map.get(args, "run_id")
+
+      ReactiveDag.Run.executing(run_id, [], fn ->
+        case Cascade.run(plan, [origin], opts) do
+          {:ok, report} ->
+            ReactiveDag.Run.finished(run_id, status_of(report),
+              duration_us: report.duration_us,
+              detail: report_detail(report)
+            )
+
+            {:ok, report}
+
+          other ->
+            ReactiveDag.Run.finished(run_id, :failed, detail: %{"error" => inspect(other)})
+            other
+        end
+      end)
 
       :ok
+    end
+    # A cascade that STOPPED is not a cascade that failed. `suspended` names the
+    # points it parked at, and each has its own resumption job with its own row —
+    # so this one is honestly "suspended" rather than "done", and the page can
+    # say so without inferring it from a child that may not exist yet.
+    defp status_of(%{suspended: [_ | _]}), do: :suspended
+    defp status_of(_report), do: :done
+
+    # What is worth keeping about a finished cascade. COUNTS, not the report:
+    # steps carry per-cell meta that can hold an entire LLM extraction, and this
+    # column is read on every page load.
+    defp report_detail(report) do
+      %{
+        "cells" => length(ReactiveDag.Report.cells(report)),
+        "passes" => report.passes,
+        "suspended" => length(report.suspended)
+      }
     end
   end
 end
