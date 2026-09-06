@@ -374,14 +374,21 @@ defmodule ReactiveDag.Run do
   """
   @spec available?() :: boolean()
   def available? do
-    case :persistent_term.get(@available_key, :unknown) do
+    # KEYED BY (repo, table), not a bare flag. The cache is node-wide — a
+    # cascade runs in a fresh process per job, so a process-local one would
+    # re-probe on every job, a query per write, which is what caching exists to
+    # avoid. But node-wide means a test suite that swaps in a fake repo, or a
+    # host that reconfigures the table name, would otherwise inherit an answer
+    # about a DIFFERENT database and silently log nothing.
+    #
+    # Including both in the key makes a changed configuration re-probe by
+    # construction rather than by remembering to call `forget_availability/0`.
+    key = {@available_key, repo(), table()}
+
+    case :persistent_term.get(key, :unknown) do
       :unknown ->
         answer = probe()
-        # NODE-WIDE, not per-process. A cascade runs in a fresh process per job,
-        # so a process-local cache would re-probe on every job — a query per
-        # write, which is what caching was supposed to avoid. `:persistent_term`
-        # is right for a value written once and read constantly.
-        :persistent_term.put(@available_key, answer)
+        :persistent_term.put(key, answer)
         answer
 
       cached ->
@@ -397,8 +404,17 @@ defmodule ReactiveDag.Run do
   """
   @spec forget_availability() :: :ok
   def forget_availability do
-    :persistent_term.erase(@available_key)
+    # Every key for this module, since the caller changing the table name is
+    # exactly when this is called and the old key would otherwise linger.
+    for {{tag, _repo, _table} = k, _v} <- :persistent_term.get(), tag == @available_key do
+      :persistent_term.erase(k)
+    end
+
     :ok
+  rescue
+    # `:persistent_term.get/0` returns every term on the node, and a malformed
+    # one elsewhere must not make this raise.
+    _ -> :ok
   end
 
   # `query!/2`, NOT `query/2`. The library's contract with a host repo is
