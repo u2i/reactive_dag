@@ -45,6 +45,35 @@ defmodule ReactiveDag.MigrationTest do
     end
   end
 
+  test "the runs table resolves and validates like the suspension table" do
+    Application.delete_env(:reactive_dag, :runs_table)
+    assert ReactiveDag.Migration.runs_table_name() == "reactive_dag_run"
+    assert ReactiveDag.Run.table() == "reactive_dag_run"
+
+    Application.put_env(:reactive_dag, :runs_table, "my_runs")
+    assert ReactiveDag.Migration.runs_table_name() == "my_runs"
+
+    assert ReactiveDag.Run.table() == "my_runs",
+           "the migrated table and the queried table must not diverge"
+
+    assert ReactiveDag.Migration.runs_table_name(runs_table: "override") == "override"
+  after
+    Application.delete_env(:reactive_dag, :runs_table)
+  end
+
+  test "an invalid runs table name fails loudly rather than reaching SQL" do
+    # The name is INTERPOLATED into the query — a table name cannot be a bound
+    # parameter — so an identifier that is not plain must be refused before it
+    # is concatenated.
+    Application.put_env(:reactive_dag, :runs_table, "my runs; drop table x")
+
+    assert_raise ArgumentError, ~r/not a valid table identifier/, fn ->
+      ReactiveDag.Run.table()
+    end
+  after
+    Application.delete_env(:reactive_dag, :runs_table)
+  end
+
   test "drop_dirty resolves the OLD table, separately" do
     assert ReactiveDag.Migration.dirty_table_name() == "reactive_dag_dirty"
     assert ReactiveDag.Migration.dirty_table_name(dirty_table: "legacy") == "legacy"

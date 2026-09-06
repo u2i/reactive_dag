@@ -17,6 +17,7 @@ config :reactive_dag, repo: MyApp.Repo
 |---|---|---|---|
 | [`:repo`](#repo) | — | **yes** | `Suspension` |
 | [`:suspension_table`](#suspension_table) | `"reactive_dag_suspension"` | no | `Suspension`, `Migration` |
+| [`:runs_table`](#runs_table) | `"reactive_dag_run"` | no | `Run`, `Migration` |
 | [`:cascade_timeout`](#cascade_timeout) | `30_000` | no | `Suspension` |
 | [`:dirty_table`](#dirty_table) | `"reactive_dag_dirty"` | no | `Migration.drop_dirty/1` only |
 | [`:oban_table`](#oban_table) | `"public.oban_jobs"` | no | `Suspension.stranded/1`, `Suspension.revive/1` |
@@ -55,6 +56,33 @@ config :reactive_dag, suspension_table: "my_suspensions"
 Resolved identically by `ReactiveDag.Suspension` and `ReactiveDag.Migration`,
 and validated against an identifier grammar at read time, so a typo fails
 loudly rather than as a syntax error deep inside a query.
+
+### `:runs_table`
+
+The physical table name for run history — one row per job, written when the
+job is CREATED and updated as it progresses.
+
+```elixir
+config :reactive_dag, runs_table: "my_runs"
+```
+
+Resolved and validated exactly as `:suspension_table` is, by
+`ReactiveDag.Run.table/0` and `ReactiveDag.Migration.runs_table_name/1`.
+
+The table is OPTIONAL: it is created by `ReactiveDag.Migration.runs_up/1`,
+which is its own migration rather than part of `up/1` — every existing host has
+already run `up/1`, and it is `create_if_not_exists`, so extending it would be
+a no-op on exactly the hosts that need the new table.
+
+A host that has not run it loses the run log and nothing else. `ReactiveDag.Run`
+tolerates a missing table by design: the engine reads nothing from it, so a
+failed write costs a gap in the log rather than the work it describes. A bad
+table NAME still raises, because that is a deployment error rather than a
+runtime one, and swallowing it would leave the log permanently and silently
+empty.
+
+Runs accumulate — unlike suspensions, which discharge — so a host that keeps
+this table should schedule `ReactiveDag.Run.prune/2`.
 
 ### `:oban_table`
 
