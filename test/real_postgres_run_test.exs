@@ -327,6 +327,46 @@ defmodule ReactiveDag.RealPostgresRunTest do
   end
 
   describe "retention" do
+    test "with no tenant, every tenant's history is pruned" do
+      if @url do
+        # NOT `"*"`. A read scoped to the wrong tenant returns nothing, which is
+        # merely unhelpful; a DELETE scoped to `"*"` on a multi-tenant host would
+        # prune only the untenanted rows and leave every real tenant's history
+        # growing forever.
+        for t <- ~w(village town tivoli) do
+          id = Run.queued(:cascade, tenant: t)
+          Run.finished(id, :done, duration_us: 1)
+
+          Repo.query!(
+            "UPDATE #{@table} SET finished_at = now() - interval '200 days' WHERE id = $1",
+            [id]
+          )
+        end
+
+        assert Run.prune(DateTime.add(DateTime.utc_now(), -7, :day)) == 3
+
+        for t <- ~w(village town tivoli) do
+          assert Run.recent(tenant: t) == []
+        end
+      end
+    end
+
+    test "a named tenant prunes only its own" do
+      if @url do
+        keep = Run.queued(:cascade, tenant: "town")
+        Run.finished(keep, :done, duration_us: 1)
+
+        drop = Run.queued(:cascade, tenant: "village")
+        Run.finished(drop, :done, duration_us: 1)
+
+        Repo.query!("UPDATE #{@table} SET finished_at = now() - interval '200 days'", [])
+
+        assert Run.prune(DateTime.add(DateTime.utc_now(), -7, :day), tenant: "village") == 1
+
+        assert Run.recent(tenant: "town") |> Enum.map(& &1.id) == [keep]
+      end
+    end
+
     test "prune removes finished rows and keeps outstanding ones" do
       if @url do
         old = Run.queued(:cascade, tenant: "t")
