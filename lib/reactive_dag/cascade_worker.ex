@@ -138,6 +138,26 @@ if Code.ensure_loaded?(Oban.Worker) do
       # log was unavailable at enqueue, and every `Run` call takes nil.
       run_id = Map.get(args, "run_id")
 
+      # WHAT THIS CASCADE IS REACHING, noted per cell and written once. The
+      # handler runs inside the cascade's own process — and inside its
+      # transaction — so it must not write there: `note/2` accumulates in the
+      # process and `finished/3` flushes it.
+      #
+      # Detached in `after`, because a handler outliving its job would record
+      # one cascade's cells against another's row.
+      handler_id = {:reactive_dag_run_progress, run_id, self()}
+
+      if run_id do
+        :telemetry.attach(
+          handler_id,
+          [:reactive_dag, :cascade, :cell_start],
+          fn _event, _measure, %{cell: cell}, _cfg ->
+            ReactiveDag.Run.note(run_id, %{"reached" => cell})
+          end,
+          nil
+        )
+      end
+
       ReactiveDag.Run.executing(run_id, [], fn ->
         case Cascade.run(plan, [origin], opts) do
           {:ok, report} ->
@@ -153,6 +173,7 @@ if Code.ensure_loaded?(Oban.Worker) do
             other
         end
       end)
+      |> tap(fn _ -> :telemetry.detach(handler_id) end)
 
       :ok
     end

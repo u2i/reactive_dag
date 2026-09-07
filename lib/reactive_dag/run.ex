@@ -52,6 +52,7 @@ defmodule ReactiveDag.Run do
 
   @context_key {__MODULE__, :current}
   @available_key {__MODULE__, :available}
+  @buffer_key {__MODULE__, :buffer}
 
   @doc """
   The run this process is currently executing, or nil.
@@ -153,11 +154,50 @@ defmodule ReactiveDag.Run do
   end
 
   @doc """
-  Add to what a job has recorded, without changing its status.
+  Note a fact about the running job WITHOUT writing it yet.
 
-  This is what makes the entry "build up": a cascade names each cell as it
-  reaches it, a scan names each source as it finishes. Merged into `detail`
-  rather than replacing it, so an arriving fact never erases an earlier one.
+  Accumulated in the process and flushed by `flush/1`, or by the next
+  `finished/3`. A cascade names every cell it reaches — on this graph 49 of them
+  — and a write per cell would put a round trip inside the hot loop, on the very
+  connection that must never starve the work.
+
+  So the default is to buffer. `progress/2` remains for a caller that genuinely
+  wants the row updated now, and is what `flush/1` uses.
+  """
+  @spec note(String.t() | nil, map()) :: :ok
+  def note(nil, _detail), do: :ok
+
+  def note(id, detail) when is_map(detail) do
+    Process.put({@buffer_key, id}, Map.merge(Process.get({@buffer_key, id}, %{}), detail))
+    :ok
+  end
+
+  @doc """
+  Write everything `note/2` accumulated for this run.
+
+  Called by `finished/3`, so an ordinary job needs no explicit flush. Call it
+  directly to make a long job's progress visible before it ends — which is the
+  whole point of a status page, and worth one write at a natural boundary
+  rather than one per cell.
+  """
+  @spec flush(String.t() | nil) :: :ok
+  def flush(nil), do: :ok
+
+  def flush(id) do
+    case Process.delete({@buffer_key, id}) do
+      nil -> :ok
+      buffered when buffered == %{} -> :ok
+      buffered -> progress(id, buffered)
+    end
+  end
+
+  @doc """
+  Add to what a job has recorded NOW, without changing its status.
+
+  One write. Prefer `note/2` in a loop — a cascade reaches 49 cells on this
+  graph, and a write per cell would put a round trip inside the hot loop.
+  Merged into `detail` rather than replacing it, so an arriving fact never
+  erases an earlier one.
   """
   @spec progress(String.t() | nil, map()) :: :ok
   def progress(nil, _detail), do: :ok
@@ -184,6 +224,11 @@ defmodule ReactiveDag.Run do
   def finished(nil, _status, _opts), do: :ok
 
   def finished(id, status, opts) when status in [:done, :failed, :suspended, :blocked] do
+    # BUFFERED NOTES FIRST. A job that noted its progress and then finished must
+    # not lose what it noted — and merging it into this UPDATE would drop it on
+    # any path that finishes without going through here.
+    flush(id)
+
     t = table()
 
     safely(fn ->
@@ -462,10 +507,64 @@ defmodule ReactiveDag.Run do
 
   defp query!(sql, params), do: repo().query!(sql, params)
 
-  defp repo do
-    Application.get_env(:reactive_dag, :repo) ||
+  @doc """
+  The repo the log writes through.
+
+  `:run_repo` when a host configures one, otherwise the main `:repo`.
+
+  ## Why this wants to be its own connection
+
+  Every write here happens INSIDE somebody else's transaction, and sharing it
+  breaks the log in both directions:
+
+    * `queued/2` runs where the job is enqueued, which for `MarkDirty` is inside
+      an Ash action's transaction. If that action rolls back, the row rolls back
+      with it — so an attempt that FAILED leaves no trace, which is exactly the
+      case a history page exists for.
+
+    * `progress/2` runs mid-work, and `Cascade.run/3` wraps its whole walk in
+      one transaction (`cascade.ex:161`). A progress row is therefore invisible
+      until the cascade commits — so "what is running now" cannot show a running
+      cascade at all — and lost entirely if it rolls back.
+
+  Neither is fixable on the caller's connection. `Repo.checkout/1` does NOT
+  escape an open transaction (verified: same `txid_current()`), and Ecto's
+  nested `transaction/2` issues no real SAVEPOINT, so a failed statement still
+  poisons the outer one. Oban does not attempt it either — `Oban.Repo`'s
+  `with_dynamic_repo/2` explicitly refuses to switch repos when the caller is
+  already in a transaction, preferring to join it. Oban can afford that because
+  a job row SHOULD vanish with the transaction that enqueued it. A log row
+  should not, and that is the whole difference.
+
+  ## Falling back to the main repo
+
+  Supported and degraded, rather than refused. With no `:run_repo` the log still
+  records history — which is most of the value — but rows participate in the
+  caller's transaction, so a rolled-back attempt leaves no trace and in-flight
+  progress is invisible until commit. A host that wants attempt-tracking
+  configures a second repo:
+
+      config :reactive_dag, run_repo: MyApp.RunLogRepo
+
+  A small pool is right for it (2-3). The log must never starve the work of
+  connections, and it is the reason to keep the pools separate rather than raise
+  the main one.
+  """
+  @spec repo() :: module()
+  def repo do
+    Application.get_env(:reactive_dag, :run_repo) ||
+      Application.get_env(:reactive_dag, :repo) ||
       raise "reactive_dag: set `config :reactive_dag, repo: MyApp.Repo`"
   end
+
+  @doc """
+  Does the log have a connection of its own?
+
+  False means writes share the caller's transaction — see `repo/0`. The page can
+  say so rather than implying a completeness the storage cannot deliver.
+  """
+  @spec isolated?() :: boolean()
+  def isolated?, do: not is_nil(Application.get_env(:reactive_dag, :run_repo))
 
   # Same generator as `Suspension` — UUIDv7, so `ORDER BY id` is chronological.
   defp uuid_v7 do

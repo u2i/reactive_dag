@@ -144,6 +144,50 @@ defmodule ReactiveDag.RealPostgresRunTest do
     end
   end
 
+  describe "incremental notes" do
+    test "notes accumulate in the process and land in one write" do
+      if @url do
+        id = Run.queued(:cascade, tenant: "t", cell: "c")
+
+        Run.note(id, %{"reached" => "a"})
+        Run.note(id, %{"cells" => 1})
+
+        # NOTHING written yet — that is the point. A cascade reaches 49 cells on
+        # this graph, and a write per cell would put a round trip inside the hot
+        # loop, on the connection that must never starve the work.
+        assert [%{detail: before}] = Run.recent(tenant: "t", limit: 1)
+        refute Map.has_key?(before, "reached")
+
+        Run.flush(id)
+
+        assert [%{detail: d}] = Run.recent(tenant: "t", limit: 1)
+        assert d["reached"] == "a"
+        assert d["cells"] == 1
+      end
+    end
+
+    test "finishing flushes what was noted, so nothing is lost" do
+      if @url do
+        id = Run.queued(:cascade, tenant: "t", cell: "c")
+        Run.note(id, %{"reached" => "z"})
+        Run.finished(id, :done, duration_us: 5)
+
+        assert [%{detail: d, status: "done"}] = Run.recent(tenant: "t", limit: 1)
+
+        assert d["reached"] == "z",
+               "a job that noted its progress and then finished must not lose it"
+      end
+    end
+
+    test "a flush with nothing buffered writes nothing" do
+      if @url do
+        id = Run.queued(:cascade, tenant: "t", cell: "c")
+        assert Run.flush(id) == :ok
+        assert Run.flush(id) == :ok
+      end
+    end
+  end
+
   describe "the stack" do
     test "a child names the job that created it" do
       if @url do
@@ -303,6 +347,73 @@ defmodule ReactiveDag.RealPostgresRunTest do
         assert ids == [stuck],
                "an outstanding job is outstanding however old — pruning it hides stuck work"
       end
+    end
+  end
+
+  describe "its own connection" do
+    # A SECOND repo is what makes the log record ATTEMPTS. On the caller's
+    # connection a row rolls back with the caller, so an attempt that failed
+    # leaves no trace — and mid-work progress is invisible until commit, so
+    # "what is running now" cannot show a running cascade at all.
+    #
+    # Verified rather than reasoned about: `Repo.checkout/1` does NOT escape an
+    # open transaction (same `txid_current()`), and Ecto's nested
+    # `transaction/2` issues no real SAVEPOINT.
+    defmodule SideRepo do
+      def query!(sql, params \\ []), do: Postgrex.query!(conn(), sql, params)
+      def put_conn(pid), do: :persistent_term.put({__MODULE__, :conn}, pid)
+      def conn, do: :persistent_term.get({__MODULE__, :conn})
+    end
+
+    setup do
+      if @url do
+        pid = start_supervised!({Postgrex, url_opts(@url) ++ [name: :side_conn]})
+        SideRepo.put_conn(pid)
+        Application.put_env(:reactive_dag, :run_repo, SideRepo)
+        ReactiveDag.Run.forget_availability()
+
+        on_exit(fn ->
+          Application.delete_env(:reactive_dag, :run_repo)
+          ReactiveDag.Run.forget_availability()
+        end)
+      end
+
+      :ok
+    end
+
+    test "a row written inside a rolled-back transaction SURVIVES" do
+      if @url do
+        # The attempt-tracking guarantee, stated as a test. On the shared
+        # connection this row is gone.
+        Repo.query!("BEGIN", [])
+        id = Run.queued(:cascade, tenant: "t", cell: "attempted")
+        Repo.query!("ROLLBACK", [])
+
+        assert id, "the write must have happened"
+
+        assert Enum.any?(Run.recent(tenant: "t"), &(&1.id == id)),
+               "an attempt whose transaction rolled back must still be recorded — " <>
+                 "that is the case a history page exists for"
+      end
+    end
+
+    test "a row is visible WHILE the caller's transaction is still open" do
+      if @url do
+        # The status guarantee. `Cascade.run/3` wraps its whole walk in one
+        # transaction, so without this a running cascade cannot be shown as
+        # running — the row would appear only once it committed.
+        Repo.query!("BEGIN", [])
+        id = Run.queued(:cascade, tenant: "t", cell: "in_flight")
+
+        assert Enum.any?(Run.recent(tenant: "t"), &(&1.id == id)),
+               "in-flight work must be visible before its transaction commits"
+
+        Repo.query!("ROLLBACK", [])
+      end
+    end
+
+    test "isolated?/0 says which mode the log is in" do
+      assert ReactiveDag.Run.isolated?(), "a run_repo is configured in this describe block"
     end
   end
 
