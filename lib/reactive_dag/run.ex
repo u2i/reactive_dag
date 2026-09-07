@@ -51,6 +51,8 @@ defmodule ReactiveDag.Run do
   @statuses ~w(queued running done failed suspended blocked)
 
   @context_key {__MODULE__, :current}
+  @available_key {__MODULE__, :available}
+  @buffer_key {__MODULE__, :buffer}
 
   @doc """
   The run this process is currently executing, or nil.
@@ -152,11 +154,50 @@ defmodule ReactiveDag.Run do
   end
 
   @doc """
-  Add to what a job has recorded, without changing its status.
+  Note a fact about the running job WITHOUT writing it yet.
 
-  This is what makes the entry "build up": a cascade names each cell as it
-  reaches it, a scan names each source as it finishes. Merged into `detail`
-  rather than replacing it, so an arriving fact never erases an earlier one.
+  Accumulated in the process and flushed by `flush/1`, or by the next
+  `finished/3`. A cascade names every cell it reaches — on this graph 49 of them
+  — and a write per cell would put a round trip inside the hot loop, on the very
+  connection that must never starve the work.
+
+  So the default is to buffer. `progress/2` remains for a caller that genuinely
+  wants the row updated now, and is what `flush/1` uses.
+  """
+  @spec note(String.t() | nil, map()) :: :ok
+  def note(nil, _detail), do: :ok
+
+  def note(id, detail) when is_map(detail) do
+    Process.put({@buffer_key, id}, Map.merge(Process.get({@buffer_key, id}, %{}), detail))
+    :ok
+  end
+
+  @doc """
+  Write everything `note/2` accumulated for this run.
+
+  Called by `finished/3`, so an ordinary job needs no explicit flush. Call it
+  directly to make a long job's progress visible before it ends — which is the
+  whole point of a status page, and worth one write at a natural boundary
+  rather than one per cell.
+  """
+  @spec flush(String.t() | nil) :: :ok
+  def flush(nil), do: :ok
+
+  def flush(id) do
+    case Process.delete({@buffer_key, id}) do
+      nil -> :ok
+      buffered when buffered == %{} -> :ok
+      buffered -> progress(id, buffered)
+    end
+  end
+
+  @doc """
+  Add to what a job has recorded NOW, without changing its status.
+
+  One write. Prefer `note/2` in a loop — a cascade reaches 49 cells on this
+  graph, and a write per cell would put a round trip inside the hot loop.
+  Merged into `detail` rather than replacing it, so an arriving fact never
+  erases an earlier one.
   """
   @spec progress(String.t() | nil, map()) :: :ok
   def progress(nil, _detail), do: :ok
@@ -183,6 +224,11 @@ defmodule ReactiveDag.Run do
   def finished(nil, _status, _opts), do: :ok
 
   def finished(id, status, opts) when status in [:done, :failed, :suspended, :blocked] do
+    # BUFFERED NOTES FIRST. A job that noted its progress and then finished must
+    # not lose what it noted — and merging it into this UPDATE would drop it on
+    # any path that finishes without going through here.
+    flush(id)
+
     t = table()
 
     safely(fn ->
@@ -323,24 +369,115 @@ defmodule ReactiveDag.Run do
 
   # AN OBSERVATION MUST NOT BREAK THE THING IT OBSERVES.
   #
-  # No table yet (a host that has not run `Migration.runs_up/1`), no repo
-  # configured, a connection lost mid-cascade — none of those are reasons to
-  # fail the work this row describes. The engine reads nothing from this table,
-  # so a missing row costs a gap in the log and nothing else.
+  # These calls run inside the CALLER's transaction — a cascade's, or an Ash
+  # action's — and that makes a rescue insufficient on its own. A statement that
+  # fails marks the whole Postgres transaction aborted; rescuing in Elixir does
+  # not un-abort it, so every later statement errors and the caller rolls back.
+  # A missing run table then takes down the work it was only supposed to
+  # describe.
   #
-  # Deliberately unlike `Suspension`, where a failed write loses the record that
-  # work is outstanding and must therefore take the transaction down with it.
-  # The table name is resolved by the CALLER and passed in, so `table/0`'s
-  # ArgumentError is raised outside this rescue. A config value that is not a
-  # plain identifier is a deployment error a host must see: swallowing it would
-  # leave the log permanently and silently empty, which is the one failure mode
-  # this table exists to remove.
+  # Measured: cascade's `:correct` / `:uncorrect` actions failed with
+  # `** (DBConnection.ConnectionError) transaction rolling back` on a database
+  # that simply had not run `runs_up/1` yet.
+  #
+  # A savepoint does NOT fix this, which was the first thing tried. Ecto's
+  # nested `transaction/2` does not issue a real Postgres `SAVEPOINT`, so a
+  # failed statement inside one still poisons the outer transaction — verified
+  # directly rather than assumed. `Suspension.savepoint/1` works in the cascade
+  # for a different reason, stated in its own docs: it isolates "a failure that
+  # arrives as a VALUE", and an op returning `{:error, _}` never executed a
+  # failing statement in the first place.
+  #
+  # So the only reliable answer is not to ATTEMPT a write that cannot succeed.
+  # `available?/0` asks once per process and caches the answer, and every call
+  # short-circuits when the table is absent. The rescue below stays for what it
+  # can actually catch — no repo configured, a pool checkout timeout, a
+  # connection already lost — none of which involve issuing bad SQL.
   defp safely(fun, default \\ nil) do
-    fun.()
+    if available?() do
+      fun.()
+    else
+      default
+    end
   rescue
     e ->
       Logger.debug(fn -> "reactive_dag: run log unavailable (#{Exception.message(e)})" end)
       default
+  end
+
+  @doc """
+  Is the run table present?
+
+  Asked ONCE per process and cached, because the answer cannot change under a
+  running node — a table is created by a migration, and a release restarts.
+  Caching matters: this is checked before every write, and a query per write
+  would make the log more expensive than the work it records.
+
+  `to_regclass` returns NULL rather than raising for an absent table, which is
+  the whole reason it is used here: asking any other way would be the very
+  failed statement this exists to avoid.
+  """
+  @spec available?() :: boolean()
+  def available? do
+    # KEYED BY (repo, table), not a bare flag. The cache is node-wide — a
+    # cascade runs in a fresh process per job, so a process-local one would
+    # re-probe on every job, a query per write, which is what caching exists to
+    # avoid. But node-wide means a test suite that swaps in a fake repo, or a
+    # host that reconfigures the table name, would otherwise inherit an answer
+    # about a DIFFERENT database and silently log nothing.
+    #
+    # Including both in the key makes a changed configuration re-probe by
+    # construction rather than by remembering to call `forget_availability/0`.
+    key = {@available_key, repo(), table()}
+
+    case :persistent_term.get(key, :unknown) do
+      :unknown ->
+        answer = probe()
+        :persistent_term.put(key, answer)
+        answer
+
+      cached ->
+        cached
+    end
+  end
+
+  @doc """
+  Forget whether the table exists, so the next call re-probes.
+
+  For a host that migrates a running node, and for tests that create or drop the
+  table between cases.
+  """
+  @spec forget_availability() :: :ok
+  def forget_availability do
+    # Every key for this module, since the caller changing the table name is
+    # exactly when this is called and the old key would otherwise linger.
+    for {{tag, _repo, _table} = k, _v} <- :persistent_term.get(), tag == @available_key do
+      :persistent_term.erase(k)
+    end
+
+    :ok
+  rescue
+    # `:persistent_term.get/0` returns every term on the node, and a malformed
+    # one elsewhere must not make this raise.
+    _ -> :ok
+  end
+
+  # `query!/2`, NOT `query/2`. The library's contract with a host repo is
+  # `query!/2` — it is what `Suspension` uses, and the only function this
+  # library required before this one. A host shim exporting just that is
+  # legitimate, and asking for `query/2` made every probe raise into the rescue
+  # below and answer "no table" against a database that had one.
+  #
+  # `to_regclass` returns NULL rather than raising for an absent table, which is
+  # why it is safe to call at all: any other way of asking would be the very
+  # failed statement this exists to avoid.
+  defp probe do
+    case repo().query!("SELECT to_regclass($1)", [table()]) do
+      %{rows: [[nil]]} -> false
+      _ -> true
+    end
+  rescue
+    _ -> false
   end
 
   defp encode(map) when is_map(map), do: map
@@ -370,10 +507,64 @@ defmodule ReactiveDag.Run do
 
   defp query!(sql, params), do: repo().query!(sql, params)
 
-  defp repo do
-    Application.get_env(:reactive_dag, :repo) ||
+  @doc """
+  The repo the log writes through.
+
+  `:run_repo` when a host configures one, otherwise the main `:repo`.
+
+  ## Why this wants to be its own connection
+
+  Every write here happens INSIDE somebody else's transaction, and sharing it
+  breaks the log in both directions:
+
+    * `queued/2` runs where the job is enqueued, which for `MarkDirty` is inside
+      an Ash action's transaction. If that action rolls back, the row rolls back
+      with it — so an attempt that FAILED leaves no trace, which is exactly the
+      case a history page exists for.
+
+    * `progress/2` runs mid-work, and `Cascade.run/3` wraps its whole walk in
+      one transaction (`cascade.ex:161`). A progress row is therefore invisible
+      until the cascade commits — so "what is running now" cannot show a running
+      cascade at all — and lost entirely if it rolls back.
+
+  Neither is fixable on the caller's connection. `Repo.checkout/1` does NOT
+  escape an open transaction (verified: same `txid_current()`), and Ecto's
+  nested `transaction/2` issues no real SAVEPOINT, so a failed statement still
+  poisons the outer one. Oban does not attempt it either — `Oban.Repo`'s
+  `with_dynamic_repo/2` explicitly refuses to switch repos when the caller is
+  already in a transaction, preferring to join it. Oban can afford that because
+  a job row SHOULD vanish with the transaction that enqueued it. A log row
+  should not, and that is the whole difference.
+
+  ## Falling back to the main repo
+
+  Supported and degraded, rather than refused. With no `:run_repo` the log still
+  records history — which is most of the value — but rows participate in the
+  caller's transaction, so a rolled-back attempt leaves no trace and in-flight
+  progress is invisible until commit. A host that wants attempt-tracking
+  configures a second repo:
+
+      config :reactive_dag, run_repo: MyApp.RunLogRepo
+
+  A small pool is right for it (2-3). The log must never starve the work of
+  connections, and it is the reason to keep the pools separate rather than raise
+  the main one.
+  """
+  @spec repo() :: module()
+  def repo do
+    Application.get_env(:reactive_dag, :run_repo) ||
+      Application.get_env(:reactive_dag, :repo) ||
       raise "reactive_dag: set `config :reactive_dag, repo: MyApp.Repo`"
   end
+
+  @doc """
+  Does the log have a connection of its own?
+
+  False means writes share the caller's transaction — see `repo/0`. The page can
+  say so rather than implying a completeness the storage cannot deliver.
+  """
+  @spec isolated?() :: boolean()
+  def isolated?, do: not is_nil(Application.get_env(:reactive_dag, :run_repo))
 
   # Same generator as `Suspension` — UUIDv7, so `ORDER BY id` is chronological.
   defp uuid_v7 do

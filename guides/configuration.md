@@ -18,6 +18,7 @@ config :reactive_dag, repo: MyApp.Repo
 | [`:repo`](#repo) | — | **yes** | `Suspension` |
 | [`:suspension_table`](#suspension_table) | `"reactive_dag_suspension"` | no | `Suspension`, `Migration` |
 | [`:runs_table`](#runs_table) | `"reactive_dag_run"` | no | `Run`, `Migration` |
+| [`:run_repo`](#run_repo) | the main `:repo` | no | `Run` |
 | [`:cascade_timeout`](#cascade_timeout) | `30_000` | no | `Suspension` |
 | [`:dirty_table`](#dirty_table) | `"reactive_dag_dirty"` | no | `Migration.drop_dirty/1` only |
 | [`:oban_table`](#oban_table) | `"public.oban_jobs"` | no | `Suspension.stranded/1`, `Suspension.revive/1` |
@@ -83,6 +84,41 @@ empty.
 
 Runs accumulate — unlike suspensions, which discharge — so a host that keeps
 this table should schedule `ReactiveDag.Run.prune/2`.
+
+### `:run_repo`
+
+A SECOND repo for the run log, so its writes do not share the caller's
+transaction.
+
+```elixir
+config :reactive_dag, run_repo: MyApp.RunLogRepo
+```
+
+Every run-log write happens inside somebody else's transaction, and sharing it
+breaks the log in both directions:
+
+  * `Run.queued/2` runs where a job is enqueued — for `dirties_on` that is
+    inside an Ash action's transaction. If the action rolls back, the row rolls
+    back with it, so an attempt that FAILED leaves no trace. That is exactly the
+    case a history page exists for.
+  * `Run.progress/2` runs mid-work, and a cascade wraps its whole walk in one
+    transaction. A progress row is therefore invisible until the cascade
+    commits — so "what is running now" cannot show a running cascade — and lost
+    entirely if it rolls back.
+
+Neither is fixable on the caller's connection. `Repo.checkout/1` does not escape
+an open transaction, and Ecto's nested `transaction/2` issues no real
+`SAVEPOINT`, so a failed statement still poisons the outer one.
+
+Give it a small pool (2-3). The log must never starve the work of connections,
+which is the reason to keep the pools separate rather than raise the main one.
+
+**Optional, and degraded rather than refused.** With no `:run_repo` the log
+still records history — most of the value — but rows participate in the
+caller's transaction, so a rolled-back attempt leaves no trace and in-flight
+progress is invisible until commit. `ReactiveDag.Run.isolated?/0` says which
+mode is in force, so a page can state it rather than implying a completeness
+the storage cannot deliver.
 
 ### `:oban_table`
 

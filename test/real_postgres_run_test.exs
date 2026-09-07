@@ -84,6 +84,12 @@ defmodule ReactiveDag.RealPostgresRunTest do
 
   setup do
     if @url, do: Repo.query!("DELETE FROM #{@table}")
+
+    # `available?/0` caches per PROCESS, and ExUnit runs a test module's tests
+    # in one process — so the missing-table test below caches `false` and every
+    # test after it in that process would silently write nothing. Cleared here
+    # rather than in that one test, so the order cannot matter.
+    ReactiveDag.Run.forget_availability()
     :ok
   end
 
@@ -134,6 +140,50 @@ defmodule ReactiveDag.RealPostgresRunTest do
         Run.progress(id, %{"cells" => 7})
 
         assert [%{detail: %{"cells" => 7}}] = Run.recent(tenant: "t")
+      end
+    end
+  end
+
+  describe "incremental notes" do
+    test "notes accumulate in the process and land in one write" do
+      if @url do
+        id = Run.queued(:cascade, tenant: "t", cell: "c")
+
+        Run.note(id, %{"reached" => "a"})
+        Run.note(id, %{"cells" => 1})
+
+        # NOTHING written yet — that is the point. A cascade reaches 49 cells on
+        # this graph, and a write per cell would put a round trip inside the hot
+        # loop, on the connection that must never starve the work.
+        assert [%{detail: before}] = Run.recent(tenant: "t", limit: 1)
+        refute Map.has_key?(before, "reached")
+
+        Run.flush(id)
+
+        assert [%{detail: d}] = Run.recent(tenant: "t", limit: 1)
+        assert d["reached"] == "a"
+        assert d["cells"] == 1
+      end
+    end
+
+    test "finishing flushes what was noted, so nothing is lost" do
+      if @url do
+        id = Run.queued(:cascade, tenant: "t", cell: "c")
+        Run.note(id, %{"reached" => "z"})
+        Run.finished(id, :done, duration_us: 5)
+
+        assert [%{detail: d, status: "done"}] = Run.recent(tenant: "t", limit: 1)
+
+        assert d["reached"] == "z",
+               "a job that noted its progress and then finished must not lose it"
+      end
+    end
+
+    test "a flush with nothing buffered writes nothing" do
+      if @url do
+        id = Run.queued(:cascade, tenant: "t", cell: "c")
+        assert Run.flush(id) == :ok
+        assert Run.flush(id) == :ok
       end
     end
   end
@@ -300,6 +350,130 @@ defmodule ReactiveDag.RealPostgresRunTest do
     end
   end
 
+  describe "its own connection" do
+    # A SECOND repo is what makes the log record ATTEMPTS. On the caller's
+    # connection a row rolls back with the caller, so an attempt that failed
+    # leaves no trace — and mid-work progress is invisible until commit, so
+    # "what is running now" cannot show a running cascade at all.
+    #
+    # Verified rather than reasoned about: `Repo.checkout/1` does NOT escape an
+    # open transaction (same `txid_current()`), and Ecto's nested
+    # `transaction/2` issues no real SAVEPOINT.
+    defmodule SideRepo do
+      def query!(sql, params \\ []), do: Postgrex.query!(conn(), sql, params)
+      def put_conn(pid), do: :persistent_term.put({__MODULE__, :conn}, pid)
+      def conn, do: :persistent_term.get({__MODULE__, :conn})
+    end
+
+    setup do
+      if @url do
+        pid = start_supervised!({Postgrex, url_opts(@url) ++ [name: :side_conn]})
+        SideRepo.put_conn(pid)
+        Application.put_env(:reactive_dag, :run_repo, SideRepo)
+        ReactiveDag.Run.forget_availability()
+
+        on_exit(fn ->
+          Application.delete_env(:reactive_dag, :run_repo)
+          ReactiveDag.Run.forget_availability()
+        end)
+      end
+
+      :ok
+    end
+
+    test "a row written inside a rolled-back transaction SURVIVES" do
+      if @url do
+        # The attempt-tracking guarantee, stated as a test. On the shared
+        # connection this row is gone.
+        Repo.query!("BEGIN", [])
+        id = Run.queued(:cascade, tenant: "t", cell: "attempted")
+        Repo.query!("ROLLBACK", [])
+
+        assert id, "the write must have happened"
+
+        assert Enum.any?(Run.recent(tenant: "t"), &(&1.id == id)),
+               "an attempt whose transaction rolled back must still be recorded — " <>
+                 "that is the case a history page exists for"
+      end
+    end
+
+    test "a row is visible WHILE the caller's transaction is still open" do
+      if @url do
+        # The status guarantee. `Cascade.run/3` wraps its whole walk in one
+        # transaction, so without this a running cascade cannot be shown as
+        # running — the row would appear only once it committed.
+        Repo.query!("BEGIN", [])
+        id = Run.queued(:cascade, tenant: "t", cell: "in_flight")
+
+        assert Enum.any?(Run.recent(tenant: "t"), &(&1.id == id)),
+               "in-flight work must be visible before its transaction commits"
+
+        Repo.query!("ROLLBACK", [])
+      end
+    end
+
+    test "isolated?/0 says which mode the log is in" do
+      assert ReactiveDag.Run.isolated?(), "a run_repo is configured in this describe block"
+    end
+  end
+
+  describe "a missing table must not poison the caller's transaction" do
+    test "a write inside a transaction leaves it usable" do
+      if @url do
+        # THE BUG THIS EXISTS FOR. These calls run inside the caller's
+        # transaction — a cascade's, or an Ash action's. A statement that FAILS
+        # marks the whole Postgres transaction aborted, and rescuing in Elixir
+        # does not un-abort it: every later statement then errors and the caller
+        # rolls back. A missing run table took down the work it was only meant
+        # to describe.
+        #
+        # Measured in cascade: `:correct` / `:uncorrect` failed with
+        # `** (DBConnection.ConnectionError) transaction rolling back` on a
+        # database that had simply not run `runs_up/1` yet.
+        #
+        # A savepoint does NOT fix it — Ecto's nested `transaction/2` issues no
+        # real Postgres SAVEPOINT, so the failed statement still poisons the
+        # outer transaction. The answer is not to ATTEMPT a write that cannot
+        # succeed, which is what `available?/0` decides.
+        prev = Application.get_env(:reactive_dag, :runs_table)
+        Application.put_env(:reactive_dag, :runs_table, "rd_test_absent_table")
+        ReactiveDag.Run.forget_availability()
+
+        # INSIDE A TRANSACTION, which is the whole point: the poisoning only
+        # happens when there is one to poison. An earlier version of this test
+        # called `queued/2` on a bare connection and passed with the guard
+        # REMOVED — it proved nothing.
+        Repo.query!("BEGIN", [])
+
+        assert Run.queued(:cascade, tenant: "t") == nil
+
+        # The transaction must still be usable. Without the guard, the failed
+        # INSERT marks it aborted and this raises `current transaction is
+        # aborted, commands ignored until end of transaction block`.
+        assert %{rows: [[1]]} = Repo.query!("SELECT 1", [])
+
+        Repo.query!("COMMIT", [])
+
+        Application.put_env(:reactive_dag, :runs_table, prev)
+        ReactiveDag.Run.forget_availability()
+      end
+    end
+
+    test "the probe uses query!/2 — the only repo function the library requires" do
+      if @url do
+        # `Suspension` uses `query!/2`, and it was the ONLY repo function this
+        # library needed. A probe asking for `query/2` raised on a host shim
+        # that legitimately exports just the bang version, and answered "no
+        # table" against a database that had one — silently logging nothing.
+        refute function_exported?(Repo, :query, 2),
+               "this shim deliberately exports only query!/2, as a host may"
+
+        ReactiveDag.Run.forget_availability()
+        assert Run.available?(), "the probe must work against a query!-only repo"
+      end
+    end
+  end
+
   describe "an observation must not break what it observes" do
     test "a missing table costs a gap in the log, not an exception" do
       if @url do
@@ -317,6 +491,7 @@ defmodule ReactiveDag.RealPostgresRunTest do
         assert Run.prune(DateTime.utc_now(), tenant: "t") == 0
 
         Application.put_env(:reactive_dag, :runs_table, prev)
+        ReactiveDag.Run.forget_availability()
       end
     end
 
