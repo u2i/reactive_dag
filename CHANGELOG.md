@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.17.0-rc.69](https://github.com/u2i/reactive_dag/compare/v0.17.0-rc.68...v0.17.0-rc.69) (2026-09-07)
+
+
+### Bug Fixes
+
+* the run log must not share the transaction it observes ([#254](https://github.com/u2i/reactive_dag/issues/254)) ([0231da2](https://github.com/u2i/reactive_dag/commit/0231da2ab70a31eedd7fcef3e215878450352dcd))
+
 ## [0.17.0-rc.68](https://github.com/u2i/reactive_dag/compare/v0.17.0-rc.67...v0.17.0-rc.68) (2026-09-06)
 
 
