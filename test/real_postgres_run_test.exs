@@ -386,6 +386,22 @@ defmodule ReactiveDag.RealPostgresRunTest do
       end
     end
 
+    test "a discarded job with no cell is named by its WORKER" do
+      if @url do
+        # FROM REAL DATA. Production's three discarded jobs are a host's own
+        # backfill worker, carrying `%{"batch" => 80}` and no cell at all — so
+        # three rows rendered `discarded | —` and told a reader nothing about
+        # which three. The worker's last segment is the identifying fact.
+        Repo.query!(
+          "INSERT INTO rd_test_oban (worker, state, args) VALUES ($1, 'discarded', $2)",
+          ["MyApp.RedHook.AttendanceBackfillWorker", %{"batch" => 80}]
+        )
+
+        assert [%{cell: "AttendanceBackfillWorker"}] =
+                 Enum.filter(ReactiveDag.Run.blocked(), &(&1.kind == :discarded))
+      end
+    end
+
     test "a healthy job is not blocked" do
       if @url do
         Repo.query!(
