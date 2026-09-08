@@ -319,6 +319,140 @@ defmodule ReactiveDag.Run do
   end
 
   @doc """
+  Work that will not proceed without a person.
+
+  Four kinds, and the page must not render them alike — they need different
+  actions from whoever is reading:
+
+    * `:approval` — a suspension whose reason names a person, as opposed to
+      `:expensive`, which resumes itself. The library knows these.
+    * `:stranded` — a resumption job Oban can never fetch again. See
+      `Suspension.stranded/1`: a final attempt that fails leaves the job
+      `available` with `attempt == max_attempts`, unfetchable AND undiscarded,
+      and because the worker's uniqueness includes `available` it also dedups
+      every future enqueue for that point. The queue looks healthy and the work
+      is dead. Repair with `Suspension.revive/1`.
+    * `:discarded` — a job that exhausted its attempts and stopped. Nothing
+      retries it.
+    * whatever a host adds — see `:blocked_resolver` below.
+
+  ## Why a host hook
+
+  The first three are visible to the library because it owns the suspension
+  table and can read Oban's. The rest are not knowable here at all: whether an
+  LLM gate is off, whether a budget is spent, whether a row is parked awaiting
+  a judgement — those are facts about a host's own domain, and a library that
+  guessed at them would be wrong in a way nobody could correct.
+
+      config :reactive_dag, blocked_resolver: {MyApp.Blocked, :list, []}
+
+  Called with the opts, and must return a list of maps carrying at least
+  `:kind` and `:detail`. Its failures are contained: a resolver that raises
+  costs its own entries and not the three kinds above, because a blocked panel
+  that goes blank when one contributor breaks is worse than one that is
+  incomplete and says so.
+  """
+  @spec blocked(keyword()) :: [map()]
+  def blocked(opts \\ []) do
+    approvals(opts) ++ stranded(opts) ++ discarded(opts) ++ host_blocked(opts)
+  end
+
+  defp approvals(opts) do
+    safely(
+      fn ->
+        # `points/1` returns the point NESTED under `:point`, with `:reason`,
+        # `:count` and `:oldest` beside it — not flat keys. Verified against its
+        # own SELECT rather than assumed; my first version read `&1[:waiting]`
+        # and got nil for every row.
+        for %{point: point, reason: :approval} = entry <-
+              ReactiveDag.Suspension.points(opts) do
+          %{
+            kind: :approval,
+            cell: point.waiting,
+            detail: %{
+              "row_uuid" => point.row_uuid,
+              "count" => entry[:count],
+              "since" => entry[:oldest] && to_string(entry[:oldest])
+            }
+          }
+        end
+      end,
+      []
+    )
+  end
+
+  defp stranded(opts) do
+    safely(
+      fn ->
+        for point <- ReactiveDag.Suspension.stranded(opts) do
+          %{
+            kind: :stranded,
+            cell: point[:waiting],
+            detail: %{
+              "job_id" => point[:job_id],
+              "row_uuid" => point[:row_uuid],
+              # The repair, named on the row: `Oban.retry_job/1` does NOT fix
+              # these — it skips jobs already `available` and reports success.
+              "repair" => "ReactiveDag.Suspension.revive/1"
+            }
+          }
+        end
+      end,
+      []
+    )
+  end
+
+  defp discarded(opts) do
+    safely(
+      fn ->
+        %{rows: rows} =
+          query!(
+            """
+            SELECT id, worker, args->>'cell', errors
+              FROM #{ReactiveDag.Suspension.oban_table()}
+             WHERE state = 'discarded'
+             ORDER BY id DESC
+             LIMIT $1
+            """,
+            [Keyword.get(opts, :limit, 50)]
+          )
+
+        for [id, worker, cell, errors] <- rows do
+          %{
+            kind: :discarded,
+            cell: cell,
+            detail: %{
+              "job_id" => id,
+              "worker" => worker,
+              # LAST error only, and bounded. An exhausted job carries one entry
+              # per attempt, each with a stacktrace, and this is read on a page.
+              "error" =>
+                errors |> List.wrap() |> List.last() |> then(&(&1 && &1["error"])) |>
+                  then(&(&1 && String.slice(to_string(&1), 0, 300)))
+            }
+          }
+        end
+      end,
+      []
+    )
+  end
+
+  # CONTAINED. A resolver that raises costs its own entries, not the three kinds
+  # the library can see for itself — a blocked panel that goes blank because one
+  # contributor broke is worse than one that is incomplete.
+  defp host_blocked(opts) do
+    case Application.get_env(:reactive_dag, :blocked_resolver) do
+      {m, f, a} -> apply(m, f, [opts | a])
+      fun when is_function(fun, 1) -> fun.(opts)
+      _ -> []
+    end
+  rescue
+    e ->
+      Logger.warning("reactive_dag: blocked_resolver failed (#{Exception.message(e)})")
+      []
+  end
+
+  @doc """
   Delete runs finished before `cutoff`.
 
   Runs accumulate; suspensions do not, because they discharge. Without a prune

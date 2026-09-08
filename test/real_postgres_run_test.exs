@@ -326,6 +326,105 @@ defmodule ReactiveDag.RealPostgresRunTest do
     end
   end
 
+  describe "blocked work" do
+    # Each kind needs a DIFFERENT action from whoever reads the page, so the
+    # page must not render them alike. These assert they arrive distinguished.
+    setup do
+      if @url do
+        Repo.query!("DROP TABLE IF EXISTS rd_test_oban", [])
+
+        Repo.query!(
+          """
+          CREATE TABLE rd_test_oban (
+            id bigserial PRIMARY KEY, worker text NOT NULL, state text NOT NULL,
+            args jsonb NOT NULL DEFAULT '{}', errors jsonb NOT NULL DEFAULT '[]',
+            attempt integer NOT NULL DEFAULT 0, max_attempts integer NOT NULL DEFAULT 20
+          )
+          """,
+          []
+        )
+
+        prev = Application.get_env(:reactive_dag, :oban_table)
+        Application.put_env(:reactive_dag, :oban_table, "rd_test_oban")
+
+        on_exit(fn ->
+          {:ok, c} = Postgrex.start_link(url_opts(@url))
+          Postgrex.query!(c, "DROP TABLE IF EXISTS rd_test_oban", [])
+          GenServer.stop(c)
+          if prev do
+            Application.put_env(:reactive_dag, :oban_table, prev)
+          else
+            Application.delete_env(:reactive_dag, :oban_table)
+          end
+        end)
+      end
+
+      :ok
+    end
+
+    test "a discarded job is blocked, with its LAST error" do
+      if @url do
+        Repo.query!(
+          "INSERT INTO rd_test_oban (worker, state, args, errors, attempt, max_attempts) " <>
+            "VALUES ($1, 'discarded', $2, $3, 3, 3)",
+          [
+            "MyApp.BackfillWorker",
+            %{"cell" => "agenda_docs"},
+            [%{"error" => "first try"}, %{"error" => "gave up here"}]
+          ]
+        )
+
+        assert [%{kind: :discarded} = b] =
+                 Enum.filter(ReactiveDag.Run.blocked(), &(&1.kind == :discarded))
+
+        assert b.cell == "agenda_docs"
+        assert b.detail["worker"] == "MyApp.BackfillWorker"
+
+        assert b.detail["error"] == "gave up here",
+               "the LAST error — an exhausted job carries one per attempt, each " <>
+                 "with a stacktrace, and this is read on a page"
+      end
+    end
+
+    test "a healthy job is not blocked" do
+      if @url do
+        Repo.query!(
+          "INSERT INTO rd_test_oban (worker, state) VALUES ('W', 'available')",
+          []
+        )
+
+        assert Enum.filter(ReactiveDag.Run.blocked(), &(&1.kind == :discarded)) == []
+      end
+    end
+
+    test "a host resolver contributes, and its failure is contained" do
+      if @url do
+        Application.put_env(:reactive_dag, :blocked_resolver, fn _opts ->
+          [%{kind: :spend_gated, cell: "transcript_extract", detail: %{"pending" => 10}}]
+        end)
+
+        assert Enum.any?(ReactiveDag.Run.blocked(), &(&1.kind == :spend_gated))
+
+        # A resolver that raises must cost ITS entries and nothing else. A
+        # blocked panel that goes blank because one contributor broke is worse
+        # than one that is incomplete.
+        Application.put_env(:reactive_dag, :blocked_resolver, fn _opts ->
+          raise "resolver is broken"
+        end)
+
+        Repo.query!(
+          "INSERT INTO rd_test_oban (worker, state, args) VALUES ('W', 'discarded', $1)",
+          [%{"cell" => "c"}]
+        )
+
+        assert Enum.any?(ReactiveDag.Run.blocked(), &(&1.kind == :discarded)),
+               "the library's own kinds must survive a broken host resolver"
+
+        Application.delete_env(:reactive_dag, :blocked_resolver)
+      end
+    end
+  end
+
   describe "retention" do
     test "with no tenant, every tenant's history is pruned" do
       if @url do
