@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.17.0-rc.72](https://github.com/u2i/reactive_dag/compare/v0.17.0-rc.71...v0.17.0-rc.72) (2026-09-08)
+
+
+### Features
+
+* a suspension with NO job is :orphaned — nothing is coming ([#262](https://github.com/u2i/reactive_dag/issues/262)) ([0ed7f4c](https://github.com/u2i/reactive_dag/commit/0ed7f4c975f154c7d7fdb044e8eb2f23630f2bc9))
+
+
+### Bug Fixes
+
+* name a discarded job by its worker when it has no cell ([#260](https://github.com/u2i/reactive_dag/issues/260)) ([7213b77](https://github.com/u2i/reactive_dag/commit/7213b77a0ec0fbc1a1a7477b4a46d0e60794032e))
+
 ## [0.17.0-rc.71](https://github.com/u2i/reactive_dag/compare/v0.17.0-rc.70...v0.17.0-rc.71) (2026-09-08)
 
 
