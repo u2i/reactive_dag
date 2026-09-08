@@ -19,6 +19,7 @@ config :reactive_dag, repo: MyApp.Repo
 | [`:suspension_table`](#suspension_table) | `"reactive_dag_suspension"` | no | `Suspension`, `Migration` |
 | [`:runs_table`](#runs_table) | `"reactive_dag_run"` | no | `Run`, `Migration` |
 | [`:run_repo`](#run_repo) | the main `:repo` | no | `Run` |
+| [`:run_log_keep_days`](#run_log_keep_days) | `90` | no | `RunPruneWorker` |
 | [`:cascade_timeout`](#cascade_timeout) | `30_000` | no | `Suspension` |
 | [`:dirty_table`](#dirty_table) | `"reactive_dag_dirty"` | no | `Migration.drop_dirty/1` only |
 | [`:oban_table`](#oban_table) | `"public.oban_jobs"` | no | `Suspension.stranded/1`, `Suspension.revive/1` |
@@ -119,6 +120,31 @@ caller's transaction, so a rolled-back attempt leaves no trace and in-flight
 progress is invisible until commit. `ReactiveDag.Run.isolated?/0` says which
 mode is in force, so a page can state it rather than implying a completeness
 the storage cannot deliver.
+
+### `:run_log_keep_days`
+
+How long run history is kept, in days.
+
+```elixir
+config :reactive_dag, run_log_keep_days: 90
+```
+
+Read by `ReactiveDag.RunPruneWorker`, which a host schedules in Oban's
+crontab:
+
+```elixir
+{Oban.Plugins.Cron, crontab: [{"20 3 * * *", ReactiveDag.RunPruneWorker}]}
+```
+
+Runs never discharge the way suspensions do — a suspension disappears when its
+work resumes, while every job ever executed leaves a run row — so without a
+prune the table grows for as long as the app runs.
+
+Ninety days answers what the log is for (when did this last succeed, how long
+has that been failing, what did last week's release change) and keeps the table
+small. A row that has not FINISHED is never deleted whatever its age: a
+resumption parked for six months is exactly what a status page should still be
+showing.
 
 ### `:oban_table`
 

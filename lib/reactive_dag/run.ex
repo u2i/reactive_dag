@@ -332,13 +332,28 @@ defmodule ReactiveDag.Run do
   def prune(%DateTime{} = cutoff, opts \\ []) do
     t = table()
 
+    # EVERY TENANT when none is named, rather than defaulting to `"*"` the way
+    # a read does. A read scoped to the wrong tenant returns nothing, which is
+    # merely unhelpful; a DELETE scoped to `"*"` on a multi-tenant host would
+    # prune only the untenanted rows and silently leave every real tenant's
+    # history growing forever.
+    #
+    # The table is its own authority on which tenants exist — it holds rows for
+    # exactly the ones that have run something, which is exactly the set worth
+    # pruning. That is what lets this live in the library at all: no plan, no
+    # host callback, no list to keep in step.
+    {clause, params} =
+      case Keyword.fetch(opts, :tenant) do
+        {:ok, tenant} -> {"AND tenant = $2", [cutoff, to_string(tenant)]}
+        :error -> {"", [cutoff]}
+      end
+
     safely(
       fn ->
         %{num_rows: n} =
           query!(
-            "DELETE FROM #{t} WHERE finished_at IS NOT NULL AND finished_at < $1 " <>
-              "AND tenant = $2",
-            [cutoff, tenant(opts)]
+            "DELETE FROM #{t} WHERE finished_at IS NOT NULL AND finished_at < $1 #{clause}",
+            params
           )
 
         n
