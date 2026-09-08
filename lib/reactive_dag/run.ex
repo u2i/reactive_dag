@@ -474,6 +474,10 @@ defmodule ReactiveDag.Run do
     )
   end
 
+  defp utc(nil), do: nil
+  defp utc(%DateTime{} = dt), do: dt
+  defp utc(%NaiveDateTime{} = n), do: DateTime.from_naive!(n, "Etc/UTC")
+
   # `MuniWatch.RedHook.AttendanceBackfillWorker` -> `AttendanceBackfillWorker`.
   # The prefix is the same on every row and costs the width that distinguishes
   # them.
@@ -551,9 +555,20 @@ defmodule ReactiveDag.Run do
       status: status,
       parent_run_id: parent,
       oban_job_id: job,
-      enqueued_at: enq,
-      started_at: start,
-      finished_at: fin,
+      # UTC `DateTime`, not the naive struct Postgrex hands back. The column is
+      # `:utc_datetime_usec`, but the library speaks to the host's repo through
+      # raw SQL — there is no Ecto type to do the loading — so a `timestamp`
+      # arrives as `~N[...]`.
+      #
+      # That is not a cosmetic difference. A consumer sorting these against any
+      # other timestamp gets `FunctionClauseError` in `DateTime.compare/2` the
+      # moment both shapes meet, which is exactly what took `/admin/dag` down
+      # with a 500 the first time a persisted row reached the page. Returning
+      # the type the column declares is the fix; asking every caller to
+      # normalise is not.
+      enqueued_at: utc(enq),
+      started_at: utc(start),
+      finished_at: utc(fin),
       duration_us: us,
       detail: detail || %{}
     }
