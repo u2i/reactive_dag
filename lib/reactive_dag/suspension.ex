@@ -387,6 +387,73 @@ defmodule ReactiveDag.Suspension do
   end
 
   @doc """
+  Stopping points with NO resumption job at all — never enqueued, or long gone.
+
+  `stranded/1`'s case is a job in a bad state. This is the absence of one, and
+  it is invisible to every check that looks for a job: the suspension sits
+  outstanding, nothing is queued for it, and nothing ever will be.
+
+  Observed in production: a `MotionZip` point suspended 2026-09-06 04:22 with
+  zero jobs — not completed, not failed, not discarded — carrying `waiting`
+  through two days while a status page said "it resumes when a job runs".
+  No job was coming.
+
+  ## How a point loses its job
+
+  `ResumptionWorker` documents the mechanism against itself. A cascade that
+  suspends schedules its own resumption from inside `Cascade.run/3`, and the
+  worker's uniqueness is `states: :incomplete` — which includes `:executing`.
+  So a suspension recorded while a resumption for a NEARBY point is running can
+  have its enqueue deduped against the very job making the request, and the
+  request is lost. The worker's own `reschedule_if_outstanding/2` covers the
+  point it just discharged; it cannot cover a different one.
+
+  The suspension then waits for an unrelated cascade to re-reach the point,
+  which for settled inputs never happens.
+
+  ## Oban's retention matters here
+
+  A job pruned by `Oban.Plugins.Pruner` also leaves a point looking orphaned.
+  That is not a false positive: a discharged point has no suspension row, so a
+  suspension whose job has been pruned really is outstanding work nothing will
+  resume.
+
+  Repair by enqueuing a resumption for the point — `ResumptionWorker.enqueue/2`,
+  or `Cascade.run/3` reaching it again.
+  """
+  @spec orphaned(keyword()) :: [map()]
+  def orphaned(opts \\ []) do
+    worker = Keyword.get(opts, :worker, "ReactiveDag.ResumptionWorker")
+
+    %{rows: rows} =
+      query!(
+        """
+        SELECT s.tenant, s.waiting, s.resource, s.row_uuid,
+               COUNT(*), MIN(s.inserted_at)
+          FROM #{table()} s
+         WHERE s.tenant = $1
+           AND NOT EXISTS (
+             SELECT 1 FROM #{oban_table()} j
+              WHERE j.worker = $2
+                AND j.args->>'waiting' = s.waiting
+                AND j.args->>'row_uuid' = s.row_uuid
+           )
+         GROUP BY s.tenant, s.waiting, s.resource, s.row_uuid
+         ORDER BY MIN(s.inserted_at)
+        """,
+        [tenant(opts), worker]
+      )
+
+    Enum.map(rows, fn [tenant, waiting, resource, row_uuid, count, oldest] ->
+      %{
+        point: %{tenant: tenant, waiting: waiting, resource: resource, row_uuid: row_uuid},
+        count: count,
+        oldest: oldest
+      }
+    end)
+  end
+
+  @doc """
   Make stranded resumption jobs fetchable again, returning the job ids revived.
 
   Raises `max_attempts` above `attempt` — the same expression Oban's own

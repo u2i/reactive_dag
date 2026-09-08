@@ -326,6 +326,10 @@ defmodule ReactiveDag.Run do
 
     * `:approval` — a suspension whose reason names a person, as opposed to
       `:expensive`, which resumes itself. The library knows these.
+    * `:orphaned` — a suspension with NO resumption job at all, never enqueued
+      or long pruned. The only kind where nothing is coming: every check that
+      looks for a job in a bad state misses it, which is how one sat unreported
+      for two days behind a page saying "it resumes when a job runs".
     * `:stranded` — a resumption job Oban can never fetch again. See
       `Suspension.stranded/1`: a final attempt that fails leaves the job
       `available` with `attempt == max_attempts`, unfetchable AND undiscarded,
@@ -354,7 +358,8 @@ defmodule ReactiveDag.Run do
   """
   @spec blocked(keyword()) :: [map()]
   def blocked(opts \\ []) do
-    approvals(opts) ++ stranded(opts) ++ discarded(opts) ++ host_blocked(opts)
+    approvals(opts) ++
+      orphaned(opts) ++ stranded(opts) ++ discarded(opts) ++ host_blocked(opts)
   end
 
   defp approvals(opts) do
@@ -373,6 +378,33 @@ defmodule ReactiveDag.Run do
               "row_uuid" => point.row_uuid,
               "count" => entry[:count],
               "since" => entry[:oldest] && to_string(entry[:oldest])
+            }
+          }
+        end
+      end,
+      []
+    )
+  end
+
+  # A point with NO job at all — never enqueued, or pruned. Distinct from
+  # `:stranded`, which is a job in a bad state: every check that looks for a
+  # job misses this one, which is why it sat unreported in production for two
+  # days behind a page saying "it resumes when a job runs".
+  #
+  # Listed FIRST among the library's kinds, because it is the only one where
+  # nothing at all is coming.
+  defp orphaned(opts) do
+    safely(
+      fn ->
+        for entry <- ReactiveDag.Suspension.orphaned(opts) do
+          %{
+            kind: :orphaned,
+            cell: entry.point.waiting,
+            detail: %{
+              "row_uuid" => entry.point.row_uuid,
+              "count" => entry.count,
+              "since" => entry.oldest && to_string(entry.oldest),
+              "repair" => "ReactiveDag.ResumptionWorker.enqueue/2"
             }
           }
         end
