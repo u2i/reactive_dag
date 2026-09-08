@@ -25,6 +25,7 @@ defmodule ReactiveDag.RealPostgresRunTest do
 
   @url System.get_env("REACTIVE_DAG_TEST_DATABASE_URL")
   @table "rd_test_run"
+  @susp_table "rd_test_susp"
 
   defmodule Repo do
     def query!(sql, params \\ []), do: Postgrex.query!(conn(), sql, params)
@@ -332,6 +333,21 @@ defmodule ReactiveDag.RealPostgresRunTest do
     setup do
       if @url do
         Repo.query!("DROP TABLE IF EXISTS rd_test_oban", [])
+        Repo.query!("DROP TABLE IF EXISTS #{@susp_table}", [])
+
+        # The suspension table too: `:orphaned` and `:approval` read it, and
+        # `orphaned/1` joins it against Oban's.
+        Repo.query!(
+          """
+          CREATE TABLE #{@susp_table} (
+            id text PRIMARY KEY, tenant text NOT NULL, waiting text NOT NULL,
+            resource text NOT NULL, row_uuid text NOT NULL DEFAULT '*',
+            version_id text NOT NULL DEFAULT '*', reason text NOT NULL,
+            inserted_at timestamp NOT NULL DEFAULT now(), lap integer NOT NULL DEFAULT 0
+          )
+          """,
+          []
+        )
 
         Repo.query!(
           """
@@ -345,12 +361,21 @@ defmodule ReactiveDag.RealPostgresRunTest do
         )
 
         prev = Application.get_env(:reactive_dag, :oban_table)
+        prev_susp = Application.get_env(:reactive_dag, :suspension_table)
         Application.put_env(:reactive_dag, :oban_table, "rd_test_oban")
+        Application.put_env(:reactive_dag, :suspension_table, @susp_table)
 
         on_exit(fn ->
           {:ok, c} = Postgrex.start_link(url_opts(@url))
           Postgrex.query!(c, "DROP TABLE IF EXISTS rd_test_oban", [])
+          Postgrex.query!(c, "DROP TABLE IF EXISTS #{@susp_table}", [])
           GenServer.stop(c)
+
+          if prev_susp do
+            Application.put_env(:reactive_dag, :suspension_table, prev_susp)
+          else
+            Application.delete_env(:reactive_dag, :suspension_table)
+          end
           if prev do
             Application.put_env(:reactive_dag, :oban_table, prev)
           else
@@ -383,6 +408,80 @@ defmodule ReactiveDag.RealPostgresRunTest do
         assert b.detail["error"] == "gave up here",
                "the LAST error — an exhausted job carries one per attempt, each " <>
                  "with a stacktrace, and this is read on a page"
+      end
+    end
+
+    test "a suspension with NO job is :orphaned, not merely waiting" do
+      if @url do
+        # FROM PRODUCTION. A `MotionZip` point suspended 2026-09-06 04:22 with
+        # zero jobs — not completed, not failed, not discarded — and sat two
+        # days behind a page saying "it resumes when a job runs". No job was
+        # coming. Every check that looks for a job in a BAD state missed it,
+        # because there was no job to be in one.
+        Repo.query!(
+          "INSERT INTO #{@susp_table} (id, tenant, waiting, resource, row_uuid, " <>
+            "version_id, reason, inserted_at) VALUES ($1,$2,$3,$4,$5,'*','expensive',now())",
+          ["s-orphan", "t", "MotionZip", "TranscriptExtract", "_06082026-738"]
+        )
+
+        assert [%{kind: :orphaned} = o] =
+                 Enum.filter(ReactiveDag.Run.blocked(tenant: "t"), &(&1.kind == :orphaned))
+
+        assert o.cell == "MotionZip", "the cell it stopped AT, not the change's origin"
+        assert o.detail["row_uuid"] == "_06082026-738"
+
+        assert o.detail["repair"] =~ "ResumptionWorker.enqueue",
+               "nothing is coming, so the row must say what would move it"
+      end
+    end
+
+    test "the job must match the KEY, not just the cell" do
+      if @url do
+        # Two points on ONE cell, different keys. A job for one says nothing
+        # about the other — and matching on `waiting` alone would report the
+        # unqueued key as healthy, which is the failure mode of this whole
+        # check: silence about work nothing will resume.
+        for key <- ~w(_m1 _m2) do
+          Repo.query!(
+            "INSERT INTO #{@susp_table} (id, tenant, waiting, resource, row_uuid, " <>
+              "version_id, reason, inserted_at) VALUES ($1,'t','Zip','Docs',$2,'*','expensive',now())",
+            ["s-#{key}", key]
+          )
+        end
+
+        # A job for _m1 ONLY.
+        Repo.query!(
+          "INSERT INTO rd_test_oban (worker, state, args) VALUES ($1, 'available', $2)",
+          ["ReactiveDag.ResumptionWorker", %{"waiting" => "Zip", "row_uuid" => "_m1"}]
+        )
+
+        orphans =
+          ReactiveDag.Run.blocked(tenant: "t")
+          |> Enum.filter(&(&1.kind == :orphaned))
+          |> Enum.map(& &1.detail["row_uuid"])
+
+        assert orphans == ["_m2"],
+               "_m1 has a job and _m2 does not; matching on the cell alone would " <>
+                 "report both as healthy"
+      end
+    end
+
+    test "a suspension WITH a job is not orphaned" do
+      if @url do
+        # The false positive that would matter: reporting healthy queued work
+        # as abandoned would make the panel noise, and noise gets ignored.
+        Repo.query!(
+          "INSERT INTO #{@susp_table} (id, tenant, waiting, resource, row_uuid, " <>
+            "version_id, reason, inserted_at) VALUES ($1,$2,$3,$4,$5,'*','expensive',now())",
+          ["s-healthy", "t", "Extract", "Docs", "_m1"]
+        )
+
+        Repo.query!(
+          "INSERT INTO rd_test_oban (worker, state, args) VALUES ($1, 'available', $2)",
+          ["ReactiveDag.ResumptionWorker", %{"waiting" => "Extract", "row_uuid" => "_m1"}]
+        )
+
+        assert Enum.filter(ReactiveDag.Run.blocked(tenant: "t"), &(&1.kind == :orphaned)) == []
       end
     end
 
