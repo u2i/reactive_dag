@@ -420,7 +420,12 @@ defmodule ReactiveDag.Run do
         for [id, worker, cell, errors] <- rows do
           %{
             kind: :discarded,
-            cell: cell,
+            # THE WORKER when there is no cell. A discarded job is often not a
+            # cascade job at all — a host's own backfill worker carries
+            # `%{"batch" => 80}` and no cell — and three rows reading
+            # `discarded | —` tell a reader nothing about which three. The
+            # worker's last segment is the identifying fact there.
+            cell: cell || short_worker(worker),
             detail: %{
               "job_id" => id,
               "worker" => worker,
@@ -436,6 +441,12 @@ defmodule ReactiveDag.Run do
       []
     )
   end
+
+  # `MuniWatch.RedHook.AttendanceBackfillWorker` -> `AttendanceBackfillWorker`.
+  # The prefix is the same on every row and costs the width that distinguishes
+  # them.
+  defp short_worker(nil), do: nil
+  defp short_worker(worker), do: worker |> to_string() |> String.split(".") |> List.last()
 
   # CONTAINED. A resolver that raises costs its own entries, not the three kinds
   # the library can see for itself — a blocked panel that goes blank because one
