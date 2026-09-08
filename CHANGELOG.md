@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.17.0-rc.71](https://github.com/u2i/reactive_dag/compare/v0.17.0-rc.70...v0.17.0-rc.71) (2026-09-08)
+
+
+### Features
+
+* Run.blocked/1 — work that will not proceed without a person ([#258](https://github.com/u2i/reactive_dag/issues/258)) ([f07f8f1](https://github.com/u2i/reactive_dag/commit/f07f8f1d893cadfbd4a7c35fedb33aee9e7f9a86))
+
 ## [0.17.0-rc.70](https://github.com/u2i/reactive_dag/compare/v0.17.0-rc.69...v0.17.0-rc.70) (2026-09-08)
 
 
