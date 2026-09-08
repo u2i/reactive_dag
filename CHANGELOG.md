@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.17.0-rc.70](https://github.com/u2i/reactive_dag/compare/v0.17.0-rc.69...v0.17.0-rc.70) (2026-09-08)
+
+
+### Features
+
+* the library prunes its own run log ([#256](https://github.com/u2i/reactive_dag/issues/256)) ([87ba1b6](https://github.com/u2i/reactive_dag/commit/87ba1b6af7a2b57d234493ff494f09649dd012c9))
+
 ## [0.17.0-rc.69](https://github.com/u2i/reactive_dag/compare/v0.17.0-rc.68...v0.17.0-rc.69) (2026-09-07)
 
 
