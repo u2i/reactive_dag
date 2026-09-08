@@ -96,6 +96,33 @@ defmodule ReactiveDag.RealPostgresRunTest do
 
   describe "the lifecycle" do
     @describetag :postgres
+    test "timestamps come back as DateTime, not the naive struct" do
+      if @url do
+        # THE 500. The library speaks to the host's repo through raw SQL, so a
+        # `timestamp` column arrives from Postgrex as `~N[...]` — and a consumer
+        # sorting these against any other timestamp gets `FunctionClauseError`
+        # in `DateTime.compare/2` the moment both shapes meet. That took
+        # `/admin/dag` down the first time a persisted row reached the page.
+        #
+        # Every test here read fields individually, so none of them ever put two
+        # timestamps in the same comparison. This one does.
+        id = Run.queued(:cascade, tenant: "t", cell: "c")
+        Run.started(id, [])
+        Run.finished(id, :done, duration_us: 1)
+
+        assert [r] = Run.recent(tenant: "t", limit: 1)
+
+        assert %DateTime{} = r.enqueued_at
+        assert %DateTime{} = r.started_at
+        assert %DateTime{} = r.finished_at
+
+        # The comparison that actually failed: a persisted row beside a
+        # `DateTime` from anywhere else.
+        assert [_, _] =
+                 Enum.sort_by([%{at: r.enqueued_at}, %{at: DateTime.utc_now()}], & &1.at, {:desc, DateTime})
+      end
+    end
+
     test "a row exists from the moment the job is CREATED" do
       if @url do
         id = Run.queued(:cascade, tenant: "t", cell: "agenda_items")
