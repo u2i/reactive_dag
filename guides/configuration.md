@@ -20,6 +20,7 @@ config :reactive_dag, repo: MyApp.Repo
 | [`:runs_table`](#runs_table) | `"reactive_dag_run"` | no | `Run`, `Migration` |
 | [`:run_repo`](#run_repo) | the main `:repo` | no | `Run` |
 | [`:run_log_keep_days`](#run_log_keep_days) | `90` | no | `RunPruneWorker` |
+| [`:blocked_resolver`](#blocked_resolver) | none | no | `Run.blocked/1` |
 | [`:cascade_timeout`](#cascade_timeout) | `30_000` | no | `Suspension` |
 | [`:dirty_table`](#dirty_table) | `"reactive_dag_dirty"` | no | `Migration.drop_dirty/1` only |
 | [`:oban_table`](#oban_table) | `"public.oban_jobs"` | no | `Suspension.stranded/1`, `Suspension.revive/1` |
@@ -145,6 +146,34 @@ has that been failing, what did last week's release change) and keeps the table
 small. A row that has not FINISHED is never deleted whatever its age: a
 resumption parked for six months is exactly what a status page should still be
 showing.
+
+### `:blocked_resolver`
+
+Extra kinds of blocked work, for `ReactiveDag.Run.blocked/1`.
+
+```elixir
+config :reactive_dag, blocked_resolver: {MyApp.Blocked, :list, []}
+```
+
+`blocked/1` already reports three kinds without any host help, because the
+library owns the suspension table and can read Oban's:
+
+  * `:approval` — a suspension whose reason names a person, as opposed to
+    `:expensive`, which resumes itself
+  * `:stranded` — a resumption job Oban can never fetch again (see
+    `ReactiveDag.Suspension.stranded/1`); it also dedups every future enqueue
+    for its point, so the queue looks healthy while the work is dead
+  * `:discarded` — a job that exhausted its attempts and stopped
+
+What it cannot know is anything about a host's own domain: whether an LLM gate
+is off, whether a budget is spent, whether a row is parked awaiting a
+judgement. A library that guessed at those would be wrong in a way nobody could
+correct, so a host supplies them.
+
+Called with `blocked/1`'s opts, returning a list of maps carrying at least
+`:kind` and `:detail`. Failures are contained: a resolver that raises costs its
+own entries and not the three kinds above — a blocked panel that goes blank
+because one contributor broke is worse than one that is incomplete.
 
 ### `:oban_table`
 
