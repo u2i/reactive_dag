@@ -17,7 +17,68 @@ defmodule ReactiveDag.SliceTest do
   use ReactiveDag.PostgresCase
 
   alias ReactiveDag.Fixtures.SliceGraph
-  alias ReactiveDag.Fixtures.SliceGraph.{Standing, Docs, Lines, NotASource, Plain, Tableless, TenantedLines}
+  alias ReactiveDag.Fixtures.SliceGraph.{Lines, NotASource, Plain, Tableless, TenantedLines}
+
+  # DELIBERATELY INCOMPLETE, and therefore inline rather than in the fixture.
+  # These declare no computation, which is the thing under test: `Rows.slices/1`
+  # and `Rows.poll_opts/2` read their META and never their rows. Assembly warns
+  # at the `defmodule`, which is correct and expected here — in a fixture it
+  # would warn on every compile of every unrelated test.
+
+  # a SOURCE whose upstream is addressable by the same dimension its rows are
+  # sliced by — and which spells it differently, which is the case `poll_as:`
+  # exists for. The crawler takes `fiscal:`; the column is `fiscal_year`.
+  defmodule Docs do
+    use Ash.Resource,
+      domain: ReactiveDag.Fixtures.SliceGraph.Domain,
+      data_layer: Ash.DataLayer.Simple,
+      extensions: [ReactiveDag.Node]
+
+    attributes do
+      attribute :key, :string, primary_key?: true, allow_nil?: false, public?: true
+      attribute :fiscal_year, :string, public?: true
+      attribute :board, :string, public?: true
+    end
+
+    actions do
+      defaults [:read, :destroy]
+      create :upsert, upsert?: true, accept: [:key, :fiscal_year, :board]
+    end
+
+    reactive do
+      id(:docs)
+      poll(ReactiveDag.Fixtures.SliceGraph.Crawler)
+
+      slice(:fiscal_year, values: ["FY24/25", "FY25/26"], poll_as: :fiscal)
+      # no `poll_as:` — the scanner spells this one the same as the column
+      slice(:board)
+    end
+  end
+
+  defmodule Standing do
+    use Ash.Resource,
+      domain: ReactiveDag.Fixtures.SliceGraph.Domain,
+      data_layer: Ash.DataLayer.Simple,
+      extensions: [ReactiveDag.Node]
+
+    attributes do
+      attribute :key, :string, primary_key?: true, allow_nil?: false, public?: true
+      attribute :fiscal_year, :string, public?: true
+    end
+
+    actions do
+      defaults [:read, :destroy]
+      create :upsert, upsert?: true, accept: [:key, :fiscal_year]
+    end
+
+    reactive do
+      id(:standing)
+      # a STANDING arg, so the test proves a selection composes with the
+      # declaration rather than replacing it
+      poll(ReactiveDag.Fixtures.SliceGraph.Recorder, args: [recent: true])
+      slice(:fiscal_year, values: ["FY25/26"], poll_as: :fiscal)
+    end
+  end
 
   alias ReactiveDag.Node.Rows
 

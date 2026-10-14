@@ -180,12 +180,6 @@ defmodule ReactiveDag.Fixtures.ExpenseGraph do
     `Publish` is about STRUCTURE — a `compose` leg that owns no table — so the
     computation itself must not be a variable.
     """
-    @moduledoc """
-    A compute that changes nothing.
-
-    The node under test is about STRUCTURE — a `compose` leg that owns no
-    table — so the computation itself must not be a variable.
-    """
     @behaviour ReactiveDag.Op
     @impl true
     def recompute(_cell, _keys), do: {:ok, []}
