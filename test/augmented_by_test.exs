@@ -22,278 +22,39 @@ defmodule ReactiveDag.AugmentedByTest do
   The human edit attaches to the node's key by construction too: the write goes
   through the node's own action, on the node's own row.
   """
-  use ExUnit.Case, async: false
+  use ReactiveDag.PostgresCase
 
   alias ReactiveDag.{Cascade, Node}
+  alias ReactiveDag.Fixtures.AugmentedGraph
+
+  alias ReactiveDag.Fixtures.AugmentedGraph.{
+    CategoryTotals,
+    Expenses,
+    Readings,
+    Rollups,
+    Verdicts
+  }
+
   alias ReactiveDag.Node.Verifiers.VerifyReactive
 
-  defmodule Domain do
-    use Ash.Domain, validate_config_inclusion?: false
-
-    resources do
-      allow_unregistered?(true)
-    end
-  end
-
-  # THE CASE THE FEATURE EXISTS FOR: a computed node (the library writes its
-  # rows through `:upsert`) that a human also corrects and approves.
-  defmodule CategoryTotals do
-    use Ash.Resource,
-      domain: Domain,
-      data_layer: Ash.DataLayer.Ets,
-      extensions: [ReactiveDag.Node]
-
-    ets do
-    end
-
-    attributes do
-      attribute :key, :string, primary_key?: true, allow_nil?: false, public?: true
-      attribute :category, :string, public?: true
-      attribute :total, :float, public?: true
-      attribute :n, :integer, public?: true
-      attribute :note, :string, public?: true
-    end
-
-    # NO `identity … pre_check_with:` here, deliberately. The single-attribute
-    # primary key is what an upsert conflicts on anyway, and a pre-checked
-    # identity adds a `before_action` hook that makes every UPDATE on the
-    # resource non-atomic — which has nothing to do with this feature but would
-    # stop the human's `:correct` from running at all.
-    actions do
-      defaults [:read, :destroy]
-
-      # the PAYLOAD action — the library's own write. Never marks.
-      create :upsert do
-        upsert?(true)
-        accept([:key, :category, :total, :n, :note])
-      end
-
-      # the HUMAN's actions. `:add` is a CREATE on purpose: it makes
-      # `augmented_by` cover the same action TYPE as the payload upsert, so a
-      # wiring that went by type instead of by name would sweep `:upsert` in
-      # too — which is exactly the infinite loop, and is what the payload test
-      # below would then catch.
-      create :add do
-        accept([:key, :category, :total, :n])
-      end
-
-      update :correct do
-        accept([:total])
-      end
-
-      update :approve do
-        accept([:note])
-      end
-
-      # a write action deliberately NOT augmented: an internal annotation that
-      # should not re-run the cascade
-      update :annotate do
-        accept([:note])
-      end
-    end
-
-    reactive do
-      id(:category_totals)
-      op(:fold)
-
-      recompute_by :category, to: :expenses, from: :category
-      reduce into: [sum: [amount: :total], count: :n]
-
-      # THE FEATURE: these three actions mark; `:upsert` and `:annotate` do not
-      augmented_by([:add, :correct, :approve])
-    end
-  end
-
-  defmodule Expenses do
-    use Ash.Resource,
-      domain: Domain,
-      data_layer: Ash.DataLayer.Ets,
-      extensions: [ReactiveDag.Node]
-
-    ets do
-    end
-
-    attributes do
-      attribute :key, :string, primary_key?: true, allow_nil?: false, public?: true
-      attribute :category, :string, public?: true
-      attribute :amount, :float, public?: true
-    end
-
-    actions do
-      defaults [:read, :destroy]
-
-      create :create do
-        accept([:key, :category, :amount])
-      end
-    end
-
-    reactive do
-      id(:expenses)
-      op(:source)
-      leaf?(true)
-      dirties_on([:create, :update, :destroy])
-    end
-  end
-
-  # a COMPOSITE-PK computed node: the cell key is the identity serialization,
-  # exactly as it is for `dirties_on` (mirrors that test's Rollups).
-  defmodule Rollups do
-    use Ash.Resource,
-      domain: Domain,
-      data_layer: Ash.DataLayer.Ets,
-      extensions: [ReactiveDag.Node]
-
-    ets do
-    end
-
-    attributes do
-      attribute :fund, :string, primary_key?: true, allow_nil?: false, public?: true
-      attribute :fy, :string, primary_key?: true, allow_nil?: false, public?: true
-      attribute :total, :float, public?: true
-    end
-
-    actions do
-      defaults [:read, :destroy]
-
-      create :upsert do
-        upsert?(true)
-        accept([:fund, :fy, :total])
-      end
-
-      update :correct do
-        accept([:total])
-      end
-    end
-
-    reactive do
-      id(:rollups)
-      leaf?(true)
-      augmented_by([:correct])
-    end
-  end
-
-  # An augmented write enqueues its cascade in the same
-  # transaction as the mark.
-  defmodule Verdicts do
-    use Ash.Resource,
-      domain: Domain,
-      data_layer: Ash.DataLayer.Ets,
-      extensions: [ReactiveDag.Node]
-
-    ets do
-    end
-
-    attributes do
-      attribute :key, :string, primary_key?: true, allow_nil?: false, public?: true
-      attribute :status, :string, public?: true
-    end
-
-    actions do
-      defaults [:read, :destroy]
-
-      create :upsert do
-        upsert?(true)
-        accept([:key, :status])
-      end
-
-      update :override do
-        accept([:status])
-      end
-    end
-
-    reactive do
-      id(:verdicts)
-      leaf?(true)
-      augmented_by([:override])
-    end
-  end
-
-  # a leaf that is ALSO human-augmented: `dirties_on` covers every write,
-  # `augmented_by` names one of those same actions. It must mark ONCE.
-  defmodule Readings do
-    use Ash.Resource,
-      domain: Domain,
-      data_layer: Ash.DataLayer.Ets,
-      extensions: [ReactiveDag.Node]
-
-    ets do
-    end
-
-    attributes do
-      attribute :key, :string, primary_key?: true, allow_nil?: false, public?: true
-      attribute :value, :float, public?: true
-    end
-
-    actions do
-      defaults [:read, :destroy]
-
-      create :create do
-        accept([:key, :value])
-      end
-
-      update :correct do
-        accept([:value])
-      end
-    end
-
-    reactive do
-      id(:readings)
-      leaf?(true)
-      # :correct is an `:update`, so BOTH cover it
-      dirties_on([:create, :update])
-      augmented_by([:correct])
-    end
-  end
-
-  defmodule FakeRepo do
-    def start_link, do: Agent.start_link(fn -> %{} end, name: __MODULE__)
-
-    def query!("INSERT INTO " <> _, params) do
-      params
-      |> Enum.chunk_every(7)
-      |> Enum.each(fn [cell, _tenant, key, _r, _t, _held, vid] ->
-        Agent.update(__MODULE__, fn m -> Map.put_new(m, {cell, key}, vid) end)
-      end)
-
-      %{rows: []}
-    end
-
-    def query!("SELECT DISTINCT cell_id" <> _, _params) do
-      ids = Agent.get(__MODULE__, & &1) |> Map.keys() |> Enum.map(&elem(&1, 0)) |> Enum.uniq()
-      %{rows: Enum.map(ids, &[&1])}
-    end
-
-    def query!("DELETE FROM " <> _, [cell | _tenant]) do
-      rows =
-        Agent.get_and_update(__MODULE__, fn m ->
-          {mine, rest} = Enum.split_with(m, fn {{c, _}, _} -> c == cell end)
-          {Enum.map(mine, fn {{_c, k}, vid} -> [k, vid] end), Map.new(rest)}
-        end)
-
-      %{rows: rows}
-    end
-
-    def query!("SELECT COUNT" <> _, _params), do: %{rows: [[Agent.get(__MODULE__, &map_size/1)]]}
-    def query!("SELECT pg_try_advisory_lock" <> _, _params), do: %{rows: [[true]]}
-    def query!("SELECT pg_advisory_unlock" <> _, _params), do: %{rows: [[true]]}
-
-    def dirty, do: Agent.get(__MODULE__, &Map.keys/1) |> Enum.sort()
+  setup_all do
+    migrate!(AugmentedGraph.Domain)
+    :ok
   end
 
   setup do
-    start_supervised!(%{id: FakeRepo, start: {FakeRepo, :start_link, []}})
-    prev_repo = Application.get_env(:reactive_dag, :repo)
-    Application.put_env(:reactive_dag, :repo, FakeRepo)
+    pid = Ecto.Adapters.SQL.Sandbox.start_owner!(ReactiveDag.TestRepo, shared: true)
+    on_exit(fn -> Ecto.Adapters.SQL.Sandbox.stop_owner(pid) end)
 
-    on_exit(fn -> Application.put_env(:reactive_dag, :repo, prev_repo) end)
+    migrate_library_tables!()
 
     # An augmented write no longer marks a table a test can read back — it
     # enqueues a cascade. This is the seam that catches those enqueues, so the
     # assertions below can ask what a write ORIGINATED without an Oban running.
     ReactiveDag.Test.Pending.capture_enqueues()
 
-    # the ETS tables are shared, so start each test from a known-empty state —
-    # including the frontier, which the destroys above would otherwise re-dirty.
+    # start each test from a known-empty state — including the frontier, which
+    # the destroys above would otherwise re-dirty.
     for res <- [Expenses, CategoryTotals, Rollups, Verdicts, Readings] do
       res |> Ash.read!() |> Enum.each(&Ash.destroy!/1)
     end
@@ -398,6 +159,7 @@ defmodule ReactiveDag.AugmentedByTest do
 
   test "the key is the IDENTITY serialization for a composite primary key" do
     Node.Payload.upsert_identity(Rollups, [:fund, :fy], %{fund: "gf", fy: "2025", total: 1.0})
+
     assert ReactiveDag.Test.Pending.enqueued_work() == [],
            "and the payload write itself still originates nothing"
 
@@ -476,7 +238,7 @@ defmodule ReactiveDag.AugmentedByTest do
     test "an UNKNOWN action is rejected, and the message lists the real ones" do
       defmodule Ghost do
         use Ash.Resource,
-          domain: ReactiveDag.AugmentedByTest.Domain,
+          domain: ReactiveDag.Fixtures.AugmentedGraph.Domain,
           data_layer: Ash.DataLayer.Ets,
           extensions: [ReactiveDag.Node]
 
@@ -518,7 +280,7 @@ defmodule ReactiveDag.AugmentedByTest do
     test "a READ action is rejected — a mark is a consequence of a WRITE" do
       defmodule Readable do
         use Ash.Resource,
-          domain: ReactiveDag.AugmentedByTest.Domain,
+          domain: ReactiveDag.Fixtures.AugmentedGraph.Domain,
           data_layer: Ash.DataLayer.Ets,
           extensions: [ReactiveDag.Node]
 
@@ -554,7 +316,7 @@ defmodule ReactiveDag.AugmentedByTest do
     test "the PAYLOAD action is rejected, with the infinite loop spelled out" do
       defmodule SelfDirtying do
         use Ash.Resource,
-          domain: ReactiveDag.AugmentedByTest.Domain,
+          domain: ReactiveDag.Fixtures.AugmentedGraph.Domain,
           data_layer: Ash.DataLayer.Ets,
           extensions: [ReactiveDag.Node]
 
@@ -593,7 +355,7 @@ defmodule ReactiveDag.AugmentedByTest do
     test "a RENAMED payload action is what's rejected — the check follows the option" do
       defmodule Renamed do
         use Ash.Resource,
-          domain: ReactiveDag.AugmentedByTest.Domain,
+          domain: ReactiveDag.Fixtures.AugmentedGraph.Domain,
           data_layer: Ash.DataLayer.Ets,
           extensions: [ReactiveDag.Node]
 
