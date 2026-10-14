@@ -11,158 +11,14 @@ defmodule ReactiveDag.ExactGroupScopeTest do
   `Diff.groups/2` derives the group's VALUES, so the claim names exact pairs.
   This asserts the read is exact by counting the rows the fold actually saw.
   """
-  use ExUnit.Case, async: false
+  use ReactiveDag.PostgresCase
+
+  alias ReactiveDag.Fixtures.FundYearGraph
+  alias ReactiveDag.Fixtures.FundYearGraph.{Lines, Projected, KeyedRollup}
 
   alias ReactiveDag.{Cascade}
 
-  defmodule Versions do
-    def start_link, do: Agent.start_link(fn -> %{} end, name: __MODULE__)
-
-    def suppress(key), do: Agent.update(__MODULE__, &Map.put(&1, {:suppress, key}, true))
-
-    def record(written, prior) do
-      if Agent.get(__MODULE__, &Map.get(&1, {:suppress, Map.get(written, :key)})) do
-        nil
-      else
-        do_record(written, prior)
-      end
-    end
-
-    defp do_record(written, prior) do
-      id = "v-" <> to_string(System.unique_integer([:positive]))
-      Agent.update(__MODULE__, &Map.put(&1, id, diff(prior, written)))
-      id
-    end
-
-    def changes(id), do: Agent.get(__MODULE__, &Map.get(&1, id))
-
-    # The `:full_diff` shape, from the two records.
-    defp diff(nil, written) do
-      Map.new([:key, :fund, :year, :amount], fn f ->
-        {to_string(f), %{"to" => Map.get(written, f)}}
-      end)
-    end
-
-    defp diff(prior, written) do
-      Map.new([:key, :fund, :year, :amount], fn f ->
-        old = Map.get(prior, f)
-        new = Map.get(written, f)
-        {to_string(f), if(old == new, do: %{"unchanged" => new}, else: %{"from" => old, "to" => new})}
-      end)
-    end
-  end
-
-  defmodule Domain do
-    use Ash.Domain, validate_config_inclusion?: false
-    resources(do: allow_unregistered?(true))
-  end
-
-  defmodule Lines do
-    use Ash.Resource, domain: Domain, data_layer: Ash.DataLayer.Ets, extensions: [ReactiveDag.Node]
-    ets(do: private?(true))
-
-    attributes do
-      attribute :key, :string, primary_key?: true, allow_nil?: false, public?: true
-      attribute :fund, :string, public?: true
-      attribute :year, :string, public?: true
-      attribute :amount, :integer, public?: true
-    end
-
-    actions do
-      defaults [:read, :destroy]
-      create :upsert, upsert?: true, accept: [:key, :fund, :year, :amount]
-    end
-
-    reactive do
-      id(:lines)
-      leaf?(true)
-      payload_key(:key)
-    end
-  end
-
-  defmodule Projected do
-    use Ash.Resource, domain: Domain, data_layer: Ash.DataLayer.Ets, extensions: [ReactiveDag.Node]
-    ets(do: private?(true))
-
-    attributes do
-      attribute :key, :string, primary_key?: true, allow_nil?: false, public?: true
-      attribute :fund, :string, public?: true
-      attribute :year, :string, public?: true
-      attribute :amount, :integer, public?: true
-    end
-
-    actions do
-      defaults [:read, :destroy]
-      create :upsert, upsert?: true, accept: [:key, :fund, :year, :amount]
-    end
-
-    reactive do
-      id(:projected)
-      op(:map)
-      payload_key(:key)
-      depends_on([:lines])
-      compute(ReactiveDag.ExactGroupScopeTest.Project)
-    end
-  end
-
-  defmodule Rollup do
-    use Ash.Resource, domain: Domain, data_layer: Ash.DataLayer.Ets, extensions: [ReactiveDag.Node]
-    ets(do: private?(true))
-
-    attributes do
-      attribute :rollup_key, :string, primary_key?: true, allow_nil?: false, public?: true
-      attribute :fund, :string, public?: true
-      attribute :year, :string, public?: true
-      attribute :total, :integer, public?: true
-    end
-
-    actions do
-      defaults [:read, :destroy]
-      create :upsert, upsert?: true, accept: [:rollup_key, :fund, :year, :total]
-    end
-
-    reactive do
-      id(:rollup)
-      op(:fold)
-      payload_key(:rollup_key)
-      recompute_by([fund: :fund, year: :year], to: :projected)
-      # COUNTS the rows the fold was handed, so an over-read is visible.
-      reduce(query: &ReactiveDag.ExactGroupScopeTest.count_read/2, into: [sum: [amount: :total]])
-    end
-  end
-
-  defmodule Project do
-    @behaviour ReactiveDag.Op
-
-    @impl true
-    def recompute(cell, keys, opts \\ []) do
-      lines =
-        case keys do
-          ["*"] -> Ash.read!(Lines)
-          ks -> Enum.filter(Ash.read!(Lines), &(&1.key in ks))
-        end
-
-      changed =
-        for l <- lines,
-            ReactiveDag.Node.Payload.upsert_row(
-              Projected,
-              cell.meta,
-              l.key,
-              %{key: l.key, fund: l.fund, year: l.year, amount: l.amount},
-              opts
-            ) != :unchanged do
-          l.key
-        end
-
-      {:ok, changed}
-    end
-  end
-
-  # The fold's `query:`. Runs BEFORE the library's auto scope, so it is a
-  # pass-through here — the scope is asserted directly via `auto_scope/3`.
-  def count_read(query, _claimed), do: query
-
-  defp plan, do: ReactiveDag.Node.graph([Lines, Projected, Rollup])
+  defp plan, do: FundYearGraph.plan()
 
   defp drain,
     do: ReactiveDag.Test.Pending.cascade(plan(), recompute: ReactiveDag.Node.Recompute, key_rule: ReactiveDag.Node.KeyRule)
@@ -172,12 +28,19 @@ defmodule ReactiveDag.ExactGroupScopeTest do
     ReactiveDag.Test.Pending.add("lines", [key])
   end
 
+  setup_all do
+    migrate!(FundYearGraph.Domain)
+    :ok
+  end
+
   setup do
+    pid = Ecto.Adapters.SQL.Sandbox.start_owner!(ReactiveDag.TestRepo, shared: true)
+    on_exit(fn -> Ecto.Adapters.SQL.Sandbox.stop_owner(pid) end)
+
     start_supervised!(ReactiveDag.Test.FakeSuspensionRepo)
     ReactiveDag.Test.FakeSuspensionRepo.install()
-    start_supervised!(%{id: Versions, start: {Versions, :start_link, []}})
 
-    for m <- [Lines, Projected, Rollup], r <- Ash.read!(m), do: Ash.destroy!(r)
+    for m <- [Lines, Projected, KeyedRollup], r <- Ash.read!(m), do: Ash.destroy!(r)
     ReactiveDag.Test.Pending.reset()
     :ok
   end
@@ -191,7 +54,7 @@ defmodule ReactiveDag.ExactGroupScopeTest do
     put_line("d", "water", "2025", 8)
     {:ok, _} = drain()
 
-    assert (Rollup |> Ash.get!("gf|2026")).total == 4
+    assert (KeyedRollup |> Ash.get!("gf|2026")).total == 4
 
     # Touch gf|2025 and water|2026 only. Splitting the two labels per column
     # yields fund in [gf, water] AND year in [2025, 2026] — the whole grid.
@@ -204,8 +67,8 @@ defmodule ReactiveDag.ExactGroupScopeTest do
 
     # The untouched diagonal keeps its value either way — this is about the READ,
     # not the write, so assert on what the fold was given.
-    assert (Rollup |> Ash.get!("gf|2026")).total == 4
-    assert (Rollup |> Ash.get!("water|2025")).total == 8
+    assert (KeyedRollup |> Ash.get!("gf|2026")).total == 4
+    assert (KeyedRollup |> Ash.get!("water|2025")).total == 8
   end
 
   test "the QUEUE holds child keys, and the fold derives its own units" do
@@ -238,40 +101,49 @@ defmodule ReactiveDag.ExactGroupScopeTest do
 
     # The untouched diagonal is neither claimed nor disturbed.
     refute "gf|2026" in steps["rollup"].claimed
-    assert (Rollup |> Ash.get!("gf|2026")).total == 4
-    assert (Rollup |> Ash.get!("water|2025")).total == 8
+    assert (KeyedRollup |> Ash.get!("gf|2026")).total == 4
+    assert (KeyedRollup |> Ash.get!("water|2025")).total == 8
 
     # …and the two that were claimed hold the new values.
-    assert (Rollup |> Ash.get!("gf|2025")).total == 16
-    assert (Rollup |> Ash.get!("water|2026")).total == 32
+    assert (KeyedRollup |> Ash.get!("gf|2025")).total == 16
+    assert (KeyedRollup |> Ash.get!("water|2026")).total == 32
   end
 
   test "a PARTIAL derivation is refused — all changed keys, or none" do
     # The guard: a fold derives its units only when EVERY changed child key
-    # carries a version. Deriving from some of them would claim the units those
-    # rows belong to and silently strand the rest — a drain that reports success
-    # having left work undone, which is the worst failure this queue can have.
+    # carries a stamp. Deriving from some of them would claim the units those
+    # rows belong to and silently strand the rest — a drain that reports
+    # success having left work undone, which is the worst failure this queue
+    # can have.
     #
-    # `d` is written with versioning suppressed, so its change has no reference.
-    # The claim must then fall back to the mapped keys rather than deriving from
-    # `a` alone.
+    # Driven through the mechanism that EXISTS: a cascade origin carries
+    # `versions`, a `key => recorded_at` map that suspensions use to diff
+    # against history. Handing it a stamp for `a` but not `d` is exactly the
+    # partial state, without needing the deleted `version_id` resolver that
+    # used to simulate it.
     put_line("a", "gf", "2025", 1)
     put_line("d", "water", "2025", 8)
     {:ok, _} = drain()
 
-    Versions.suppress("d")
-    put_line("a", "gf", "2025", 16)
-    put_line("d", "water", "2025", 64)
-    {:ok, report} = drain()
+    Ash.create!(Lines, %{key: "a", fund: "gf", year: "2025", amount: 16}, action: :upsert)
+    Ash.create!(Lines, %{key: "d", fund: "water", year: "2025", amount: 64}, action: :upsert)
+
+    {:ok, report} =
+      ReactiveDag.Cascade.run(
+        plan(),
+        [%{cell: "lines", keys: ["a", "d"], versions: %{"a" => DateTime.utc_now()}}],
+        recompute: ReactiveDag.Node.Recompute,
+        key_rule: ReactiveDag.Node.KeyRule
+      )
 
     claimed = Map.new(report.steps, &{&1.cell, &1})["rollup"].claimed
 
-    # BOTH units repriced. Deriving from `a` only would claim `gf|2025` and leave
-    # `water|2025` holding 8.
-    assert (Rollup |> Ash.get!("water|2025")).total == 64,
-           "a key whose change carried no version must not be stranded"
+    # BOTH units repriced. Deriving from `a` only would claim `gf|2025` and
+    # leave `water|2025` holding 8.
+    assert (KeyedRollup |> Ash.get!("water|2025")).total == 64,
+           "a key whose change carried no stamp must not be stranded"
 
-    assert (Rollup |> Ash.get!("gf|2025")).total == 16
+    assert (KeyedRollup |> Ash.get!("gf|2025")).total == 16
     refute claimed == ["gf|2025"], "a partial derivation was used"
   end
 
