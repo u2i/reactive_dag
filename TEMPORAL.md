@@ -253,3 +253,32 @@ takes:
 That is the `:full_diff` shape `Diff.groups/3` consumes, derived from history
 with nothing stored. The path removed with `version_id` is replaced and
 measured, not merely compiled.
+
+## Staleness, asked of the data — `ReactiveDag.Stale`
+
+    stale(child) <=> exists parent : parent.recorded_at > child.recorded_at
+
+Edges come from the plan (`cell.inputs`), so there is no list to keep in step.
+The two rules that translate cleanly are done:
+
+  * `:identity` — a join on the key.
+  * `:all` — NEWEST parent against OLDEST child. Comparing newest-to-newest
+    would miss a child derived before a change a LATER child already saw.
+
+`{:group, …}` returns `{:error, {:unsupported_rule, _}}` rather than falling
+back to `:identity`, which would silently under-claim. A grain join is the
+right shape and better than today's key-string parsing — typed columns,
+indexable — but it needs the grain's columns on both sides and is not built.
+
+Every answer is `{:ok, keys}` / `:all` / `{:error, _}`, never a bare list, so a
+caller cannot mistake "I could not look" for "nothing is stale". `unaskable/1`
+names the cells the question cannot be asked of at all.
+
+### `recorded_at` must be in `upsert_fields`
+
+MEASURED, `spike/temporal_upsert_recorded_at.exs`: an upsert that changes a
+value leaves `recorded_at` at its CREATE value unless the attribute is named in
+`upsert_fields`. `update_default` alone does not fire on the conflict path.
+
+That silently breaks staleness — the stamps compare equal and nothing is ever
+reported stale. It is a constraint on every temporal node, not a test detail.
