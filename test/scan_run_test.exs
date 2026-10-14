@@ -113,7 +113,6 @@ defmodule ReactiveDag.ScanRunTest do
       refute ScanRun.changed?(%ScanRun{changed: []})
     end
 
-
     test "complete? is the honest-gap predicate" do
       # A scan that could not look must never render as a scan that found
       # nothing.

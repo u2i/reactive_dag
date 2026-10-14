@@ -169,7 +169,7 @@ defmodule ReactiveDag.NoComputationTest do
 
         reactive do
           id(:unioned)
-          union from: [:a, :b], into: [check: :cell, subject: :key]
+          union(from: [:a, :b], into: [check: :cell, subject: :key])
         end
       end
 

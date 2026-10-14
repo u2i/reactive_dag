@@ -403,6 +403,7 @@ defmodule ReactiveDag.RealPostgresRunTest do
           else
             Application.delete_env(:reactive_dag, :suspension_table)
           end
+
           if prev do
             Application.put_env(:reactive_dag, :oban_table, prev)
           else
@@ -784,6 +785,7 @@ defmodule ReactiveDag.RealPostgresRunTest do
       assert Run.finished(nil, :done, []) == :ok
     end
   end
+
   defp restore(key, nil), do: Application.delete_env(:reactive_dag, key)
   defp restore(key, value), do: Application.put_env(:reactive_dag, key, value)
 

@@ -17,7 +17,7 @@ defmodule ReactiveDag.StaleGrainTest do
 
   defmodule Domain do
     use Ash.Domain, validate_config_inclusion?: false
-    resources do: allow_unregistered?(true)
+    resources(do: allow_unregistered?(true))
   end
 
   defmodule Lines do
@@ -26,7 +26,7 @@ defmodule ReactiveDag.StaleGrainTest do
       data_layer: Ash.DataLayer.Ets,
       extensions: [ReactiveDag.Node]
 
-    ets do: private?(true)
+    ets(do: private?(true))
 
     temporal do
       attribute :valid_at
@@ -54,8 +54,8 @@ defmodule ReactiveDag.StaleGrainTest do
     end
 
     reactive do
-      id :lines
-      leaf? true
+      id(:lines)
+      leaf?(true)
     end
   end
 
@@ -65,7 +65,7 @@ defmodule ReactiveDag.StaleGrainTest do
       data_layer: Ash.DataLayer.Ets,
       extensions: [ReactiveDag.Node]
 
-    ets do: private?(true)
+    ets(do: private?(true))
 
     temporal do
       attribute :valid_at
@@ -92,10 +92,10 @@ defmodule ReactiveDag.StaleGrainTest do
     end
 
     reactive do
-      id :rollups
-      op :fold
-      recompute_by [fy: :fy], to: :lines
-      reduce into: [sum: [amount: :total]]
+      id(:rollups)
+      op(:fold)
+      recompute_by([fy: :fy], to: :lines)
+      reduce(into: [sum: [amount: :total]])
     end
   end
 

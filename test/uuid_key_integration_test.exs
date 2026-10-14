@@ -56,8 +56,8 @@ defmodule ReactiveDag.UuidKeyIntegrationTest do
     end
 
     reactive do
-      id :docs
-      leaf? true
+      id(:docs)
+      leaf?(true)
     end
   end
 
@@ -91,11 +91,11 @@ defmodule ReactiveDag.UuidKeyIntegrationTest do
     end
 
     reactive do
-      id :entity
-      row_key :uuid
-      key_rule :identity
-      depends_on [:docs]
-      compute ReactiveDag.UuidKeyIntegrationTest.EntityOp
+      id(:entity)
+      row_key(:uuid)
+      key_rule(:identity)
+      depends_on([:docs])
+      compute(ReactiveDag.UuidKeyIntegrationTest.EntityOp)
     end
   end
 

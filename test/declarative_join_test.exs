@@ -87,17 +87,17 @@ defmodule ReactiveDag.DeclarativeJoinTest do
       op(:reconcile)
       key_rule(:all)
 
-      join over: :entries,
-           left: [key: :acct, where: [kind: "budget"]],
-           right: [key: :acct, where: [kind: "actual"]],
-           key_prefix: "va",
-           into: [left: [amount: :budget], right: [amount: :actual]]
+      join(
+        over: :entries,
+        left: [key: :acct, where: [kind: "budget"]],
+        right: [key: :acct, where: [kind: "actual"]],
+        key_prefix: "va",
+        into: [left: [amount: :budget], right: [amount: :actual]]
+      )
     end
   end
 
-
   setup do
-
     for {k, kind, acct, amount} <- [
           {"b1", "budget", "A1010", 100.0},
           {"b2", "budget", "A2020", 50.0},
@@ -157,21 +157,23 @@ defmodule ReactiveDag.DeclarativeJoinTest do
         op(:reconcile)
         key_rule(:all)
 
-        join over: :entries,
-             left: [key: :acct, where: [kind: "budget"]],
-             right: [key: :acct, where: [kind: "actual"]],
-             outer: true,
-             into: fn acct, budget, actual ->
-               %{
-                 key: acct,
-                 status:
-                   cond do
-                     is_nil(budget) -> "undeclared"
-                     is_nil(actual) -> "unspent"
-                     true -> "present"
-                   end
-               }
-             end
+        join(
+          over: :entries,
+          left: [key: :acct, where: [kind: "budget"]],
+          right: [key: :acct, where: [kind: "actual"]],
+          outer: true,
+          into: fn acct, budget, actual ->
+            %{
+              key: acct,
+              status:
+                cond do
+                  is_nil(budget) -> "undeclared"
+                  is_nil(actual) -> "unspent"
+                  true -> "present"
+                end
+            }
+          end
+        )
       end
     end
 
@@ -211,12 +213,14 @@ defmodule ReactiveDag.DeclarativeJoinTest do
 
         # every entry is on the left by acct; only actuals land on the right
         # via a fn (mixing forms is fine — each slot resolves independently)
-        join over: :entries,
-             left: :acct,
-             right: fn e -> e.kind == "actual" && e.acct end,
-             into: fn acct, _l, r ->
-               %{key: acct, status: if(r, do: "observed", else: "declared-only")}
-             end
+        join(
+          over: :entries,
+          left: :acct,
+          right: fn e -> e.kind == "actual" && e.acct end,
+          into: fn acct, _l, r ->
+            %{key: acct, status: if(r, do: "observed", else: "declared-only")}
+          end
+        )
       end
     end
 
@@ -255,10 +259,12 @@ defmodule ReactiveDag.DeclarativeJoinTest do
       reactive do
         id(:bad_side)
 
-        join over: :entries,
-             left: [where: [kind: "budget"]],
-             right: :acct,
-             into: fn k, _, _ -> %{key: k, status: "present"} end
+        join(
+          over: :entries,
+          left: [where: [kind: "budget"]],
+          right: :acct,
+          into: fn k, _, _ -> %{key: k, status: "present"} end
+        )
       end
     end
 
@@ -293,10 +299,12 @@ defmodule ReactiveDag.DeclarativeJoinTest do
       reactive do
         id(:bad_picks)
 
-        join over: :entries,
-             left: :acct,
-             right: :acct,
-             into: [left: [amount: :a], middle: [amount: :b]]
+        join(
+          over: :entries,
+          left: :acct,
+          right: :acct,
+          into: [left: [amount: :a], middle: [amount: :b]]
+        )
       end
     end
 

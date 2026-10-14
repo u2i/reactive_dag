@@ -66,8 +66,8 @@ defmodule ReactiveDag.SuspendsTest do
     end
 
     reactive do
-      id :versioned_leaf
-      leaf? true
+      id(:versioned_leaf)
+      leaf?(true)
     end
   end
 
@@ -93,8 +93,8 @@ defmodule ReactiveDag.SuspendsTest do
     end
 
     reactive do
-      id :bare_leaf
-      leaf? true
+      id(:bare_leaf)
+      leaf?(true)
     end
   end
 
@@ -124,10 +124,10 @@ defmodule ReactiveDag.SuspendsTest do
     end
 
     reactive do
-      id :slow_ok
-      depends_on [:versioned_leaf]
+      id(:slow_ok)
+      depends_on([:versioned_leaf])
       run :extract
-      suspends true
+      suspends(true)
     end
   end
 
@@ -156,10 +156,10 @@ defmodule ReactiveDag.SuspendsTest do
     end
 
     reactive do
-      id :slow_no_reader
-      depends_on [:versioned_leaf]
+      id(:slow_no_reader)
+      depends_on([:versioned_leaf])
       run :extract
-      suspends true
+      suspends(true)
     end
   end
 
@@ -188,10 +188,10 @@ defmodule ReactiveDag.SuspendsTest do
     end
 
     reactive do
-      id :slow_bare_input
-      depends_on [:bare_leaf]
+      id(:slow_bare_input)
+      depends_on([:bare_leaf])
       run :extract
-      suspends true
+      suspends(true)
     end
   end
 
@@ -220,10 +220,10 @@ defmodule ReactiveDag.SuspendsTest do
     end
 
     reactive do
-      id :reviewed
-      depends_on [:versioned_leaf]
+      id(:reviewed)
+      depends_on([:versioned_leaf])
       run :summarise
-      gated true
+      gated(true)
     end
   end
 
@@ -249,9 +249,9 @@ defmodule ReactiveDag.SuspendsTest do
     end
 
     reactive do
-      id :gated_leaf
-      leaf? true
-      gated true
+      id(:gated_leaf)
+      leaf?(true)
+      gated(true)
     end
   end
 
@@ -350,39 +350,39 @@ defmodule ReactiveDag.SuspendsTest do
     end
   end
 
-    defmodule WellFormed do
-      use Ash.Resource,
-        domain: ReactiveDag.SuspendsTest.Domain,
-        data_layer: Ash.DataLayer.Ets,
-        extensions: [ReactiveDag.Node]
+  defmodule WellFormed do
+    use Ash.Resource,
+      domain: ReactiveDag.SuspendsTest.Domain,
+      data_layer: Ash.DataLayer.Ets,
+      extensions: [ReactiveDag.Node]
 
-      ets do
-        private?(true)
-      end
+    ets do
+      private?(true)
+    end
 
-      attributes do
-        attribute :key, :string, primary_key?: true, allow_nil?: false, public?: true
-        attribute :outcome, :string, public?: true
-        attribute :approval_id, :string, public?: true
-      end
+    attributes do
+      attribute :key, :string, primary_key?: true, allow_nil?: false, public?: true
+      attribute :outcome, :string, public?: true
+      attribute :approval_id, :string, public?: true
+    end
 
-      actions do
-        defaults [:read, :destroy]
-        create :upsert, upsert?: true, accept: [:key, :outcome, :approval_id]
+    actions do
+      defaults [:read, :destroy]
+      create :upsert, upsert?: true, accept: [:key, :outcome, :approval_id]
 
-        action :extract, :map do
-          run fn _i, _c -> {:ok, %{}} end
-        end
-      end
-
-      reactive do
-        id :well_formed
-        depends_on [:versioned_leaf]
-        run :extract
-        compare [:outcome]
-        approved_by via: :approval_id, resource: ReactiveDag.SuspendsTest.VersionedLeaf
+      action :extract, :map do
+        run fn _i, _c -> {:ok, %{}} end
       end
     end
+
+    reactive do
+      id(:well_formed)
+      depends_on([:versioned_leaf])
+      run :extract
+      compare([:outcome])
+      approved_by(via: :approval_id, resource: ReactiveDag.SuspendsTest.VersionedLeaf)
+    end
+  end
 
   # Declares the loop on purpose. It compiles — Spark warns rather than raising
   # — which is why the test below calls the verifier instead of expecting a
@@ -414,10 +414,10 @@ defmodule ReactiveDag.SuspendsTest do
     end
 
     reactive do
-      id :self_cancelling
+      id(:self_cancelling)
       run :extract
-      compare [:outcome, :approval_id]
-      approved_by via: :approval_id, resource: ReactiveDag.SuspendsTest.VersionedLeaf
+      compare([:outcome, :approval_id])
+      approved_by(via: :approval_id, resource: ReactiveDag.SuspendsTest.VersionedLeaf)
     end
   end
 
@@ -436,9 +436,7 @@ defmodule ReactiveDag.SuspendsTest do
       # asserting on the wrong mechanism before reading what Spark actually
       # does with the return value.
       assert {:error, %Spark.Error.DslError{message: msg}} =
-               ReactiveDag.Node.Verifiers.VerifyReactive.verify(
-                 SelfCancelling.spark_dsl_config()
-               )
+               ReactiveDag.Node.Verifiers.VerifyReactive.verify(SelfCancelling.spark_dsl_config())
 
       assert msg =~ "invalidate itself"
       assert msg =~ "Remove :approval_id from `compare:`"

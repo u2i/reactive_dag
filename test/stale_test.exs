@@ -13,7 +13,7 @@ defmodule ReactiveDag.StaleTest do
 
   defmodule Domain do
     use Ash.Domain, validate_config_inclusion?: false
-    resources do: allow_unregistered?(true)
+    resources(do: allow_unregistered?(true))
   end
 
   defmodule Source do
@@ -22,7 +22,7 @@ defmodule ReactiveDag.StaleTest do
       data_layer: Ash.DataLayer.Ets,
       extensions: [ReactiveDag.Node]
 
-    ets do: private?(true)
+    ets(do: private?(true))
 
     temporal do
       attribute :valid_at
@@ -52,8 +52,8 @@ defmodule ReactiveDag.StaleTest do
     end
 
     reactive do
-      id :source
-      leaf? true
+      id(:source)
+      leaf?(true)
     end
   end
 
@@ -63,7 +63,7 @@ defmodule ReactiveDag.StaleTest do
       data_layer: Ash.DataLayer.Ets,
       extensions: [ReactiveDag.Node]
 
-    ets do: private?(true)
+    ets(do: private?(true))
 
     temporal do
       attribute :valid_at
@@ -82,6 +82,7 @@ defmodule ReactiveDag.StaleTest do
 
     actions do
       defaults [:read, :destroy]
+
       create :upsert,
         upsert?: true,
         accept: [:key, :doubled],
@@ -89,9 +90,9 @@ defmodule ReactiveDag.StaleTest do
     end
 
     reactive do
-      id :derived
-      depends_on [:source]
-      compute ReactiveDag.StaleTest.Double
+      id(:derived)
+      depends_on([:source])
+      compute(ReactiveDag.StaleTest.Double)
     end
   end
 

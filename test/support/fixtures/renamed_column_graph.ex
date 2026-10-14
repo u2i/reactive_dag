@@ -31,7 +31,7 @@ defmodule ReactiveDag.Fixtures.RenamedColumnGraph do
 
     postgres do
       table "fx_renamed_expenses"
-      repo ReactiveDag.TestRepo
+      repo(ReactiveDag.TestRepo)
     end
 
     attributes do
@@ -58,10 +58,10 @@ defmodule ReactiveDag.Fixtures.RenamedColumnGraph do
     end
 
     reactive do
-      id :expenses
-      op :source
-      leaf? true
-      dirties_on [:create, :update, :destroy]
+      id(:expenses)
+      op(:source)
+      leaf?(true)
+      dirties_on([:create, :update, :destroy])
     end
   end
 
@@ -73,7 +73,7 @@ defmodule ReactiveDag.Fixtures.RenamedColumnGraph do
 
     postgres do
       table "fx_renamed_totals"
-      repo ReactiveDag.TestRepo
+      repo(ReactiveDag.TestRepo)
     end
 
     attributes do
@@ -94,10 +94,10 @@ defmodule ReactiveDag.Fixtures.RenamedColumnGraph do
     end
 
     reactive do
-      id :category_totals
-      op :fold
-      recompute_by :category, to: :expenses, from: :expense_cat
-      reduce into: [sum: [amount: :total], count: :n]
+      id(:category_totals)
+      op(:fold)
+      recompute_by(:category, to: :expenses, from: :expense_cat)
+      reduce(into: [sum: [amount: :total], count: :n])
     end
   end
 

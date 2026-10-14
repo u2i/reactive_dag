@@ -11,11 +11,11 @@ defmodule ReactiveDag.NodeTest do
   # nodes stay `Simple` + `leaf? true`: their rows come from outside the graph.
   defmodule Domain do
     use Ash.Domain, validate_config_inclusion?: false
+
     resources do
       allow_unregistered? true
     end
   end
-
 
   defmodule FakeAgendaDriver do
     @behaviour ReactiveDag.Source
@@ -29,11 +29,12 @@ defmodule ReactiveDag.NodeTest do
     # a SOURCE node: its rows come from outside the graph. `poll` names the
     # scanner, and everything reading this node is an ordinary edge.
     use Ash.Resource, domain: Domain, data_layer: Ash.DataLayer.Simple, extensions: [ReactiveDag.Node]
+
     reactive do
-      op :leaf
-      leaf? true
+      op(:leaf)
+      leaf?(true)
       source :agenda_scan
-      poll ReactiveDag.NodeTest.FakeAgendaDriver
+      poll(ReactiveDag.NodeTest.FakeAgendaDriver)
     end
   end
 
@@ -63,9 +64,9 @@ defmodule ReactiveDag.NodeTest do
     end
 
     reactive do
-      op :union
-      compute FakeShell
-      depends_on [:agenda_docs]
+      op(:union)
+      compute(FakeShell)
+      depends_on([:agenda_docs])
     end
   end
 
@@ -95,10 +96,10 @@ defmodule ReactiveDag.NodeTest do
     end
 
     reactive do
-      op :join
-      compute FakeJoin
-      key_rule :identity
-      depends_on [:meeting_shell, :agenda_docs]
+      op(:join)
+      compute(FakeJoin)
+      key_rule(:identity)
+      depends_on([:meeting_shell, :agenda_docs])
     end
   end
 
@@ -129,26 +130,28 @@ defmodule ReactiveDag.NodeTest do
     end
 
     reactive do
-      id :meetings
-      op :passthrough
-      compute FakePassthrough
-      ref :meeting
+      id(:meetings)
+      op(:passthrough)
+      compute(FakePassthrough)
+      ref(:meeting)
     end
   end
 
   defmodule Resolutions do
     use Ash.Resource, domain: Domain, data_layer: Ash.DataLayer.Simple, extensions: [ReactiveDag.Node]
+
     reactive do
-      op :source
-      leaf? true
+      op(:source)
+      leaf?(true)
     end
   end
 
   defmodule MeetingEvents do
     use Ash.Resource, domain: Domain, data_layer: Ash.DataLayer.Simple, extensions: [ReactiveDag.Node]
+
     reactive do
-      op :source
-      leaf? true
+      op(:source)
+      leaf?(true)
     end
   end
 
@@ -156,18 +159,19 @@ defmodule ReactiveDag.NodeTest do
   # inline composed fold (projected_meetings), the fold nesting two more refs.
   defmodule ShellNested do
     use Ash.Resource, domain: Domain, data_layer: Ash.DataLayer.Simple, extensions: [ReactiveDag.Node]
+
     reactive do
-      id :meeting_shell_nested
-      op :union
-      compute FakeShell
-      ref :agenda_docs
+      id(:meeting_shell_nested)
+      op(:union)
+      compute(FakeShell)
+      ref(:agenda_docs)
 
       compose :fold do
-        as :projected_meetings
-        compute FakeProjected
-        key_rule :all
-        ref :resolutions
-        ref :meeting_events
+        as(:projected_meetings)
+        compute(FakeProjected)
+        key_rule(:all)
+        ref(:resolutions)
+        ref(:meeting_events)
       end
     end
   end
@@ -236,10 +240,11 @@ defmodule ReactiveDag.NodeTest do
   defmodule EdrAgents do
     # portal `observed` leaf: rich live-data binding via the open meta:.
     use Ash.Resource, domain: Domain, data_layer: Ash.DataLayer.Simple, extensions: [ReactiveDag.Node]
+
     reactive do
-      op :leaf
-      leaf? true
-      meta source: :probe, check: "edr", strength: :measured, source_table: "probe_results"
+      op(:leaf)
+      leaf?(true)
+      meta(source: :probe, check: "edr", strength: :measured, source_table: "probe_results")
     end
   end
 
@@ -271,11 +276,11 @@ defmodule ReactiveDag.NodeTest do
     end
 
     reactive do
-      id :rule_concern
-      op :guarantee
-      compute FakeGuarantee
-      for_each :walk_risks
-      ref :edr_agents
+      id(:rule_concern)
+      op(:guarantee)
+      compute(FakeGuarantee)
+      for_each(:walk_risks)
+      ref(:edr_agents)
     end
   end
 
@@ -307,10 +312,10 @@ defmodule ReactiveDag.NodeTest do
     end
 
     reactive do
-      id :readiness
-      op :analysis
-      compute FakeReadiness
-      over :findings
+      id(:readiness)
+      op(:analysis)
+      compute(FakeReadiness)
+      over(:findings)
     end
   end
 

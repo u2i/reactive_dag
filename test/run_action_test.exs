@@ -253,9 +253,11 @@ defmodule ReactiveDag.RunActionTest do
         id(:two_computations)
         run(:refresh)
 
-        reduce over: :somewhere,
-               group_by: :key,
-               into: fn k, _ -> %{key: k, status: "present"} end
+        reduce(
+          over: :somewhere,
+          group_by: :key,
+          into: fn k, _ -> %{key: k, status: "present"} end
+        )
       end
     end
 

@@ -29,8 +29,7 @@ defmodule ReactiveDag.SourceProgressTest do
   test "reports done and total" do
     Source.progress(34, 721, cell: "meeting_docs", label: "documents")
 
-    assert_receive {:progress, %{done: 34, total: 721},
-                    %{cell: "meeting_docs", label: "documents"}}
+    assert_receive {:progress, %{done: 34, total: 721}, %{cell: "meeting_docs", label: "documents"}}
   end
 
   test "total may be nil — a crawl still discovering pages has a count, not a ratio" do
@@ -59,8 +58,7 @@ defmodule ReactiveDag.SourceProgressTest do
     # finished and the poll is plainly still running.
     Source.progress(nil, nil, cell: "meeting_docs", label: "writing 3 leaves")
 
-    assert_receive {:progress, %{done: nil, total: nil},
-                    %{cell: "meeting_docs", label: "writing 3 leaves"}}
+    assert_receive {:progress, %{done: nil, total: nil}, %{cell: "meeting_docs", label: "writing 3 leaves"}}
   end
 
   test "a label rides with a counted event too" do

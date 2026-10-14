@@ -17,113 +17,23 @@ defmodule ReactiveDag.LeafFingerprintTest do
   The property under test: **a re-observation that only moves the
   observation-bookkeeping fields is NOT a change.**
   """
-  use ExUnit.Case, async: false
+  use ReactiveDag.PostgresCase
+
+  alias ReactiveDag.Fixtures.LeafFingerprintGraph
+  alias ReactiveDag.Fixtures.LeafFingerprintGraph.{Agendas, Docs, Plain}
 
   alias ReactiveDag.Node.{Payload, Rows}
 
-  defmodule Domain do
-    use Ash.Domain, validate_config_inclusion?: false
-
-    resources do
-      allow_unregistered?(true)
-    end
-  end
-
-  # a crawled document: content, plus the fields that move on every poll
-  defmodule Docs do
-    use Ash.Resource, domain: Domain, data_layer: Ash.DataLayer.Ets, extensions: [ReactiveDag.Node]
-
-    ets do
-    end
-
-    attributes do
-      attribute :key, :string, primary_key?: true, allow_nil?: false, public?: true
-      attribute :title, :string, public?: true
-      attribute :content_md5, :string, public?: true
-      # the two that move on their own
-      attribute :last_seen_at, :utc_datetime_usec, public?: true
-      attribute :etag, :string, public?: true
-      attribute :fingerprint, :string, public?: true
-    end
-
-    actions do
-      defaults [:read, :destroy]
-
-      create :upsert do
-        upsert?(true)
-        accept([:key, :title, :content_md5, :last_seen_at, :etag, :fingerprint])
-      end
-    end
-
-    reactive do
-      id(:docs)
-      leaf?(true)
-      fingerprint([:content_md5])
-    end
-  end
-
-  # the agenda case: the fingerprint is COMPUTED, not a field list — a re-titled
-  # meeting must re-fire even though its PDF bytes are identical
-  defmodule Agendas do
-    use Ash.Resource, domain: Domain, data_layer: Ash.DataLayer.Ets, extensions: [ReactiveDag.Node]
-
-    ets do
-    end
-
-    attributes do
-      attribute :key, :string, primary_key?: true, allow_nil?: false, public?: true
-      attribute :title, :string, public?: true
-      attribute :content_md5, :string, public?: true
-      attribute :last_seen_at, :utc_datetime_usec, public?: true
-      attribute :digest, :string, public?: true
-    end
-
-    actions do
-      defaults [:read, :destroy]
-
-      create :upsert do
-        upsert?(true)
-        accept([:key, :title, :content_md5, :last_seen_at, :digest])
-      end
-    end
-
-    reactive do
-      id(:agendas)
-      leaf?(true)
-      fingerprint(fn row -> "#{row.content_md5}|#{:erlang.phash2(row.title)}" end)
-      fingerprint_attribute(:digest)
-    end
-  end
-
-  # no fingerprint declared — the old behaviour, unchanged
-  defmodule Plain do
-    use Ash.Resource, domain: Domain, data_layer: Ash.DataLayer.Ets, extensions: [ReactiveDag.Node]
-
-    ets do
-    end
-
-    attributes do
-      attribute :key, :string, primary_key?: true, allow_nil?: false, public?: true
-      attribute :content_md5, :string, public?: true
-      attribute :last_seen_at, :utc_datetime_usec, public?: true
-    end
-
-    actions do
-      defaults [:read, :destroy]
-
-      create :upsert do
-        upsert?(true)
-        accept([:key, :content_md5, :last_seen_at])
-      end
-    end
-
-    reactive do
-      id(:plain)
-      leaf?(true)
-    end
+  setup_all do
+    migrate!(LeafFingerprintGraph.Domain)
+    :ok
   end
 
   setup do
+    pid = Ecto.Adapters.SQL.Sandbox.start_owner!(ReactiveDag.TestRepo, shared: true)
+    on_exit(fn -> Ecto.Adapters.SQL.Sandbox.stop_owner(pid) end)
+
+    truncate(LeafFingerprintGraph.tables())
     for r <- [Docs, Agendas, Plain], row <- Ash.read!(r), do: Ash.destroy!(row)
     :ok
   end
@@ -258,9 +168,7 @@ defmodule ReactiveDag.LeafFingerprintTest do
       cell = cell(Docs)
 
       {:ok, changed, _} =
-        Rows.reconcile(cell, ["d1", "d2"],
-          upsert: fn key -> %{key: key, content_md5: "hash-#{key}"} end
-        )
+        Rows.reconcile(cell, ["d1", "d2"], upsert: fn key -> %{key: key, content_md5: "hash-#{key}"} end)
 
       assert changed == ["d1", "d2"]
       assert Enum.map(Ash.read!(Docs), & &1.content_md5) |> Enum.sort() == ["hash-d1", "hash-d2"]
@@ -312,9 +220,7 @@ defmodule ReactiveDag.LeafFingerprintTest do
     test "a missing fingerprint column raises with the fix, rather than silently never matching" do
       err =
         assert_raise ArgumentError, fn ->
-          Payload.upsert(Plain, :key, "d1", %{key: "d1", content_md5: "abc"}, :upsert,
-            fingerprint: [:content_md5]
-          )
+          Payload.upsert(Plain, :key, "d1", %{key: "d1", content_md5: "abc"}, :upsert, fingerprint: [:content_md5])
         end
 
       msg = Exception.message(err)

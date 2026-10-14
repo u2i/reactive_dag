@@ -56,8 +56,8 @@ defmodule ReactiveDag.SourceTest do
     end
 
     reactive do
-      id :machines
-      leaf? true
+      id(:machines)
+      leaf?(true)
       poll(ReactiveDag.SourceTest.FleetScan)
     end
   end
@@ -81,7 +81,7 @@ defmodule ReactiveDag.SourceTest do
     end
 
     reactive do
-      id :diggers
+      id(:diggers)
 
       reduce(
         over: :machines,
@@ -112,7 +112,7 @@ defmodule ReactiveDag.SourceTest do
     end
 
     reactive do
-      id :cranes
+      id(:cranes)
 
       reduce(
         over: :machines,
@@ -194,8 +194,8 @@ defmodule ReactiveDag.SourceTest do
             end
 
             reactive do
-              id :bad
-              leaf? true
+              id(:bad)
+              leaf?(true)
               poll(ReactiveDag.SourceTest.NotASource)
             end
           end

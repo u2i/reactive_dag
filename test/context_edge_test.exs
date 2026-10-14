@@ -10,6 +10,7 @@ defmodule ReactiveDag.ContextEdgeTest do
 
   defmodule Domain do
     use Ash.Domain, validate_config_inclusion?: false
+
     resources do
       allow_unregistered? true
     end
@@ -19,12 +20,22 @@ defmodule ReactiveDag.ContextEdgeTest do
   # :people (mirrors the enhanced-minutes shape).
   defmodule Transcripts do
     use Ash.Resource, domain: Domain, data_layer: Ash.DataLayer.Simple, extensions: [ReactiveDag.Node]
-    reactive do id(:transcripts); op(:leaf); leaf?(true) end
+
+    reactive do
+      id(:transcripts)
+      op(:leaf)
+      leaf?(true)
+    end
   end
 
   defmodule People do
     use Ash.Resource, domain: Domain, data_layer: Ash.DataLayer.Simple, extensions: [ReactiveDag.Node]
-    reactive do id(:people); op(:leaf); leaf?(true) end
+
+    reactive do
+      id(:people)
+      op(:leaf)
+      leaf?(true)
+    end
   end
 
   defmodule EnhancedMinutes do
@@ -54,11 +65,13 @@ defmodule ReactiveDag.ContextEdgeTest do
     end
 
     reactive do
-      id :enhanced_minutes
-      op :map
-      compute ReactiveDag.ContextEdgeTest.FakeOp
-      ref :transcripts        # RECOMPUTE edge — a transcript change re-runs the LLM
-      context :people         # CONTEXT edge — a people edit does NOT re-run it
+      id(:enhanced_minutes)
+      op(:map)
+      compute(ReactiveDag.ContextEdgeTest.FakeOp)
+      # RECOMPUTE edge — a transcript change re-runs the LLM
+      ref(:transcripts)
+      # CONTEXT edge — a people edit does NOT re-run it
+      context :people
     end
   end
 

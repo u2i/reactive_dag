@@ -97,14 +97,16 @@ defmodule ReactiveDag.VerdictNodeTest do
       # a verdict WITH a table is an ordinary payload node: the status is a
       # column, written by `into:` like any other. `status:` is the tableless
       # node's slot and has no business here.
-      reduce over: :totals,
-             group_by: :key,
-             into: fn _k, [r | _] ->
-               %{
-                 status: if(r.total < 1000.0, do: "present", else: "failing"),
-                 headroom: 1000.0 - r.total
-               }
-             end
+      reduce(
+        over: :totals,
+        group_by: :key,
+        into: fn _k, [r | _] ->
+          %{
+            status: if(r.total < 1000.0, do: "present", else: "failing"),
+            headroom: 1000.0 - r.total
+          }
+        end
+      )
     end
   end
 
@@ -144,5 +146,4 @@ defmodule ReactiveDag.VerdictNodeTest do
     refute cell.meta[:verdict]
     assert cell.meta[:resource] == Health
   end
-
 end

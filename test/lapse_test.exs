@@ -122,8 +122,8 @@ defmodule ReactiveDag.LapseTest do
 
     reactive do
       id(:survives)
-      recompute_by :fy, to: :lines, from: :fy
-      reduce into: [sum: [amount: :total]]
+      recompute_by(:fy, to: :lines, from: :fy)
+      reduce(into: [sum: [amount: :total]])
     end
   end
 
@@ -172,10 +172,10 @@ defmodule ReactiveDag.LapseTest do
 
     reactive do
       id(:lapses_any)
-      recompute_by :fy, to: :lines, from: :fy
-      reduce into: [sum: [amount: :total]]
+      recompute_by(:fy, to: :lines, from: :fy)
+      reduce(into: [sum: [amount: :total]])
 
-      lapse :approved_at, when_changed: :any
+      lapse(:approved_at, when_changed: :any)
     end
   end
 
@@ -227,19 +227,21 @@ defmodule ReactiveDag.LapseTest do
 
     reactive do
       id(:lapses_narrow)
-      recompute_by :fy, to: :lines, from: :fy
+      recompute_by(:fy, to: :lines, from: :fy)
 
-      reduce group_by: [fy: :fy],
-             into: fn {fy}, items ->
-               %{
-                 fy: fy,
-                 total: items |> Enum.map(& &1.amount) |> Enum.sum(),
-                 # the cosmetic column: moves on a relabel, and is NOT watched
-                 label: items |> Enum.map(& &1.label) |> Enum.sort() |> Enum.join(",")
-               }
-             end
+      reduce(
+        group_by: [fy: :fy],
+        into: fn {fy}, items ->
+          %{
+            fy: fy,
+            total: items |> Enum.map(& &1.amount) |> Enum.sum(),
+            # the cosmetic column: moves on a relabel, and is NOT watched
+            label: items |> Enum.map(& &1.label) |> Enum.sort() |> Enum.join(",")
+          }
+        end
+      )
 
-      lapse :signed_off_by, when_changed: [:total]
+      lapse(:signed_off_by, when_changed: [:total])
     end
   end
 
@@ -297,10 +299,10 @@ defmodule ReactiveDag.LapseTest do
 
     reactive do
       id(:lapses_children)
-      recompute_by :fy, to: :lines, from: :fy
-      reduce into: [sum: [amount: :total]]
+      recompute_by(:fy, to: :lines, from: :fy)
+      reduce(into: [sum: [amount: :total]])
 
-      lapse ReactiveDag.LapseTest.Correction, key: :fy, when_changed: [:total]
+      lapse(ReactiveDag.LapseTest.Correction, key: :fy, when_changed: [:total])
     end
   end
 
@@ -380,10 +382,10 @@ defmodule ReactiveDag.LapseTest do
 
     reactive do
       id(:fund_rollups)
-      recompute_by [fund: :fund_code, fy: :fy], to: :fund_lines
-      reduce into: [sum: [amount: :total]]
+      recompute_by([fund: :fund_code, fy: :fy], to: :fund_lines)
+      reduce(into: [sum: [amount: :total]])
 
-      lapse :approved_at, when_changed: [:total]
+      lapse(:approved_at, when_changed: [:total])
     end
   end
 
@@ -434,24 +436,26 @@ defmodule ReactiveDag.LapseTest do
 
     reactive do
       id(:fy_sign_off)
-      recompute_by :fy, to: :lines, from: :fy
+      recompute_by(:fy, to: :lines, from: :fy)
 
       # one unit -> many rows, each self-keyed "<fy>|<bucket>"
-      reduce group_by: [fy: :fy],
-             expand: fn {fy}, items ->
-               items
-               |> Enum.group_by(& &1.label)
-               |> Enum.map(fn {bucket, rows} ->
-                 %{
-                   key: "#{fy}|#{bucket}",
-                   fy: fy,
-                   bucket: bucket,
-                   total: rows |> Enum.map(& &1.amount) |> Enum.sum()
-                 }
-               end)
-             end
+      reduce(
+        group_by: [fy: :fy],
+        expand: fn {fy}, items ->
+          items
+          |> Enum.group_by(& &1.label)
+          |> Enum.map(fn {bucket, rows} ->
+            %{
+              key: "#{fy}|#{bucket}",
+              fy: fy,
+              bucket: bucket,
+              total: rows |> Enum.map(& &1.amount) |> Enum.sum()
+            }
+          end)
+        end
+      )
 
-      lapse :fy_approved_at, when_changed: :any, over: :fy
+      lapse(:fy_approved_at, when_changed: :any, over: :fy)
     end
   end
 
@@ -999,11 +1003,11 @@ defmodule ReactiveDag.LapseTest do
 
         reactive do
           id(:bad_over)
-          recompute_by :fy, to: :lines, from: :fy
-          reduce into: [sum: [amount: :total]]
+          recompute_by(:fy, to: :lines, from: :fy)
+          reduce(into: [sum: [amount: :total]])
 
           # :quarter is not the unit this node recomputes by
-          lapse :approved_at, when_changed: :any, over: :quarter
+          lapse(:approved_at, when_changed: :any, over: :quarter)
         end
       end
 
@@ -1063,10 +1067,10 @@ defmodule ReactiveDag.LapseTest do
 
         reactive do
           id(:bad_child)
-          recompute_by :fy, to: :lines, from: :fy
-          reduce into: [sum: [amount: :total]]
+          recompute_by(:fy, to: :lines, from: :fy)
+          reduce(into: [sum: [amount: :total]])
 
-          lapse ReactiveDag.LapseTest.Undestroyable, key: :fy, when_changed: :any
+          lapse(ReactiveDag.LapseTest.Undestroyable, key: :fy, when_changed: :any)
         end
       end
 
@@ -1105,11 +1109,11 @@ defmodule ReactiveDag.LapseTest do
 
         reactive do
           id(:bad_attr)
-          recompute_by :fy, to: :lines, from: :fy
-          reduce into: [sum: [amount: :total]]
+          recompute_by(:fy, to: :lines, from: :fy)
+          reduce(into: [sum: [amount: :total]])
 
           # neither an attribute of this resource nor a resource
-          lapse :approved_at, when_changed: :any
+          lapse(:approved_at, when_changed: :any)
         end
       end
 
@@ -1155,10 +1159,10 @@ defmodule ReactiveDag.LapseTest do
 
         reactive do
           id(:unaccepting_lapse)
-          recompute_by :fy, to: :lines, from: :fy
-          reduce into: [sum: [amount: :total]]
+          recompute_by(:fy, to: :lines, from: :fy)
+          reduce(into: [sum: [amount: :total]])
 
-          lapse :approved_at, when_changed: :any
+          lapse(:approved_at, when_changed: :any)
         end
       end
 
@@ -1203,11 +1207,11 @@ defmodule ReactiveDag.LapseTest do
 
         reactive do
           id(:bad_watch)
-          recompute_by :fy, to: :lines, from: :fy
-          reduce into: [sum: [amount: :total]]
+          recompute_by(:fy, to: :lines, from: :fy)
+          reduce(into: [sum: [amount: :total]])
 
           # :vote_count is not an attribute here, so this could never fire
-          lapse :approved_at, when_changed: [:total, :vote_count]
+          lapse(:approved_at, when_changed: [:total, :vote_count])
         end
       end
 

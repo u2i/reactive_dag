@@ -15,91 +15,25 @@ defmodule ReactiveDag.InvalidateTest do
   The test that matters is `"the action runs again"` — everything else guards
   the edges around it.
   """
-  use ExUnit.Case, async: false
+  use ReactiveDag.PostgresCase
+
+  alias ReactiveDag.Fixtures.InvalidateGraph
+  alias ReactiveDag.Fixtures.InvalidateGraph.{Summaries, TenantedSummaries, Transcripts}
 
   alias ReactiveDag.Node.Rows
 
-  defmodule Domain do
-    use Ash.Domain, validate_config_inclusion?: false
-
-    resources do
-      allow_unregistered?(true)
-    end
-  end
-
-  defmodule Calls do
-    def start_link, do: Agent.start_link(fn -> [] end, name: __MODULE__)
-    def record(key), do: Agent.update(__MODULE__, &[key | &1])
-    def all, do: Agent.get(__MODULE__, &Enum.reverse/1)
-    def reset, do: Agent.update(__MODULE__, fn _ -> [] end)
-  end
-
-  defmodule Transcripts do
-    use Ash.Resource, domain: Domain, data_layer: Ash.DataLayer.Ets, extensions: [ReactiveDag.Node]
-
-    ets do
-    end
-
-    attributes do
-      attribute :key, :string, primary_key?: true, allow_nil?: false, public?: true
-      attribute :body, :string, public?: true
-      attribute :year, :string, public?: true
-    end
-
-    actions do
-      defaults [:read, :destroy]
-      create :upsert, upsert?: true, accept: [:key, :body, :year]
-    end
-
-    reactive do
-      id(:transcripts)
-      leaf?(true)
-    end
-  end
-
-  defmodule Summaries do
-    use Ash.Resource, domain: Domain, data_layer: Ash.DataLayer.Ets, extensions: [ReactiveDag.Node]
-
-    ets do
-    end
-
-    attributes do
-      attribute :key, :string, primary_key?: true, allow_nil?: false, public?: true
-      attribute :year, :string, public?: true
-      attribute :summary, :string, public?: true
-      attribute :fingerprint, :string, public?: true
-    end
-
-    actions do
-      defaults [:read, :destroy, update: [:summary, :fingerprint, :year]]
-      create :upsert, upsert?: true, accept: [:key, :year, :summary, :fingerprint]
-
-      action :summarise, :map do
-        argument :text, :string, allow_nil?: true
-        argument :year, :string, allow_nil?: true
-
-        run fn input, _ ->
-          ReactiveDag.InvalidateTest.Calls.record(input.arguments.text)
-          {:ok, %{"summary" => "sum:#{input.arguments.text}", "year" => input.arguments.year}}
-        end
-      end
-    end
-
-    reactive do
-      id(:summaries)
-      recompute_by(:key, to: :transcripts, from: :key)
-      slice(:year, values: ["2024", "2025"])
-
-      per_key(:summarise,
-        args: [text: :body, year: :year],
-        fingerprint: [:body],
-        into: [summary: :summary, year: :year]
-      )
-    end
+  setup_all do
+    migrate!(InvalidateGraph.Domain)
+    :ok
   end
 
   setup do
-    start_supervised!(%{id: Calls, start: {Calls, :start_link, []}})
+    pid = Ecto.Adapters.SQL.Sandbox.start_owner!(ReactiveDag.TestRepo, shared: true)
+    on_exit(fn -> Ecto.Adapters.SQL.Sandbox.stop_owner(pid) end)
+
+    migrate_library_tables!()
+    truncate(InvalidateGraph.tables())
+    start_supervised!(%{id: ReactiveDag.Fixtures.Calls, start: {ReactiveDag.Fixtures.Calls, :start_link, []}})
     start_supervised!(ReactiveDag.Test.FakeSuspensionRepo)
     ReactiveDag.Test.FakeSuspensionRepo.install()
 
@@ -113,7 +47,7 @@ defmodule ReactiveDag.InvalidateTest do
 
     # first pass: everything is summarised and fingerprinted
     {:ok, _, _} = ReactiveDag.Node.Recompute.recompute(plan().cells["summaries"], ["*"])
-    Calls.reset()
+    ReactiveDag.Fixtures.Calls.reset()
 
     :ok
   end
@@ -141,38 +75,38 @@ defmodule ReactiveDag.InvalidateTest do
           key_rule: ReactiveDag.Node.KeyRule
         )
 
-      assert Calls.all() == [], "the input never moved, so the fingerprint says skip"
+      assert ReactiveDag.Fixtures.Calls.all() == [], "the input never moved, so the fingerprint says skip"
     end
 
     test "the action runs again when the fingerprint is cleared first" do
       assert :ok = run(%{"cell" => "summaries", "keys" => ["t1"]})
 
-      assert Calls.all() == ["body-t1"], "the row was re-summarised"
+      assert ReactiveDag.Fixtures.Calls.all() == ["body-t1"], "the row was re-summarised"
     end
 
     test "and only the selected key" do
       assert :ok = run(%{"cell" => "summaries", "keys" => ["t1"]})
 
-      refute "body-t2" in Calls.all(), "t2 was not asked about"
+      refute "body-t2" in ReactiveDag.Fixtures.Calls.all(), "t2 was not asked about"
     end
 
     test "a slice re-runs exactly its slice" do
       assert :ok = run(%{"cell" => "summaries", "where" => %{"year" => "2024"}})
 
-      assert Calls.all() == ["body-t2"]
+      assert ReactiveDag.Fixtures.Calls.all() == ["body-t2"]
     end
 
     test "the whole cell re-runs everything" do
       assert :ok = run(%{"cell" => "summaries"})
 
-      assert Enum.sort(Calls.all()) == ["body-t1", "body-t2"]
+      assert Enum.sort(ReactiveDag.Fixtures.Calls.all()) == ["body-t1", "body-t2"]
     end
   end
 
   describe "the fingerprint is restored, not abandoned" do
     test "a second reprocess is needed to run it again — the row is valid once more" do
       run(%{"cell" => "summaries", "keys" => ["t1"]})
-      Calls.reset()
+      ReactiveDag.Fixtures.Calls.reset()
 
       # an ordinary mark now skips again, because the row was re-fingerprinted
       ReactiveDag.Test.Pending.add("summaries", ["t1"])
@@ -183,50 +117,7 @@ defmodule ReactiveDag.InvalidateTest do
           key_rule: ReactiveDag.Node.KeyRule
         )
 
-      assert Calls.all() == [], "invalidation is a one-shot, not a mode"
-    end
-  end
-
-  # A tenanted node, because the untenanted `Summaries` above cannot show it:
-  # `invalidate/3` reads the rows it is about to clear and then UPDATES them, and
-  # both halves need the tenant. Without it a reprocess of a tenanted plan raises,
-  # and clearing another municipality's fingerprints would make ITS next drain
-  # recompute rows nobody asked about.
-  defmodule TenantedSummaries do
-    use Ash.Resource, domain: Domain, data_layer: Ash.DataLayer.Ets, extensions: [ReactiveDag.Node]
-
-    ets do
-    end
-
-    multitenancy do
-      strategy :attribute
-      attribute :org_id
-    end
-
-    attributes do
-      uuid_primary_key(:id)
-      attribute :org_id, :string, public?: true
-      attribute :key, :string, allow_nil?: false, public?: true
-      attribute :fingerprint, :string, public?: true
-    end
-
-    identities do
-      identity :by_org_key, [:org_id, :key], pre_check_with: Domain
-    end
-
-    actions do
-      defaults [:read, :destroy, update: [:fingerprint]]
-
-      create :upsert,
-        upsert?: true,
-        upsert_identity: :by_org_key,
-        accept: [:org_id, :key, :fingerprint]
-    end
-
-    reactive do
-      id(:tenanted_summaries)
-      leaf?(true)
-      row_key([:org_id, :key])
+      assert ReactiveDag.Fixtures.Calls.all() == [], "invalidation is a one-shot, not a mode"
     end
   end
 

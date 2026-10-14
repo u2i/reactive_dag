@@ -15,6 +15,7 @@ defmodule ReactiveDag.CompanionCellTest do
 
   defmodule Domain do
     use Ash.Domain, validate_config_inclusion?: false
+
     resources do
       allow_unregistered?(true)
     end
@@ -23,10 +24,11 @@ defmodule ReactiveDag.CompanionCellTest do
   # a leaf the guarantee reconciles against
   defmodule Baseline do
     use Ash.Resource, domain: Domain, data_layer: Ash.DataLayer.Simple, extensions: [ReactiveDag.Node]
+
     reactive do
-      id :baseline
-      op :leaf
-      leaf? true
+      id(:baseline)
+      op(:leaf)
+      leaf?(true)
       source :baseline_scan
     end
   end
@@ -37,15 +39,15 @@ defmodule ReactiveDag.CompanionCellTest do
     use Ash.Resource, domain: Domain, data_layer: Ash.DataLayer.Simple, extensions: [ReactiveDag.Node]
 
     reactive do
-      id :merge_gated
-      companion op: :guarantee, meta: [watched?: true]
+      id(:merge_gated)
+      companion(op: :guarantee, meta: [watched?: true])
 
-      op :reconcile
-      ref :baseline
+      op(:reconcile)
+      ref(:baseline)
 
       compose :observed do
-        leaf? true
-        meta source: :repo_protection
+        leaf?(true)
+        meta(source: :repo_protection)
       end
     end
   end
@@ -89,11 +91,12 @@ defmodule ReactiveDag.CompanionCellTest do
   test "a default suffix of `set` and a custom id_suffix both work" do
     defmodule CustomSuffix do
       use Ash.Resource, domain: Domain, data_layer: Ash.DataLayer.Simple, extensions: [ReactiveDag.Node]
+
       reactive do
-        id :cov
-        companion op: :rollup, id_suffix: "members"
-        op :union
-        ref :baseline
+        id(:cov)
+        companion(op: :rollup, id_suffix: "members")
+        op(:union)
+        ref(:baseline)
       end
     end
 

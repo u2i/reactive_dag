@@ -10,11 +10,11 @@ defmodule ReactiveDag.ComplianceAuthoringExampleTest do
   use ExUnit.Case, async: true
 
   # ── noun target structs ───────────────────────────────────────────────────────
-  defmodule Claim, do: (defstruct [:text, :__identifier__, :__spark_metadata__])
-  defmodule Addresses, do: (defstruct [:controls, :__identifier__, :__spark_metadata__])
-  defmodule Shape, do: (defstruct [:kind, :__identifier__, :__spark_metadata__])
-  defmodule Population, do: (defstruct [:kind, :__identifier__, :__spark_metadata__])
-  defmodule Conformance, do: (defstruct [:tolerance_days, :working_days, :__identifier__, :__spark_metadata__])
+  defmodule Claim, do: defstruct([:text, :__identifier__, :__spark_metadata__])
+  defmodule Addresses, do: defstruct([:controls, :__identifier__, :__spark_metadata__])
+  defmodule Shape, do: defstruct([:kind, :__identifier__, :__spark_metadata__])
+  defmodule Population, do: defstruct([:kind, :__identifier__, :__spark_metadata__])
+  defmodule Conformance, do: defstruct([:tolerance_days, :working_days, :__identifier__, :__spark_metadata__])
 
   # ── a compile-time derivation transformer over the composed op-tree ───────────
   # derives the guarantee's evidence strength = the weakest leaf strength in meta
@@ -120,10 +120,29 @@ defmodule ReactiveDag.ComplianceAuthoringExampleTest do
   # ── the compliance vocabulary composed onto ReactiveDag.Node ──────────────────
   defmodule Ext do
     @claim %Spark.Dsl.Entity{name: :claim, target: Claim, args: [:text], schema: [text: [type: :string, required: true]]}
-    @addresses %Spark.Dsl.Entity{name: :addresses, target: Addresses, args: [:controls], schema: [controls: [type: {:list, :atom}]]}
-    @shape %Spark.Dsl.Entity{name: :shape, target: Shape, args: [:kind], schema: [kind: [type: {:one_of, [:subject, :delta, :queue, :review, :readiness]}]]}
-    @population %Spark.Dsl.Entity{name: :population, target: Population, args: [:kind], schema: [kind: [type: {:one_of, [:sites, :events, :dated]}]]}
-    @conformance %Spark.Dsl.Entity{name: :conformance, target: Conformance, schema: [tolerance_days: [type: :integer], working_days: [type: :boolean]]}
+    @addresses %Spark.Dsl.Entity{
+      name: :addresses,
+      target: Addresses,
+      args: [:controls],
+      schema: [controls: [type: {:list, :atom}]]
+    }
+    @shape %Spark.Dsl.Entity{
+      name: :shape,
+      target: Shape,
+      args: [:kind],
+      schema: [kind: [type: {:one_of, [:subject, :delta, :queue, :review, :readiness]}]]
+    }
+    @population %Spark.Dsl.Entity{
+      name: :population,
+      target: Population,
+      args: [:kind],
+      schema: [kind: [type: {:one_of, [:sites, :events, :dated]}]]
+    }
+    @conformance %Spark.Dsl.Entity{
+      name: :conformance,
+      target: Conformance,
+      schema: [tolerance_days: [type: :integer], working_days: [type: :boolean]]
+    }
 
     use Spark.Dsl.Extension,
       dsl_patches: [
@@ -136,22 +155,27 @@ defmodule ReactiveDag.ComplianceAuthoringExampleTest do
       transformers: [DeriveGrain, DeriveStrength]
 
     def claim(m), do: Spark.Dsl.Extension.get_entities(m, [:reactive]) |> Enum.find(&match?(%Claim{}, &1))
-    def addresses(m), do: (Spark.Dsl.Extension.get_entities(m, [:reactive]) |> Enum.find(&match?(%Addresses{}, &1)) || %Addresses{}).controls
+
+    def addresses(m),
+      do:
+        (Spark.Dsl.Extension.get_entities(m, [:reactive]) |> Enum.find(&match?(%Addresses{}, &1)) || %Addresses{}).controls
+
     def strength(m), do: Spark.Dsl.Extension.get_persisted(m, :guarantee_strength)
   end
 
   defmodule Domain do
     use Ash.Domain, validate_config_inclusion?: false
-    resources do: allow_unregistered?(true)
+    resources(do: allow_unregistered?(true))
   end
 
   # a shared leaf the guarantee's observed leg is fed from (a value node, no compliance nouns)
   defmodule Values.RepoProtection do
     use Ash.Resource, domain: Domain, data_layer: Ash.DataLayer.Simple, extensions: [ReactiveDag.Node]
+
     reactive do
-      id :repo_protection
-      op :leaf
-      leaf? true
+      id(:repo_protection)
+      op(:leaf)
+      leaf?(true)
       source :repo_protection
     end
   end
@@ -161,29 +185,29 @@ defmodule ReactiveDag.ComplianceAuthoringExampleTest do
     use Ash.Resource, domain: Domain, data_layer: Ash.DataLayer.Simple, extensions: [ReactiveDag.Node, Ext]
 
     reactive do
-      id :merge_gated
+      id(:merge_gated)
 
-      claim "every merge to a protected branch was reviewed & gated"
-      addresses [:CC8_1]
-      shape :queue
-      population :events
-      conformance tolerance_days: 5, working_days: true
+      claim("every merge to a protected branch was reviewed & gated")
+      addresses([:CC8_1])
+      shape(:queue)
+      population(:events)
+      conformance(tolerance_days: 5, working_days: true)
 
-      op :fold
-      meta grain: :change
+      op(:fold)
+      meta(grain: :change)
 
       # NO `as:` — ids auto-derive from position. And NO grain on the reconcile —
       # only the LEAVES author grain; the reconcile op DERIVES its grain (inherits
       # its first leg's :"app×repo") via the DeriveGrain transformer.
       compose :reconcile do
         compose :declared do
-          leaf? true
-          meta grain: :"app×repo", strength: :declared
+          leaf?(true)
+          meta(grain: :"app×repo", strength: :declared)
         end
 
         compose :observed do
-          leaf? true
-          meta grain: :"app×repo", strength: :measured, source: :repo_protection
+          leaf?(true)
+          meta(grain: :"app×repo", strength: :measured, source: :repo_protection)
         end
       end
     end
@@ -214,6 +238,7 @@ defmodule ReactiveDag.ComplianceAuthoringExampleTest do
 
     # the fold's input is the reconcile; the reconcile's inputs are its two leaves
     assert cells["merge_gated"].inputs == ["merge_gated/0"]
+
     assert Enum.sort(cells["merge_gated/0"].inputs) ==
              ["merge_gated/0/0", "merge_gated/0/1"]
   end
