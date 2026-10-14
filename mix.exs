@@ -81,6 +81,11 @@ defmodule ReactiveDag.MixProject do
 
   def application, do: [extra_applications: [:logger]]
 
+  # `mix test.postgres` must run in the test environment like `mix test` does —
+  # without this it loads :dev, where `test/support` is not compiled and the
+  # test repo does not exist.
+  def cli, do: [preferred_envs: ["test.postgres": :test]]
+
   defp elixirc_paths(:test), do: ["lib", "test/support"]
   defp elixirc_paths(_), do: ["lib"]
 
