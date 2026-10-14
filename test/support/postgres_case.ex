@@ -45,10 +45,22 @@ defmodule ReactiveDag.PostgresCase do
   end
 
   @doc """
-  Generate migrations for `domain`'s resources, run them, and drop the tables
-  on exit.
+  Generate migrations for `domain`'s resources and run them.
 
   Call from `setup_all`. Returns the tables it created.
+
+  ## Why this does NOT drop on exit
+
+  It used to, and that is wrong for a SHARED fixture. Two modules using the
+  same fixture domain each run `setup_all`; whichever finishes first dropped
+  the tables out from under the other, and the second module failed with
+  `undefined_table` on a table it had successfully created. Measured — it is
+  how `group_rule_test` and `fixture_smoke_test` first interacted.
+
+  So tables persist for the run. They are created `IF NOT EXISTS`-style (the
+  generated migration is re-run only when absent), truncated per test by
+  `truncate/1`, and the database is a disposable container. A table left
+  behind costs nothing; one dropped mid-run costs a false failure.
   """
   def migrate!(domain) do
     dir = Path.join(System.tmp_dir!(), "rd_mig_#{:erlang.phash2(domain)}")
@@ -68,9 +80,19 @@ defmodule ReactiveDag.PostgresCase do
       |> Ash.Domain.Info.resources()
       |> Enum.map(&AshPostgres.DataLayer.Info.table/1)
 
-    # Drop first: a previous run that died before `on_exit` leaves tables
-    # behind, and `create table` would then fail for a reason that has nothing
-    # to do with the test.
+    # Already migrated by another module in this run? Then the tables are
+    # there and shared — nothing to do. Checked rather than assumed, because
+    # the generated migration is a plain `create table` that would fail.
+    if Enum.all?(tables, &table_exists?/1) do
+      tables
+    else
+      do_migrate(dir, tables)
+    end
+  end
+
+  defp do_migrate(dir, tables) do
+    # A run that died mid-migration can leave SOME of the tables. Drop the
+    # partial set so `create table` starts from a known state.
     drop(tables)
 
     # ONLY the resource migrations. The extensions migration installs Ash's SQL
@@ -106,17 +128,68 @@ defmodule ReactiveDag.PostgresCase do
       Supervisor.stop(mig_repo)
     end
 
-    ExUnit.Callbacks.on_exit(fn ->
-      drop(tables)
-      File.rm_rf!(dir)
-    end)
+    File.rm_rf!(dir)
 
     tables
+  end
+
+  defp table_exists?(table) do
+    %{rows: [[exists]]} =
+      exec("SELECT EXISTS (SELECT 1 FROM pg_tables WHERE tablename = $1)", [table])
+
+    exists
   end
 
   defp drop(tables) do
     for t <- tables, do: exec(~s|DROP TABLE IF EXISTS "#{t}" CASCADE|)
     :ok
+  end
+
+  @doc """
+  Create the LIBRARY's own tables — suspensions, dirty marks, runs.
+
+  These are raw SQL inside `ReactiveDag.Migration`, not Ash resources, so the
+  resource generator does not produce them. Running the library's real
+  migration is the point: the alternative that several tests used was a
+  hand-written `FakeRepo` matching on `"INSERT INTO " <> _`, which covers the
+  logic and cannot see inside the SQL — which is where
+  `real_postgres_suspension_test` found three real bugs.
+
+  Idempotent, and sets `:repo` for the duration so `Suspension`, `Lock` and
+  `Run` reach this database.
+  """
+  def migrate_library_tables! do
+    {:ok, mig_repo} = ReactiveDag.MigrationRepo.start_link()
+
+    try do
+      Ecto.Migrator.run(ReactiveDag.MigrationRepo, [{20_260_101_000_001, __MODULE__.LibraryTablesMigration}], :up,
+        all: true,
+        log: false
+      )
+    after
+      Supervisor.stop(mig_repo)
+    end
+
+    prev = Application.get_env(:reactive_dag, :repo)
+    Application.put_env(:reactive_dag, :repo, ReactiveDag.TestRepo)
+    ExUnit.Callbacks.on_exit(fn -> Application.put_env(:reactive_dag, :repo, prev) end)
+
+    :ok
+  end
+
+  defmodule LibraryTablesMigration do
+    @moduledoc false
+    use Ecto.Migration
+
+    def up do
+      ReactiveDag.Migration.up()
+      ReactiveDag.Migration.runs_up()
+    end
+
+    def down do
+      ReactiveDag.Migration.runs_down()
+      ReactiveDag.Migration.down()
+    end
   end
 
   @doc """
