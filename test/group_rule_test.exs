@@ -6,171 +6,29 @@ defmodule ReactiveDag.GroupRuleTest do
   KeyRule module, no misleading block-level `:all`. The expense-category
   story end to end: touch one travel expense, and only the travel rollup
   moves — claim, read, fold, and propagation.
+
+  Runs on the shared `ExpenseGraph` fixture against a real database. The
+  resources used to be declared here, and the suspension table used to be a
+  hand-written `FakeRepo` that matched on `"INSERT INTO " <> _`. Both are
+  gone: the graph is shared, and the library's own migration creates the real
+  tables, so this exercises the SQL rather than a stand-in for it.
   """
-  use ExUnit.Case, async: false
+  use ReactiveDag.PostgresCase
 
-  alias ReactiveDag.{Cascade}
+  alias ReactiveDag.Fixtures.ExpenseGraph
+  alias ReactiveDag.Fixtures.ExpenseGraph.{CategoryTotals, Expenses}
 
-  defmodule Domain do
-    use Ash.Domain, validate_config_inclusion?: false
-
-    resources do
-      allow_unregistered?(true)
-    end
+  setup_all do
+    migrate!(ExpenseGraph.Domain)
+    :ok
   end
-
-  defmodule Expenses do
-    use Ash.Resource,
-      domain: Domain,
-      data_layer: Ash.DataLayer.Ets,
-      extensions: [ReactiveDag.Node]
-
-    ets do
-      private?(true)
-    end
-
-    attributes do
-      # note: keys carry NO category grammar — :group looks the rows up
-      attribute :key, :string, primary_key?: true, allow_nil?: false, public?: true
-      attribute :category, :string, public?: true
-      attribute :amount, :float, public?: true
-    end
-
-    actions do
-      defaults [:read, :destroy]
-
-      create :create do
-        accept([:key, :category, :amount])
-      end
-
-      update :revise do
-        accept([:amount])
-      end
-    end
-
-    reactive do
-      id(:expenses)
-      op(:source)
-      leaf?(true)
-    end
-  end
-
-  defmodule CategoryTotals do
-    use Ash.Resource,
-      domain: Domain,
-      data_layer: Ash.DataLayer.Ets,
-      extensions: [ReactiveDag.Node]
-
-    ets do
-      private?(true)
-    end
-
-    attributes do
-      attribute :key, :string, primary_key?: true, allow_nil?: false, public?: true
-      attribute :category, :string, public?: true
-      attribute :total, :float, public?: true
-      attribute :n, :integer, public?: true
-    end
-
-    identities do
-      identity :by_key, [:key], pre_check_with: ReactiveDag.GroupRuleTest.Domain
-    end
-
-    actions do
-      defaults [:read, :destroy]
-
-      create :upsert do
-        upsert?(true)
-        upsert_identity(:by_key)
-        accept([:key, :category, :total, :n])
-      end
-    end
-
-    reactive do
-      id(:category_totals)
-      op(:fold)
-
-      # the whole granularity contract in ONE declaration: a change to an
-      # expense's :category invalidates that category unit — claims resolved
-      # through it, read scoped by it, rows grouped by it.
-      recompute_by :category, to: :expenses, from: :category
-
-      reduce into: [sum: [amount: :total], count: :n]
-    end
-  end
-
-  # same-grain consumer: proves only the touched category propagates
-  defmodule CategoryHealth do
-    use Ash.Resource,
-      domain: Domain,
-      data_layer: Ash.DataLayer.Ets,
-      extensions: [ReactiveDag.Node]
-
-    ets do
-    end
-
-    attributes do
-      attribute :key, :string, primary_key?: true, allow_nil?: false, public?: true
-      attribute :status, :string, public?: true
-    end
-
-    actions do
-      defaults [:read, :destroy]
-
-      create :upsert do
-        upsert?(true)
-        accept([:key, :status])
-      end
-    end
-
-    reactive do
-      id(:category_health)
-      op(:check)
-
-      reduce over: :category_totals,
-             group_by: :key,
-             into: fn _cat, [row | _] -> %{status: if(row.total < 1000.0, do: "present", else: "failing")} end
-    end
-  end
-
-  defmodule FakeRepo do
-    def start_link, do: Agent.start_link(fn -> MapSet.new() end, name: __MODULE__)
-
-    def query!("INSERT INTO " <> _, params) do
-      params
-      |> Enum.chunk_every(7)
-      |> Enum.each(fn [cell, _tenant, key, _r, _t, _held, vid] -> Agent.update(__MODULE__, &MapSet.put(&1, {cell, key})) end)
-
-      %{rows: []}
-    end
-
-    def query!("SELECT DISTINCT cell_id" <> _, _params) do
-      ids = Agent.get(__MODULE__, & &1) |> Enum.map(&elem(&1, 0)) |> Enum.uniq()
-      %{rows: Enum.map(ids, &[&1])}
-    end
-
-    def query!("DELETE FROM " <> _, [cell | _tenant]) do
-      keys =
-        Agent.get_and_update(__MODULE__, fn set ->
-          {mine, rest} = Enum.split_with(set, fn {c, _} -> c == cell end)
-          {Enum.map(mine, &elem(&1, 1)), MapSet.new(rest)}
-        end)
-
-      %{rows: Enum.map(keys, &[&1, nil])}
-    end
-
-    def query!("SELECT COUNT" <> _, _params), do: %{rows: [[Agent.get(__MODULE__, &MapSet.size/1)]]}
-  end
-
 
   setup do
-    start_supervised!(%{id: FakeRepo, start: {FakeRepo, :start_link, []}})
-    prev_repo = Application.get_env(:reactive_dag, :repo)
-    Application.put_env(:reactive_dag, :repo, FakeRepo)
+    pid = Ecto.Adapters.SQL.Sandbox.start_owner!(ReactiveDag.TestRepo, shared: true)
+    on_exit(fn -> Ecto.Adapters.SQL.Sandbox.stop_owner(pid) end)
 
-    on_exit(fn ->
-      Application.put_env(:reactive_dag, :repo, prev_repo)
-    end)
+    migrate_library_tables!()
+    truncate(ExpenseGraph.tables())
 
     for {k, cat, amt} <- [
           {"e1", "travel", 100.0},
@@ -178,16 +36,17 @@ defmodule ReactiveDag.GroupRuleTest do
           {"e3", "meals", 40.0},
           {"e4", "lodging", 900.0}
         ] do
-      Expenses |> Ash.Changeset.for_create(:create, %{key: k, category: cat, amount: amt}) |> Ash.create!()
+      Expenses
+      |> Ash.Changeset.for_create(:create, %{key: k, category: cat, amount: amt})
+      |> Ash.create!()
     end
 
     :ok
   end
 
-  defp plan, do: ReactiveDag.Node.graph([Expenses, CategoryTotals, CategoryHealth])
+  defp plan, do: ExpenseGraph.plan(:with_health)
 
-  defp drain(plan),
-    do: ReactiveDag.Test.Pending.cascade(plan)
+  defp drain(plan), do: ReactiveDag.Test.Pending.cascade(plan)
 
   test "touching one expense moves ONE category — claim, read, fold, propagation" do
     plan = plan()
@@ -244,9 +103,12 @@ defmodule ReactiveDag.GroupRuleTest do
   test "recompute_by alongside a block-level key_rule is a compile-time error" do
     alias ReactiveDag.Node.Verifiers.VerifyReactive
 
+    # Stays INLINE and data-layer-less: the point is that it does not assemble,
+    # so it has no rows and needs no table. Moving it to a fixture would mean
+    # compiling a deliberately-invalid resource at fixture load.
     defmodule BothPlaces do
       use Ash.Resource,
-        domain: ReactiveDag.GroupRuleTest.Domain,
+        domain: ReactiveDag.Fixtures.ExpenseGraph.Domain,
         data_layer: Ash.DataLayer.Simple,
         extensions: [ReactiveDag.Node]
 
@@ -256,9 +118,9 @@ defmodule ReactiveDag.GroupRuleTest do
 
         # the unit already says what a change invalidates — `key_rule` is the
         # same fact stated twice, and the two can disagree
-        recompute_by :category, to: :expenses, from: :category
+        recompute_by(:category, to: :expenses, from: :category)
 
-        reduce into: fn _c, _rows -> %{} end
+        reduce(into: fn _c, _rows -> %{} end)
       end
     end
 

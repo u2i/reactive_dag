@@ -34,6 +34,7 @@ defmodule ReactiveDag.Fixtures.ExpenseGraph do
     resources do
       resource ReactiveDag.Fixtures.ExpenseGraph.Expenses
       resource ReactiveDag.Fixtures.ExpenseGraph.CategoryTotals
+      resource ReactiveDag.Fixtures.ExpenseGraph.CategoryHealth
     end
   end
 
@@ -123,9 +124,63 @@ defmodule ReactiveDag.Fixtures.ExpenseGraph do
     end
   end
 
-  @doc "The assembled plan for this graph."
+  defmodule CategoryHealth do
+    @moduledoc """
+    A same-grain consumer of the fold.
+
+    Present so the graph is three deep rather than two: it proves a claim
+    PROPAGATES at the same grain — touch one expense, and only that category's
+    health recomputes. A two-node graph cannot show that, because there is
+    nothing downstream of the fold to follow.
+    """
+    use Ash.Resource,
+      domain: ReactiveDag.Fixtures.ExpenseGraph.Domain,
+      data_layer: AshPostgres.DataLayer,
+      extensions: [ReactiveDag.Node]
+
+    postgres do
+      table "fx_category_health"
+      repo(ReactiveDag.TestRepo)
+    end
+
+    attributes do
+      attribute :key, :string, primary_key?: true, allow_nil?: false, public?: true
+      attribute :status, :string, public?: true
+    end
+
+    actions do
+      defaults [:read, :destroy]
+
+      create :upsert do
+        upsert? true
+        accept [:key, :status]
+        upsert_fields [:status]
+      end
+    end
+
+    reactive do
+      id(:category_health)
+      op(:check)
+
+      reduce(
+        over: :category_totals,
+        group_by: :key,
+        into: fn _cat, [row | _] ->
+          %{status: if(row.total < 1000.0, do: "present", else: "failing")}
+        end
+      )
+    end
+  end
+
+  @doc """
+  The assembled plan.
+
+  Two nodes by default; pass `:with_health` for the three-deep graph when the
+  test is about propagation rather than the fold itself.
+  """
   def plan, do: ReactiveDag.Node.graph([Expenses, CategoryTotals])
+  def plan(:with_health), do: ReactiveDag.Node.graph([Expenses, CategoryTotals, CategoryHealth])
 
   @doc "The tables this fixture owns, for truncation between tests."
-  def tables, do: ["fx_expenses", "fx_category_totals"]
+  def tables, do: ["fx_expenses", "fx_category_totals", "fx_category_health"]
 end
