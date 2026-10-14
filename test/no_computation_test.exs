@@ -37,9 +37,9 @@ defmodule ReactiveDag.NoComputationTest do
           extensions: [ReactiveDag.Node]
 
         reactive do
-          id(:label_only)
-          op(:map)
-          depends_on([:something])
+          id :label_only
+          op :map
+          depends_on [:something]
         end
       end
 
@@ -58,7 +58,7 @@ defmodule ReactiveDag.NoComputationTest do
           extensions: [ReactiveDag.Node]
 
         reactive do
-          id(:bare)
+          id :bare
         end
       end
 
@@ -78,8 +78,8 @@ defmodule ReactiveDag.NoComputationTest do
           extensions: [ReactiveDag.Node]
 
         reactive do
-          id(:silent)
-          ref(:upstream)
+          id :silent
+          ref :upstream
         end
       end
 
@@ -112,8 +112,8 @@ defmodule ReactiveDag.NoComputationTest do
         end
 
         reactive do
-          id(:leaf)
-          leaf?(true)
+          id :leaf
+          leaf? true
         end
       end
 
@@ -128,15 +128,15 @@ defmodule ReactiveDag.NoComputationTest do
           extensions: [ReactiveDag.Node]
 
         reactive do
-          id(:composed)
+          id :composed
 
           compose :fold do
             compose :a do
-              leaf?(true)
+              leaf? true
             end
 
             compose :b do
-              leaf?(true)
+              leaf? true
             end
           end
         end
@@ -168,8 +168,8 @@ defmodule ReactiveDag.NoComputationTest do
         end
 
         reactive do
-          id(:unioned)
-          union(from: [:a, :b], into: [check: :cell, subject: :key])
+          id :unioned
+          union from: [:a, :b], into: [check: :cell, subject: :key]
         end
       end
 
@@ -188,13 +188,13 @@ defmodule ReactiveDag.NoComputationTest do
           extensions: [ReactiveDag.Node]
 
         reactive do
-          id(:unlabelled_leg)
+          id :unlabelled_leg
 
           compose :root do
             # no `op` on this leg — it was `required: true` here and optional on
             # the main entity: same field, same non-role, opposite obligation
             compose do
-              leaf?(true)
+              leaf? true
             end
           end
         end

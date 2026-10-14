@@ -104,7 +104,7 @@ defmodule ReactiveDag.IdentityKeysTest do
       end
 
       reactive do
-        id(:uncovered)
+        id :uncovered
         # groups only by fund — :fy could never be written, so the upsert
         # could not identify its row
         reduce(

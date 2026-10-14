@@ -38,8 +38,8 @@ defmodule ReactiveDag.Fixtures.UuidKeyGraph do
     end
 
     reactive do
-      id(:docs)
-      leaf?(true)
+      id :docs
+      leaf? true
     end
   end
 
@@ -74,11 +74,11 @@ defmodule ReactiveDag.Fixtures.UuidKeyGraph do
     end
 
     reactive do
-      id(:entity)
-      row_key(:uuid)
-      key_rule(:identity)
-      depends_on([:docs])
-      compute(ReactiveDag.Fixtures.UuidKeyGraph.EntityOp)
+      id :entity
+      row_key :uuid
+      key_rule :identity
+      depends_on [:docs]
+      compute ReactiveDag.Fixtures.UuidKeyGraph.EntityOp
     end
   end
 

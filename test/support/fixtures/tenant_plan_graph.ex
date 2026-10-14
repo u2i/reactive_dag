@@ -43,9 +43,9 @@ defmodule ReactiveDag.Fixtures.TenantPlanGraph do
     end
 
     reactive do
-      id(:lines)
-      op(:source)
-      leaf?(true)
+      id :lines
+      op :source
+      leaf? true
     end
   end
 
@@ -82,10 +82,10 @@ defmodule ReactiveDag.Fixtures.TenantPlanGraph do
     end
 
     reactive do
-      id(:rollup)
-      op(:fold)
-      payload_key(:fund)
-      reduce(over: :lines, group_by: :fund, into: [sum: [amount: :total]])
+      id :rollup
+      op :fold
+      payload_key :fund
+      reduce over: :lines, group_by: :fund, into: [sum: [amount: :total]]
     end
   end
 
@@ -122,11 +122,11 @@ defmodule ReactiveDag.Fixtures.TenantPlanGraph do
     end
 
     reactive do
-      id(:total)
-      op(:fold)
-      key_rule(:all)
-      payload_key(:scope)
-      reduce(over: :rollup, group_by: :scope, into: [sum: [total: :total]])
+      id :total
+      op :fold
+      key_rule :all
+      payload_key :scope
+      reduce over: :rollup, group_by: :scope, into: [sum: [total: :total]]
     end
   end
 

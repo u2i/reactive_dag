@@ -125,10 +125,10 @@ defmodule ReactiveDag.AggregateNodeTest do
       end
 
       reactive do
-        id(:bad_dest)
-        key_rule(:all)
+        id :bad_dest
+        key_rule :all
         # :no_such_column is not an attribute on this resource
-        aggregate(over: :readings, avg: [flow: :avg_flow], count: :no_such_column)
+        aggregate over: :readings, avg: [flow: :avg_flow], count: :no_such_column
       end
     end
 

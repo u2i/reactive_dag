@@ -44,9 +44,9 @@ defmodule ReactiveDag.Fixtures.AggregateGraph do
     end
 
     reactive do
-      id(:fund_lines)
-      op(:source)
-      leaf?(true)
+      id :fund_lines
+      op :source
+      leaf? true
     end
   end
 
@@ -95,8 +95,8 @@ defmodule ReactiveDag.Fixtures.AggregateGraph do
 
     # PURE-ASH aggregate: the datastore avgs/counts the :readings relationship.
     reactive do
-      op(:fold)
-      key_rule(:all)
+      op :fold
+      key_rule :all
 
       aggregate(
         over: :readings,
@@ -168,10 +168,10 @@ defmodule ReactiveDag.Fixtures.AggregateGraph do
     end
 
     reactive do
-      id(:fund_fy)
-      op(:fold)
-      key_rule(:all)
-      aggregate(over: :lines, sum: [amount: :total], count: :n)
+      id :fund_fy
+      op :fold
+      key_rule :all
+      aggregate over: :lines, sum: [amount: :total], count: :n
     end
   end
 

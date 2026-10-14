@@ -234,8 +234,8 @@ defmodule ReactiveDag.TwoNodeJoinTest do
         actions(do: defaults([:read, :destroy]))
 
         reactive do
-          id(:no_input)
-          join(left: :a, right: :b, into: [left: [x: :key]])
+          id :no_input
+          join left: :a, right: :b, into: [left: [x: :key]]
         end
       end
 
@@ -254,7 +254,7 @@ defmodule ReactiveDag.TwoNodeJoinTest do
         actions(do: defaults([:read, :destroy]))
 
         reactive do
-          id(:both)
+          id :both
 
           join(
             over: :entries,
@@ -280,8 +280,8 @@ defmodule ReactiveDag.TwoNodeJoinTest do
         actions(do: defaults([:read, :destroy]))
 
         reactive do
-          id(:half)
-          join(left_over: :budgets, left: :a, right: :b, into: [left: [x: :key]])
+          id :half
+          join left_over: :budgets, left: :a, right: :b, into: [left: [x: :key]]
         end
       end
 

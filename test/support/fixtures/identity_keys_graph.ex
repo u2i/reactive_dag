@@ -44,9 +44,9 @@ defmodule ReactiveDag.Fixtures.IdentityKeysGraph do
     end
 
     reactive do
-      id(:lines)
-      op(:source)
-      leaf?(true)
+      id :lines
+      op :source
+      leaf? true
     end
   end
 
@@ -80,15 +80,15 @@ defmodule ReactiveDag.Fixtures.IdentityKeysGraph do
     end
 
     reactive do
-      id(:rollups)
-      op(:fold)
+      id :rollups
+      op :fold
 
       # THE COMPOSITE UNIT, stated once: the grain IS the grouping, so there
       # is no `group_by:` to restate. Reads as
       # "rollups.fund = lines.fund_code AND rollups.fy = lines.fy".
-      recompute_by([fund: :fund_code, fy: :fy], to: :lines)
+      recompute_by [fund: :fund_code, fy: :fy], to: :lines
 
-      reduce(into: [sum: [amount: :total], count: :n])
+      reduce into: [sum: [amount: :total], count: :n]
     end
   end
 

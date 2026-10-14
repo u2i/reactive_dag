@@ -66,8 +66,8 @@ defmodule ReactiveDag.SuspendsTest do
     end
 
     reactive do
-      id(:versioned_leaf)
-      leaf?(true)
+      id :versioned_leaf
+      leaf? true
     end
   end
 
@@ -93,8 +93,8 @@ defmodule ReactiveDag.SuspendsTest do
     end
 
     reactive do
-      id(:bare_leaf)
-      leaf?(true)
+      id :bare_leaf
+      leaf? true
     end
   end
 
@@ -124,10 +124,10 @@ defmodule ReactiveDag.SuspendsTest do
     end
 
     reactive do
-      id(:slow_ok)
-      depends_on([:versioned_leaf])
+      id :slow_ok
+      depends_on [:versioned_leaf]
       run :extract
-      suspends(true)
+      suspends true
     end
   end
 
@@ -156,10 +156,10 @@ defmodule ReactiveDag.SuspendsTest do
     end
 
     reactive do
-      id(:slow_no_reader)
-      depends_on([:versioned_leaf])
+      id :slow_no_reader
+      depends_on [:versioned_leaf]
       run :extract
-      suspends(true)
+      suspends true
     end
   end
 
@@ -188,10 +188,10 @@ defmodule ReactiveDag.SuspendsTest do
     end
 
     reactive do
-      id(:slow_bare_input)
-      depends_on([:bare_leaf])
+      id :slow_bare_input
+      depends_on [:bare_leaf]
       run :extract
-      suspends(true)
+      suspends true
     end
   end
 
@@ -220,10 +220,10 @@ defmodule ReactiveDag.SuspendsTest do
     end
 
     reactive do
-      id(:reviewed)
-      depends_on([:versioned_leaf])
+      id :reviewed
+      depends_on [:versioned_leaf]
       run :summarise
-      gated(true)
+      gated true
     end
   end
 
@@ -249,9 +249,9 @@ defmodule ReactiveDag.SuspendsTest do
     end
 
     reactive do
-      id(:gated_leaf)
-      leaf?(true)
-      gated(true)
+      id :gated_leaf
+      leaf? true
+      gated true
     end
   end
 
@@ -376,11 +376,11 @@ defmodule ReactiveDag.SuspendsTest do
     end
 
     reactive do
-      id(:well_formed)
-      depends_on([:versioned_leaf])
+      id :well_formed
+      depends_on [:versioned_leaf]
       run :extract
-      compare([:outcome])
-      approved_by(via: :approval_id, resource: ReactiveDag.SuspendsTest.VersionedLeaf)
+      compare [:outcome]
+      approved_by via: :approval_id, resource: ReactiveDag.SuspendsTest.VersionedLeaf
     end
   end
 
@@ -414,10 +414,10 @@ defmodule ReactiveDag.SuspendsTest do
     end
 
     reactive do
-      id(:self_cancelling)
+      id :self_cancelling
       run :extract
-      compare([:outcome, :approval_id])
-      approved_by(via: :approval_id, resource: ReactiveDag.SuspendsTest.VersionedLeaf)
+      compare [:outcome, :approval_id]
+      approved_by via: :approval_id, resource: ReactiveDag.SuspendsTest.VersionedLeaf
     end
   end
 

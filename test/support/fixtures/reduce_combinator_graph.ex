@@ -39,9 +39,9 @@ defmodule ReactiveDag.Fixtures.ReduceCombinatorGraph do
     end
 
     reactive do
-      id(:lines)
-      op(:source)
-      leaf?(true)
+      id :lines
+      op :source
+      leaf? true
     end
   end
 
@@ -77,8 +77,8 @@ defmodule ReactiveDag.Fixtures.ReduceCombinatorGraph do
     end
 
     reactive do
-      id(:summary)
-      op(:map)
+      id :summary
+      op :map
 
       reduce(
         over: :lines,

@@ -26,9 +26,9 @@ defmodule ReactiveDag.CompanionCellTest do
     use Ash.Resource, domain: Domain, data_layer: Ash.DataLayer.Simple, extensions: [ReactiveDag.Node]
 
     reactive do
-      id(:baseline)
-      op(:leaf)
-      leaf?(true)
+      id :baseline
+      op :leaf
+      leaf? true
       source :baseline_scan
     end
   end
@@ -39,15 +39,15 @@ defmodule ReactiveDag.CompanionCellTest do
     use Ash.Resource, domain: Domain, data_layer: Ash.DataLayer.Simple, extensions: [ReactiveDag.Node]
 
     reactive do
-      id(:merge_gated)
-      companion(op: :guarantee, meta: [watched?: true])
+      id :merge_gated
+      companion op: :guarantee, meta: [watched?: true]
 
-      op(:reconcile)
-      ref(:baseline)
+      op :reconcile
+      ref :baseline
 
       compose :observed do
-        leaf?(true)
-        meta(source: :repo_protection)
+        leaf? true
+        meta source: :repo_protection
       end
     end
   end
@@ -93,10 +93,10 @@ defmodule ReactiveDag.CompanionCellTest do
       use Ash.Resource, domain: Domain, data_layer: Ash.DataLayer.Simple, extensions: [ReactiveDag.Node]
 
       reactive do
-        id(:cov)
-        companion(op: :rollup, id_suffix: "members")
-        op(:union)
-        ref(:baseline)
+        id :cov
+        companion op: :rollup, id_suffix: "members"
+        op :union
+        ref :baseline
       end
     end
 

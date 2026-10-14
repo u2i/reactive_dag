@@ -42,9 +42,9 @@ defmodule ReactiveDag.Fixtures.PayloadDiffGraph do
     end
 
     reactive do
-      id(:lines)
-      leaf?(true)
-      payload_key(:key)
+      id :lines
+      leaf? true
+      payload_key :key
     end
   end
 
@@ -73,11 +73,11 @@ defmodule ReactiveDag.Fixtures.PayloadDiffGraph do
     end
 
     reactive do
-      id(:projected)
-      op(:map)
-      payload_key(:key)
-      depends_on([:lines])
-      compute(ReactiveDag.Fixtures.PayloadDiffGraph.Project)
+      id :projected
+      op :map
+      payload_key :key
+      depends_on [:lines]
+      compute ReactiveDag.Fixtures.PayloadDiffGraph.Project
     end
   end
 
@@ -103,11 +103,11 @@ defmodule ReactiveDag.Fixtures.PayloadDiffGraph do
     end
 
     reactive do
-      id(:rollup)
-      op(:fold)
-      payload_key(:fund)
-      recompute_by(:fund, to: :projected, from: :fund)
-      reduce(into: [sum: [amount: :total]])
+      id :rollup
+      op :fold
+      payload_key :fund
+      recompute_by :fund, to: :projected, from: :fund
+      reduce into: [sum: [amount: :total]]
     end
   end
 

@@ -122,9 +122,9 @@ defmodule ReactiveDag.DeclarativeReduceTest do
           extensions: [ReactiveDag.Node]
 
         reactive do
-          id(:some_verdict)
-          op(:reconcile)
-          key_rule(:all)
+          id :some_verdict
+          op :reconcile
+          key_rule :all
 
           reduce(
             over: :fiscal_lines,
@@ -183,9 +183,9 @@ defmodule ReactiveDag.DeclarativeReduceTest do
         end
 
         reactive do
-          id(:bad_action)
-          op(:fold)
-          key_rule(:all)
+          id :bad_action
+          op :fold
+          key_rule :all
 
           reduce(
             over: :fiscal_lines,
@@ -234,9 +234,9 @@ defmodule ReactiveDag.DeclarativeReduceTest do
         end
 
         reactive do
-          id(:bad_attr)
-          op(:fold)
-          key_rule(:all)
+          id :bad_attr
+          op :fold
+          key_rule :all
 
           reduce(
             over: :fiscal_lines,
@@ -274,7 +274,7 @@ defmodule ReactiveDag.DeclarativeReduceTest do
           extensions: [ReactiveDag.Node]
 
         reactive do
-          id(:into_needs_group)
+          id :into_needs_group
 
           reduce(
             over: :fiscal_lines,
@@ -298,7 +298,7 @@ defmodule ReactiveDag.DeclarativeReduceTest do
           extensions: [ReactiveDag.Node]
 
         reactive do
-          id(:bad_kind)
+          id :bad_kind
 
           reduce(
             over: :fiscal_lines,
@@ -336,8 +336,8 @@ defmodule ReactiveDag.DeclarativeReduceTest do
         end
 
         reactive do
-          id(:bad_dest)
-          reduce(over: :fiscal_lines, group_by: :fund, into: [sum: [amount: :no_such_column]])
+          id :bad_dest
+          reduce over: :fiscal_lines, group_by: :fund, into: [sum: [amount: :no_such_column]]
         end
       end
 
@@ -355,7 +355,7 @@ defmodule ReactiveDag.DeclarativeReduceTest do
           extensions: [ReactiveDag.Node]
 
         reactive do
-          id(:prefix_and_fn)
+          id :prefix_and_fn
 
           reduce(
             over: :fiscal_lines,

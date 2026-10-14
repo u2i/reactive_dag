@@ -90,10 +90,10 @@ defmodule ReactiveDag.ScanDslTest do
     end
 
     reactive do
-      id(:agenda_docs)
-      leaf?(true)
+      id :agenda_docs
+      leaf? true
       # THE DECLARATION: this node's rows come from that scanner
-      poll(ReactiveDag.ScanDslTest.Crawler)
+      poll ReactiveDag.ScanDslTest.Crawler
     end
   end
 
@@ -115,9 +115,9 @@ defmodule ReactiveDag.ScanDslTest do
     end
 
     reactive do
-      id(:flaky)
-      leaf?(true)
-      poll(ReactiveDag.ScanDslTest.Exploding)
+      id :flaky
+      leaf? true
+      poll ReactiveDag.ScanDslTest.Exploding
     end
   end
 
@@ -163,9 +163,9 @@ defmodule ReactiveDag.ScanDslTest do
       end
 
       reactive do
-        id(:bad_scan)
-        leaf?(true)
-        poll(ReactiveDag.ScanDslTest.NotASource)
+        id :bad_scan
+        leaf? true
+        poll ReactiveDag.ScanDslTest.NotASource
       end
     end
 
@@ -228,8 +228,8 @@ defmodule ReactiveDag.ScanDslTest do
         end
 
         reactive do
-          id(:plain)
-          leaf?(true)
+          id :plain
+          leaf? true
         end
       end
 
@@ -262,8 +262,8 @@ defmodule ReactiveDag.ScanDslTest do
       end
 
       reactive do
-        id(:other)
-        leaf?(true)
+        id :other
+        leaf? true
       end
     end
 
@@ -291,10 +291,10 @@ defmodule ReactiveDag.ScanDslTest do
       end
 
       reactive do
-        id(:agenda_docs)
-        poll(ReactiveDag.ScanDslTest.Crawler)
-        recompute_by(:key, to: :other, from: :cat)
-        reduce(into: [count: :n])
+        id :agenda_docs
+        poll ReactiveDag.ScanDslTest.Crawler
+        recompute_by :key, to: :other, from: :cat
+        reduce into: [count: :n]
       end
     end
 
@@ -335,9 +335,9 @@ defmodule ReactiveDag.ScanDslTest do
             end
 
             reactive do
-              id(:twice_a)
-              leaf?(true)
-              poll(ReactiveDag.ScanDslTest.Crawler)
+              id :twice_a
+              leaf? true
+              poll ReactiveDag.ScanDslTest.Crawler
             end
           end
 
@@ -360,9 +360,9 @@ defmodule ReactiveDag.ScanDslTest do
             end
 
             reactive do
-              id(:twice_b)
-              leaf?(true)
-              poll(ReactiveDag.ScanDslTest.Crawler)
+              id :twice_b
+              leaf? true
+              poll ReactiveDag.ScanDslTest.Crawler
             end
           end
 

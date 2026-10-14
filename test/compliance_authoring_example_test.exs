@@ -173,9 +173,9 @@ defmodule ReactiveDag.ComplianceAuthoringExampleTest do
     use Ash.Resource, domain: Domain, data_layer: Ash.DataLayer.Simple, extensions: [ReactiveDag.Node]
 
     reactive do
-      id(:repo_protection)
-      op(:leaf)
-      leaf?(true)
+      id :repo_protection
+      op :leaf
+      leaf? true
       source :repo_protection
     end
   end
@@ -185,7 +185,7 @@ defmodule ReactiveDag.ComplianceAuthoringExampleTest do
     use Ash.Resource, domain: Domain, data_layer: Ash.DataLayer.Simple, extensions: [ReactiveDag.Node, Ext]
 
     reactive do
-      id(:merge_gated)
+      id :merge_gated
 
       claim("every merge to a protected branch was reviewed & gated")
       addresses([:CC8_1])
@@ -193,21 +193,21 @@ defmodule ReactiveDag.ComplianceAuthoringExampleTest do
       population(:events)
       conformance(tolerance_days: 5, working_days: true)
 
-      op(:fold)
-      meta(grain: :change)
+      op :fold
+      meta grain: :change
 
       # NO `as:` — ids auto-derive from position. And NO grain on the reconcile —
       # only the LEAVES author grain; the reconcile op DERIVES its grain (inherits
       # its first leg's :"app×repo") via the DeriveGrain transformer.
       compose :reconcile do
         compose :declared do
-          leaf?(true)
-          meta(grain: :"app×repo", strength: :declared)
+          leaf? true
+          meta grain: :"app×repo", strength: :declared
         end
 
         compose :observed do
-          leaf?(true)
-          meta(grain: :"app×repo", strength: :measured, source: :repo_protection)
+          leaf? true
+          meta grain: :"app×repo", strength: :measured, source: :repo_protection
         end
       end
     end

@@ -44,8 +44,8 @@ defmodule ReactiveDag.Fixtures.TenantedCountsGraph do
     end
 
     reactive do
-      id(:scoped)
-      leaf?(true)
+      id :scoped
+      leaf? true
     end
   end
 

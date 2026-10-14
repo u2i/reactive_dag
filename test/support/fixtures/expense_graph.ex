@@ -82,10 +82,10 @@ defmodule ReactiveDag.Fixtures.ExpenseGraph do
     end
 
     reactive do
-      id(:expenses)
-      op(:source)
-      leaf?(true)
-      dirties_on([:create, :update, :destroy])
+      id :expenses
+      op :source
+      leaf? true
+      dirties_on [:create, :update, :destroy]
     end
   end
 
@@ -118,10 +118,10 @@ defmodule ReactiveDag.Fixtures.ExpenseGraph do
     end
 
     reactive do
-      id(:category_totals)
-      op(:fold)
-      recompute_by(:category, to: :expenses, from: :category)
-      reduce(into: [sum: [amount: :total], count: :n])
+      id :category_totals
+      op :fold
+      recompute_by :category, to: :expenses, from: :category
+      reduce into: [sum: [amount: :total], count: :n]
     end
   end
 
@@ -160,8 +160,8 @@ defmodule ReactiveDag.Fixtures.ExpenseGraph do
     end
 
     reactive do
-      id(:category_health)
-      op(:check)
+      id :category_health
+      op :check
 
       reduce(
         over: :category_totals,
@@ -224,13 +224,13 @@ defmodule ReactiveDag.Fixtures.ExpenseGraph do
     end
 
     reactive do
-      id(:publish)
-      compute(ReactiveDag.Fixtures.ExpenseGraph.NoopOp)
+      id :publish
+      compute ReactiveDag.Fixtures.ExpenseGraph.NoopOp
 
       compose :fold do
-        as(:published_rows)
-        compute(ReactiveDag.Fixtures.ExpenseGraph.NoopOp)
-        ref(:expenses)
+        as :published_rows
+        compute ReactiveDag.Fixtures.ExpenseGraph.NoopOp
+        ref :expenses
       end
     end
   end

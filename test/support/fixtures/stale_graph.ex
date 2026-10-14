@@ -55,8 +55,8 @@ defmodule ReactiveDag.Fixtures.StaleGraph do
     end
 
     reactive do
-      id(:source)
-      leaf?(true)
+      id :source
+      leaf? true
     end
   end
 
@@ -96,9 +96,9 @@ defmodule ReactiveDag.Fixtures.StaleGraph do
     end
 
     reactive do
-      id(:derived)
-      depends_on([:source])
-      compute(ReactiveDag.Fixtures.StaleGraph.Double)
+      id :derived
+      depends_on [:source]
+      compute ReactiveDag.Fixtures.StaleGraph.Double
     end
   end
 

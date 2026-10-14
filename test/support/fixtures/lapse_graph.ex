@@ -59,10 +59,10 @@ defmodule ReactiveDag.Fixtures.LapseGraph do
     end
 
     reactive do
-      id(:lines)
-      op(:source)
-      leaf?(true)
-      dirties_on([:create, :update, :destroy])
+      id :lines
+      op :source
+      leaf? true
+      dirties_on [:create, :update, :destroy]
     end
   end
 
@@ -106,9 +106,9 @@ defmodule ReactiveDag.Fixtures.LapseGraph do
     end
 
     reactive do
-      id(:survives)
-      recompute_by(:fy, to: :lines, from: :fy)
-      reduce(into: [sum: [amount: :total]])
+      id :survives
+      recompute_by :fy, to: :lines, from: :fy
+      reduce into: [sum: [amount: :total]]
     end
   end
 
@@ -156,11 +156,11 @@ defmodule ReactiveDag.Fixtures.LapseGraph do
     end
 
     reactive do
-      id(:lapses_any)
-      recompute_by(:fy, to: :lines, from: :fy)
-      reduce(into: [sum: [amount: :total]])
+      id :lapses_any
+      recompute_by :fy, to: :lines, from: :fy
+      reduce into: [sum: [amount: :total]]
 
-      lapse(:approved_at, when_changed: :any)
+      lapse :approved_at, when_changed: :any
     end
   end
 
@@ -211,8 +211,8 @@ defmodule ReactiveDag.Fixtures.LapseGraph do
     end
 
     reactive do
-      id(:lapses_narrow)
-      recompute_by(:fy, to: :lines, from: :fy)
+      id :lapses_narrow
+      recompute_by :fy, to: :lines, from: :fy
 
       reduce(
         group_by: [fy: :fy],
@@ -226,7 +226,7 @@ defmodule ReactiveDag.Fixtures.LapseGraph do
         end
       )
 
-      lapse(:signed_off_by, when_changed: [:total])
+      lapse :signed_off_by, when_changed: [:total]
     end
   end
 
@@ -285,11 +285,11 @@ defmodule ReactiveDag.Fixtures.LapseGraph do
     end
 
     reactive do
-      id(:lapses_children)
-      recompute_by(:fy, to: :lines, from: :fy)
-      reduce(into: [sum: [amount: :total]])
+      id :lapses_children
+      recompute_by :fy, to: :lines, from: :fy
+      reduce into: [sum: [amount: :total]]
 
-      lapse(ReactiveDag.Fixtures.LapseGraph.Correction, key: :fy, when_changed: [:total])
+      lapse ReactiveDag.Fixtures.LapseGraph.Correction, key: :fy, when_changed: [:total]
     end
   end
 
@@ -324,10 +324,10 @@ defmodule ReactiveDag.Fixtures.LapseGraph do
     end
 
     reactive do
-      id(:fund_lines)
-      op(:source)
-      leaf?(true)
-      dirties_on([:create, :update, :destroy])
+      id :fund_lines
+      op :source
+      leaf? true
+      dirties_on [:create, :update, :destroy]
     end
   end
 
@@ -370,11 +370,11 @@ defmodule ReactiveDag.Fixtures.LapseGraph do
     end
 
     reactive do
-      id(:fund_rollups)
-      recompute_by([fund: :fund_code, fy: :fy], to: :fund_lines)
-      reduce(into: [sum: [amount: :total]])
+      id :fund_rollups
+      recompute_by [fund: :fund_code, fy: :fy], to: :fund_lines
+      reduce into: [sum: [amount: :total]]
 
-      lapse(:approved_at, when_changed: [:total])
+      lapse :approved_at, when_changed: [:total]
     end
   end
 
@@ -424,8 +424,8 @@ defmodule ReactiveDag.Fixtures.LapseGraph do
     end
 
     reactive do
-      id(:fy_sign_off)
-      recompute_by(:fy, to: :lines, from: :fy)
+      id :fy_sign_off
+      recompute_by :fy, to: :lines, from: :fy
 
       # one unit -> many rows, each self-keyed "<fy>|<bucket>"
       reduce(
@@ -444,7 +444,7 @@ defmodule ReactiveDag.Fixtures.LapseGraph do
         end
       )
 
-      lapse(:fy_approved_at, when_changed: :any, over: :fy)
+      lapse :fy_approved_at, when_changed: :any, over: :fy
     end
   end
 

@@ -75,8 +75,8 @@ defmodule ReactiveDag.DeferredScanArgsTest do
     end
 
     reactive do
-      id(:agendas)
-      leaf?(true)
+      id :agendas
+      leaf? true
 
       poll(ReactiveDag.DeferredScanArgsTest.Crawler,
         args: [recent: true, year: &ReactiveDag.DeferredScanArgsTest.Clock.year/0],

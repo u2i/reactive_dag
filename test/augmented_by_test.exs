@@ -262,9 +262,9 @@ defmodule ReactiveDag.AugmentedByTest do
         end
 
         reactive do
-          id(:ghost)
-          leaf?(true)
-          augmented_by([:aprove])
+          id :ghost
+          leaf? true
+          augmented_by [:aprove]
         end
       end
 
@@ -300,9 +300,9 @@ defmodule ReactiveDag.AugmentedByTest do
         end
 
         reactive do
-          id(:readable)
-          leaf?(true)
-          augmented_by([:read])
+          id :readable
+          leaf? true
+          augmented_by [:read]
         end
       end
 
@@ -337,9 +337,9 @@ defmodule ReactiveDag.AugmentedByTest do
         end
 
         reactive do
-          id(:self_dirtying)
-          leaf?(true)
-          augmented_by([:upsert])
+          id :self_dirtying
+          leaf? true
+          augmented_by [:upsert]
         end
       end
 
@@ -376,10 +376,10 @@ defmodule ReactiveDag.AugmentedByTest do
         end
 
         reactive do
-          id(:renamed)
-          leaf?(true)
-          payload_action(:write_row)
-          augmented_by([:write_row])
+          id :renamed
+          leaf? true
+          payload_action :write_row
+          augmented_by [:write_row]
         end
       end
 

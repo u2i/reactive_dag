@@ -38,9 +38,9 @@ defmodule ReactiveDag.Fixtures.ScanWorkerGraph do
     end
 
     reactive do
-      id(:docs)
-      leaf?(true)
-      poll(ReactiveDag.Fixtures.ScanWorkerGraph.Crawler, args: [recent: true], every: "0 * * * *")
+      id :docs
+      leaf? true
+      poll ReactiveDag.Fixtures.ScanWorkerGraph.Crawler, args: [recent: true], every: "0 * * * *"
     end
   end
 
@@ -69,7 +69,7 @@ defmodule ReactiveDag.Fixtures.ScanWorkerGraph do
     end
 
     reactive do
-      id(:notices)
+      id :notices
 
       # a CONSUMER of the crawl, not a second declaration of it. One scanner is
       # one node now; two nodes naming the same module means the upstream is
@@ -107,9 +107,9 @@ defmodule ReactiveDag.Fixtures.ScanWorkerGraph do
     end
 
     reactive do
-      id(:totals)
-      recompute_by(:category, to: :docs, from: :category)
-      reduce(group_by: :category, into: [count: :n])
+      id :totals
+      recompute_by :category, to: :docs, from: :category
+      reduce group_by: :category, into: [count: :n]
     end
   end
 

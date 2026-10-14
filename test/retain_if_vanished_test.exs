@@ -212,9 +212,9 @@ defmodule ReactiveDag.RetainIfVanishedTest do
           end
 
           reactive do
-            id(:bad_retain)
-            leaf?(true)
-            retain_if_vanished(status: :status)
+            id :bad_retain
+            leaf? true
+            retain_if_vanished status: :status
           end
         end
 

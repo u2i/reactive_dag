@@ -55,9 +55,9 @@ defmodule ReactiveDag.Fixtures.FundYearGraph do
     end
 
     reactive do
-      id(:lines)
-      leaf?(true)
-      payload_key(:key)
+      id :lines
+      leaf? true
+      payload_key :key
     end
   end
 
@@ -85,11 +85,11 @@ defmodule ReactiveDag.Fixtures.FundYearGraph do
     end
 
     reactive do
-      id(:projected)
-      op(:map)
-      payload_key(:key)
-      depends_on([:lines])
-      compute(ReactiveDag.Fixtures.FundYearGraph.Project)
+      id :projected
+      op :map
+      payload_key :key
+      depends_on [:lines]
+      compute ReactiveDag.Fixtures.FundYearGraph.Project
     end
   end
 
@@ -117,12 +117,12 @@ defmodule ReactiveDag.Fixtures.FundYearGraph do
     end
 
     reactive do
-      id(:rollup)
-      op(:fold)
-      payload_key(:rollup_key)
-      recompute_by([fund: :fund, year: :year], to: :projected)
+      id :rollup
+      op :fold
+      payload_key :rollup_key
+      recompute_by [fund: :fund, year: :year], to: :projected
       # COUNTS the rows the fold was handed, so an over-read is visible.
-      reduce(query: &ReactiveDag.Fixtures.FundYearGraph.count_read/2, into: [sum: [amount: :total]])
+      reduce query: &ReactiveDag.Fixtures.FundYearGraph.count_read/2, into: [sum: [amount: :total]]
     end
   end
 
@@ -160,14 +160,14 @@ defmodule ReactiveDag.Fixtures.FundYearGraph do
     end
 
     reactive do
-      id(:rollup)
-      op(:fold)
+      id :rollup
+      op :fold
       # `payload_key false` — this node HAS no key column, declared rather than
       # deduced. Its row is identified by the columns below.
-      payload_key(false)
-      row_key([:fund, :year])
-      recompute_by([fund: :fund, year: :year], to: :projected)
-      reduce(into: [sum: [amount: :total]])
+      payload_key false
+      row_key [:fund, :year]
+      recompute_by [fund: :fund, year: :year], to: :projected
+      reduce into: [sum: [amount: :total]]
     end
   end
 

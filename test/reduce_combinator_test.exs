@@ -105,8 +105,8 @@ defmodule ReactiveDag.ReduceCombinatorTest do
       end
 
       reactive do
-        id(:list_into)
-        op(:map)
+        id :list_into
+        op :map
 
         # A table, so the failure under test is `into:` returning a LIST rather
         # than anything about where the row would go.

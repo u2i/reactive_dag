@@ -43,9 +43,9 @@ defmodule ReactiveDag.Fixtures.RevivalGraph do
     end
 
     reactive do
-      id(:docs)
-      leaf?(true)
-      fingerprint([:content_md5])
+      id :docs
+      leaf? true
+      fingerprint [:content_md5]
     end
   end
 
@@ -78,10 +78,10 @@ defmodule ReactiveDag.Fixtures.RevivalGraph do
     end
 
     reactive do
-      id(:marked)
-      leaf?(true)
-      fingerprint([:content_md5])
-      retain_if_vanished(mark: &ReactiveDag.Fixtures.RevivalGraph.mark_gone/1)
+      id :marked
+      leaf? true
+      fingerprint [:content_md5]
+      retain_if_vanished mark: &ReactiveDag.Fixtures.RevivalGraph.mark_gone/1
     end
   end
 

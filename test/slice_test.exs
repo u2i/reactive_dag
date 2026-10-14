@@ -46,12 +46,12 @@ defmodule ReactiveDag.SliceTest do
     end
 
     reactive do
-      id(:docs)
-      poll(ReactiveDag.Fixtures.SliceGraph.Crawler)
+      id :docs
+      poll ReactiveDag.Fixtures.SliceGraph.Crawler
 
-      slice(:fiscal_year, values: ["FY24/25", "FY25/26"], poll_as: :fiscal)
+      slice :fiscal_year, values: ["FY24/25", "FY25/26"], poll_as: :fiscal
       # no `poll_as:` — the scanner spells this one the same as the column
-      slice(:board)
+      slice :board
     end
   end
 
@@ -72,11 +72,11 @@ defmodule ReactiveDag.SliceTest do
     end
 
     reactive do
-      id(:standing)
+      id :standing
       # a STANDING arg, so the test proves a selection composes with the
       # declaration rather than replacing it
-      poll(ReactiveDag.Fixtures.SliceGraph.Recorder, args: [recent: true])
-      slice(:fiscal_year, values: ["FY25/26"], poll_as: :fiscal)
+      poll ReactiveDag.Fixtures.SliceGraph.Recorder, args: [recent: true]
+      slice :fiscal_year, values: ["FY25/26"], poll_as: :fiscal
     end
   end
 
@@ -229,9 +229,9 @@ defmodule ReactiveDag.SliceTest do
             end
 
             reactive do
-              id(:bad_slice)
-              leaf?(true)
-              slice(:nope)
+              id :bad_slice
+              leaf? true
+              slice :nope
             end
           end
 

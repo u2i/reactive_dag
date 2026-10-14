@@ -44,10 +44,10 @@ defmodule ReactiveDag.Fixtures.RowKeyGraph do
     end
 
     reactive do
-      id(:docs)
-      op(:source)
-      leaf?(true)
-      row_key(:uuid)
+      id :docs
+      op :source
+      leaf? true
+      row_key :uuid
     end
   end
 
@@ -85,10 +85,10 @@ defmodule ReactiveDag.Fixtures.RowKeyGraph do
     end
 
     reactive do
-      id(:lines)
-      op(:source)
-      leaf?(true)
-      row_key([:fund, :fiscal_year])
+      id :lines
+      op :source
+      leaf? true
+      row_key [:fund, :fiscal_year]
     end
   end
 
@@ -124,11 +124,11 @@ defmodule ReactiveDag.Fixtures.RowKeyGraph do
     end
 
     reactive do
-      id(:meetings)
-      op(:source)
-      leaf?(true)
-      row_key(&ReactiveDag.Fixtures.RowKeyGraph.Meetings.resolve/3)
-      payload_update(:revise)
+      id :meetings
+      op :source
+      leaf? true
+      row_key &ReactiveDag.Fixtures.RowKeyGraph.Meetings.resolve/3
+      payload_update :revise
     end
   end
 
@@ -174,11 +174,11 @@ defmodule ReactiveDag.Fixtures.RowKeyGraph do
     end
 
     reactive do
-      id(:filings)
-      op(:source)
-      leaf?(true)
-      payload_key(:doc_key)
-      row_key([:org_id, :doc_key])
+      id :filings
+      op :source
+      leaf? true
+      payload_key :doc_key
+      row_key [:org_id, :doc_key]
     end
   end
 

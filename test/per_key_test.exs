@@ -186,10 +186,10 @@ defmodule ReactiveDag.PerKeyTest do
         end
 
         reactive do
-          id(:no_home)
-          recompute_by(:key, to: :transcripts, from: :key)
+          id :no_home
+          recompute_by :key, to: :transcripts, from: :key
           # no :fingerprint attribute on this resource
-          per_key(:summarise, fingerprint: [:body], into: [summary: :summary])
+          per_key :summarise, fingerprint: [:body], into: [summary: :summary]
         end
       end
 
@@ -217,9 +217,9 @@ defmodule ReactiveDag.PerKeyTest do
         end
 
         reactive do
-          id(:bad_into)
-          recompute_by(:key, to: :transcripts, from: :key)
-          per_key(:summarise, into: [no_such_column: :summary])
+          id :bad_into
+          recompute_by :key, to: :transcripts, from: :key
+          per_key :summarise, into: [no_such_column: :summary]
         end
       end
 
@@ -245,9 +245,9 @@ defmodule ReactiveDag.PerKeyTest do
         end
 
         reactive do
-          id(:not_generic)
-          recompute_by(:key, to: :transcripts, from: :key)
-          per_key(:read)
+          id :not_generic
+          recompute_by :key, to: :transcripts, from: :key
+          per_key :read
         end
       end
 

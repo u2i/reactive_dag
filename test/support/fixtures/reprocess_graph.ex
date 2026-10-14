@@ -35,9 +35,9 @@ defmodule ReactiveDag.Fixtures.ReprocessGraph do
     end
 
     reactive do
-      id(:lines)
-      leaf?(true)
-      slice(:fiscal_year, values: ["FY24", "FY25"])
+      id :lines
+      leaf? true
+      slice :fiscal_year, values: ["FY24", "FY25"]
     end
   end
 
@@ -63,8 +63,8 @@ defmodule ReactiveDag.Fixtures.ReprocessGraph do
     end
 
     reactive do
-      id(:totals)
-      recompute_by(:fiscal_year, to: :lines, from: :fiscal_year)
+      id :totals
+      recompute_by :fiscal_year, to: :lines, from: :fiscal_year
 
       reduce(
         group_by: :fiscal_year,

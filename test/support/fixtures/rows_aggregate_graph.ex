@@ -41,8 +41,8 @@ defmodule ReactiveDag.Fixtures.RowsAggregateGraph do
     end
 
     reactive do
-      id(:docs)
-      leaf?(true)
+      id :docs
+      leaf? true
     end
   end
 
@@ -69,8 +69,8 @@ defmodule ReactiveDag.Fixtures.RowsAggregateGraph do
     end
 
     reactive do
-      id(:totals)
-      leaf?(true)
+      id :totals
+      leaf? true
     end
   end
 
@@ -99,8 +99,8 @@ defmodule ReactiveDag.Fixtures.RowsAggregateGraph do
     end
 
     reactive do
-      id(:rollup)
-      leaf?(true)
+      id :rollup
+      leaf? true
     end
   end
 
@@ -111,8 +111,8 @@ defmodule ReactiveDag.Fixtures.RowsAggregateGraph do
       extensions: [ReactiveDag.Node]
 
     reactive do
-      id(:elsewhere)
-      leaf?(true)
+      id :elsewhere
+      leaf? true
     end
   end
 

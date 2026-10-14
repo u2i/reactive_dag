@@ -38,8 +38,8 @@ defmodule ReactiveDag.Fixtures.VerdictGraph do
     end
 
     reactive do
-      id(:totals)
-      leaf?(true)
+      id :totals
+      leaf? true
     end
   end
 
@@ -71,7 +71,7 @@ defmodule ReactiveDag.Fixtures.VerdictGraph do
     end
 
     reactive do
-      id(:health)
+      id :health
 
       # a verdict WITH a table is an ordinary payload node: the status is a
       # column, written by `into:` like any other. `status:` is the tableless

@@ -57,10 +57,10 @@ defmodule ReactiveDag.Fixtures.DirtiesOnGraph do
     end
 
     reactive do
-      id(:attestations)
-      leaf?(true)
-      dirties_on([:create, :destroy])
-      payload_key(:key)
+      id :attestations
+      leaf? true
+      dirties_on [:create, :destroy]
+      payload_key :key
     end
   end
 
@@ -112,11 +112,11 @@ defmodule ReactiveDag.Fixtures.DirtiesOnGraph do
     end
 
     reactive do
-      id(:expenses)
-      op(:source)
-      leaf?(true)
+      id :expenses
+      op :source
+      leaf? true
       # THE FEATURE: writes here mark this cell dirty, with no host wiring
-      dirties_on([:create, :update, :destroy])
+      dirties_on [:create, :update, :destroy]
 
       # A queue row references the version recording the change; the consumer
       # reads it back to learn WHAT moved. Both halves are the host's, because a
@@ -153,10 +153,10 @@ defmodule ReactiveDag.Fixtures.DirtiesOnGraph do
     end
 
     reactive do
-      id(:rollups)
-      op(:source)
-      leaf?(true)
-      dirties_on([:create])
+      id :rollups
+      op :source
+      leaf? true
+      dirties_on [:create]
     end
   end
 
@@ -185,9 +185,9 @@ defmodule ReactiveDag.Fixtures.DirtiesOnGraph do
     end
 
     reactive do
-      id(:quiet)
-      op(:source)
-      leaf?(true)
+      id :quiet
+      op :source
+      leaf? true
     end
   end
 
@@ -224,11 +224,11 @@ defmodule ReactiveDag.Fixtures.DirtiesOnGraph do
     end
 
     reactive do
-      id(:category_totals)
-      op(:fold)
+      id :category_totals
+      op :fold
 
-      recompute_by(:category, to: :expenses, from: :category)
-      reduce(into: [sum: [amount: :total], count: :n])
+      recompute_by :category, to: :expenses, from: :category
+      reduce into: [sum: [amount: :total], count: :n]
     end
   end
 
@@ -271,11 +271,11 @@ defmodule ReactiveDag.Fixtures.DirtiesOnGraph do
     end
 
     reactive do
-      id(:tenanted_expenses)
-      op(:source)
-      leaf?(true)
-      row_key([:org_id, :key])
-      dirties_on([:create])
+      id :tenanted_expenses
+      op :source
+      leaf? true
+      row_key [:org_id, :key]
+      dirties_on [:create]
     end
   end
 

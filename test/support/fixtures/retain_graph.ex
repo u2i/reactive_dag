@@ -45,10 +45,10 @@ defmodule ReactiveDag.Fixtures.RetainGraph do
     end
 
     reactive do
-      id(:docs)
-      leaf?(true)
-      fingerprint([:content_md5])
-      retain_if_vanished(true)
+      id :docs
+      leaf? true
+      fingerprint [:content_md5]
+      retain_if_vanished true
     end
   end
 
@@ -81,9 +81,9 @@ defmodule ReactiveDag.Fixtures.RetainGraph do
     end
 
     reactive do
-      id(:plain)
-      leaf?(true)
-      fingerprint([:content_md5])
+      id :plain
+      leaf? true
+      fingerprint [:content_md5]
     end
   end
 
@@ -116,10 +116,10 @@ defmodule ReactiveDag.Fixtures.RetainGraph do
     end
 
     reactive do
-      id(:marked)
-      leaf?(true)
-      fingerprint([:content_md5])
-      retain_if_vanished(mark: &ReactiveDag.Fixtures.RetainGraph.tombstone/1)
+      id :marked
+      leaf? true
+      fingerprint [:content_md5]
+      retain_if_vanished mark: &ReactiveDag.Fixtures.RetainGraph.tombstone/1
     end
   end
 

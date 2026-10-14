@@ -44,9 +44,9 @@ defmodule ReactiveDag.Fixtures.TwoNodeJoinGraph do
     end
 
     reactive do
-      id(:budgets)
-      op(:source)
-      leaf?(true)
+      id :budgets
+      op :source
+      leaf? true
     end
   end
 
@@ -80,9 +80,9 @@ defmodule ReactiveDag.Fixtures.TwoNodeJoinGraph do
     end
 
     reactive do
-      id(:actuals)
-      op(:source)
-      leaf?(true)
+      id :actuals
+      op :source
+      leaf? true
     end
   end
 
@@ -118,8 +118,8 @@ defmodule ReactiveDag.Fixtures.TwoNodeJoinGraph do
     end
 
     reactive do
-      id(:variance)
-      op(:reconcile)
+      id :variance
+      op :reconcile
 
       # NO `depends_on` — `left_over:`/`right_over:` already name both inputs,
       # and the library derives the edges from them (one per side). Restating
