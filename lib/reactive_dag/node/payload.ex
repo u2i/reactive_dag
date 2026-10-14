@@ -107,10 +107,7 @@ defmodule ReactiveDag.Node.Payload do
         record -> if moved?(record, attrs, opts), do: :changed, else: :unchanged
       end
 
-    {:ok, written} =
-      resource
-      |> Ash.Changeset.for_create(action, attrs, tenant_opts(opts))
-      |> Ash.create()
+    {:ok, written} = create(resource, action, attrs, verdict, prior, opts)
 
     # This tail is `write/6`'s, duplicated — `upsert/6` predates the rung split
     # and never moved onto it. Worth collapsing, but not in the same change as
@@ -250,10 +247,7 @@ defmodule ReactiveDag.Node.Payload do
         record -> if moved?(record, attrs, opts), do: :changed, else: :unchanged
       end
 
-    {:ok, written} =
-      resource
-      |> Ash.Changeset.for_create(action, attrs, tenant_opts(opts))
-      |> Ash.create()
+    {:ok, written} = create(resource, action, attrs, verdict, prior, opts)
 
     record_diff(cell_key, prior, attrs, verdict, written, opts)
     lapse(prior, attrs, resource, cell_key, opts)
@@ -886,6 +880,66 @@ defmodule ReactiveDag.Node.Payload do
       nil -> query
       tenant -> Ash.Query.set_tenant(query, tenant)
     end
+  end
+
+  # WHETHER THIS WRITE OPENS A NEW PERIOD, on a temporal resource.
+  #
+  # A temporal write splits the validity period at its `as_of`. It does so on
+  # identity and period containment alone — there is no value comparison
+  # anywhere in the data layer's SQL — so an UNCHANGED write splits anyway, and
+  # leaves two adjacent periods holding the same values, divided at an instant
+  # when nothing happened. Measured on PostgreSQL 18.4; see
+  # `spike/temporal_behaviour.exs`.
+  #
+  # `moved?/3` is the only thing in the system that can prevent that. Postgres
+  # compares every column; Ash's temporal layer keys on identity and period,
+  # never on values. A node declaring `compare: [:total]` means a shifted
+  # `ordinal` is not news — and only the node knows that.
+  #
+  # So the verdict chooses the instant:
+  #
+  #   * `:changed`   — `as_of` now: the period splits, which is the record of
+  #     the change.
+  #   * `:unchanged` — `as_of` the OPEN period's own lower bound. The update's
+  #     portion is then `[lower, inf) * [lower, inf)`, the whole existing
+  #     period, so there is no leftover to reinsert and no split. The row is
+  #     still written — a re-crawl that finds the same document must record
+  #     `last_seen_at` and a re-issued `etag`; "the row is current, it just
+  #     isn't news" — and `recorded_at` still moves, so when we last looked
+  #     survives even though validity did not change.
+  #
+  # The prior record is already in hand for `moved?/3`, and an ordinary
+  # `Ash.read_one` returns the period with it, so this costs no extra query.
+  defp create(resource, action, attrs, verdict, prior, opts) do
+    resource
+    |> Ash.Changeset.for_create(action, attrs, tenant_opts(opts))
+    |> maybe_as_of(resource, verdict, prior)
+    |> Ash.create()
+  end
+
+  defp maybe_as_of(changeset, resource, verdict, prior) do
+    if temporal?(resource) do
+      Ash.Changeset.as_of(changeset, write_as_of(verdict, prior, resource))
+    else
+      changeset
+    end
+  end
+
+  # A created row has no period to stay inside, and a changed one must not.
+  defp write_as_of(:unchanged, prior, resource) when not is_nil(prior) do
+    case Map.get(prior, Ash.Resource.Info.temporal_attribute(resource)) do
+      %Ash.Range{lower: lower} when not is_nil(lower) -> lower
+      # No readable period: fall back to splitting rather than guessing. An
+      # extra period is noise; writing into the wrong one would be a lie.
+      _ -> DateTime.utc_now()
+    end
+  end
+
+  defp write_as_of(_verdict, _prior, _resource), do: DateTime.utc_now()
+
+  defp temporal?(resource) do
+    function_exported?(Ash.Resource.Info, :temporal?, 1) and
+      Ash.Resource.Info.temporal?(resource)
   end
 
   defp stamp_fingerprint(attrs, row, resource, opts) do
