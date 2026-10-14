@@ -121,7 +121,7 @@ defmodule ReactiveDag.Fixtures.ScanWorkerGraph do
     it returns and inspects what it was called with; the fixture only needs it
     to exist by the time the graph assembles.
     """
-    @behaviour Source
+    @behaviour ReactiveDag.Source
 
     def start_link, do: Agent.start_link(fn -> %{polls: [], result: nil} end, name: __MODULE__)
     def polls, do: Agent.get(__MODULE__, & &1.polls) |> Enum.reverse()
@@ -131,7 +131,9 @@ defmodule ReactiveDag.Fixtures.ScanWorkerGraph do
 
     @impl true
     def id, do: :crawler
-    @impl true
+    # NOT a `Source` callback — the behaviour has `id/0`, `origin/0` and
+    # `poll/1`. This is the fan-out set a test reads directly, so it carries no
+    # `@impl`.
     def leaf_cells(_g), do: ["docs", "notices"]
     @impl true
     def poll(opts) do

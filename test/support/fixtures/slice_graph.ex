@@ -10,10 +10,8 @@ defmodule ReactiveDag.Fixtures.SliceGraph do
       resource ReactiveDag.Fixtures.SliceGraph.Lines
       resource ReactiveDag.Fixtures.SliceGraph.TenantedLines
       resource ReactiveDag.Fixtures.SliceGraph.Plain
-      resource ReactiveDag.Fixtures.SliceGraph.Docs
       resource ReactiveDag.Fixtures.SliceGraph.Tableless
       resource ReactiveDag.Fixtures.SliceGraph.NotASource
-      resource ReactiveDag.Fixtures.SliceGraph.Standing
     end
   end
 
@@ -116,41 +114,6 @@ defmodule ReactiveDag.Fixtures.SliceGraph do
     end
   end
 
-  # a SOURCE whose upstream is addressable by the same dimension its rows are
-  # sliced by — and which spells it differently, which is the case `poll_as:`
-  # exists for. The crawler takes `fiscal:`; the column is `fiscal_year`.
-  defmodule Docs do
-    use Ash.Resource,
-      domain: ReactiveDag.Fixtures.SliceGraph.Domain,
-      data_layer: AshPostgres.DataLayer,
-      extensions: [ReactiveDag.Node]
-
-    postgres do
-      table "fx_sl_docs"
-      repo(ReactiveDag.TestRepo)
-    end
-
-    attributes do
-      attribute :key, :string, primary_key?: true, allow_nil?: false, public?: true
-      attribute :fiscal_year, :string, public?: true
-      attribute :board, :string, public?: true
-    end
-
-    actions do
-      defaults [:read, :destroy]
-      create :upsert, upsert?: true, accept: [:key, :fiscal_year, :board]
-    end
-
-    reactive do
-      id(:docs)
-      poll(ReactiveDag.Fixtures.SliceGraph.Crawler)
-
-      slice(:fiscal_year, values: ["FY24/25", "FY25/26"], poll_as: :fiscal)
-      # no `poll_as:` — the scanner spells this one the same as the column
-      slice(:board)
-    end
-  end
-
   defmodule Tableless do
     use Ash.Resource,
       domain: ReactiveDag.Fixtures.SliceGraph.Domain,
@@ -192,36 +155,6 @@ defmodule ReactiveDag.Fixtures.SliceGraph do
     end
   end
 
-  defmodule Standing do
-    use Ash.Resource,
-      domain: ReactiveDag.Fixtures.SliceGraph.Domain,
-      data_layer: AshPostgres.DataLayer,
-      extensions: [ReactiveDag.Node]
-
-    postgres do
-      table "fx_sl_standing"
-      repo(ReactiveDag.TestRepo)
-    end
-
-    attributes do
-      attribute :key, :string, primary_key?: true, allow_nil?: false, public?: true
-      attribute :fiscal_year, :string, public?: true
-    end
-
-    actions do
-      defaults [:read, :destroy]
-      create :upsert, upsert?: true, accept: [:key, :fiscal_year]
-    end
-
-    reactive do
-      id(:standing)
-      # a STANDING arg, so the test proves a selection composes with the
-      # declaration rather than replacing it
-      poll(ReactiveDag.Fixtures.SliceGraph.Recorder, args: [recent: true])
-      slice(:fiscal_year, values: ["FY25/26"], poll_as: :fiscal)
-    end
-  end
-
   defmodule Recorder do
     @moduledoc """
     The poll `Standing` declares.
@@ -232,6 +165,9 @@ defmodule ReactiveDag.Fixtures.SliceGraph do
     @behaviour ReactiveDag.Source
 
     @impl true
+    def id, do: :recorder
+
+    @impl true
     def poll(opts) do
       send(self(), {:polled_with, opts})
       {:ok, %{changed: []}}
@@ -239,5 +175,5 @@ defmodule ReactiveDag.Fixtures.SliceGraph do
   end
 
   def tables,
-    do: ["fx_sl_standing", "fx_sl_not_a_source", "fx_sl_lines", "fx_sl_tenanted_lines", "fx_sl_plain", "fx_sl_docs"]
+    do: ["fx_sl_not_a_source", "fx_sl_lines", "fx_sl_tenanted_lines", "fx_sl_plain", "fx_sl_docs"]
 end
