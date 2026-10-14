@@ -43,6 +43,23 @@ defmodule ReactiveDag.Node.Changes.MarkDirty do
   use Ash.Resource.Change
   require Logger
 
+  # TEMPORAL SAFE, because the cascade it starts now carries the write's own
+  # `as_of` rather than assuming the present.
+  #
+  # Ash's bar is three things: no wall-clock reads, no side effects that assume
+  # now, and any reads threaded through Ash so `as_of` reaches them. This change
+  # reads nothing and touches no clock. Its one side effect is enqueuing a
+  # cascade — and that WAS the unsafe part: a write `as_of` 2019 would have
+  # propagated a historical correction as though it had just happened, which is
+  # exactly the valid-time/transaction-time confusion a temporal resource
+  # exists to keep apart.
+  #
+  # `originate/6` now reads `changeset.as_of` and hands it to the cascade, so a
+  # backdated write propagates as a backdated change. `nil` — no particular
+  # time — means now, which is every ordinary write.
+  @impl true
+  def temporal_safe?(_opts), do: true
+
   @impl true
   def change(changeset, opts, context) do
     Ash.Changeset.after_action(changeset, fn cs, result ->
@@ -135,7 +152,7 @@ defmodule ReactiveDag.Node.Changes.MarkDirty do
       &ReactiveDag.CascadeWorker.enqueue/3
   end
 
-  defp originate(record, _prior, opts, tenant, actor, _changeset) do
+  defp originate(record, _prior, opts, tenant, actor, changeset) do
     cell = Keyword.fetch!(opts, :cell)
 
     # The tenant off the CHANGESET, which is where a tenanted write already put
@@ -162,12 +179,31 @@ defmodule ReactiveDag.Node.Changes.MarkDirty do
           end
       end
 
-    enqueue(cell, keys,
-      tenant: tenant,
-      versions: versions,
-      skip_gate: gate_cleared?(opts, actor)
+    enqueue(
+      cell,
+      keys,
+      [tenant: tenant, versions: versions, skip_gate: gate_cleared?(opts, actor)] ++
+        as_of_opt(changeset)
     )
   end
+
+  # The instant this write takes effect at, for the cascade it starts.
+  #
+  # Omitted entirely when the write names no particular time, which is every
+  # ordinary write — so a non-temporal host sees the same enqueue it always
+  # did, and nothing downstream has to know about `as_of` to keep working.
+  defp as_of_opt(%Ash.Changeset{as_of: nil}), do: []
+
+  defp as_of_opt(%Ash.Changeset{as_of: as_of}) do
+    case Ash.Temporal.resolve_write_as_of(as_of) do
+      %DateTime{} = at -> [as_of: at]
+      _ -> []
+    end
+  rescue
+    _ -> []
+  end
+
+  defp as_of_opt(_), do: []
 
   # WHEN this change was recorded, off the row the write just produced.
   #
