@@ -33,8 +33,7 @@ defmodule ReactiveDag.OpProgressTest do
     # whose progress this is.
     Op.progress(12, 34, cell: "meeting_events", label: "meetings")
 
-    assert_receive {:progress, %{done: 12, total: 34},
-                    %{cell: "meeting_events", label: "meetings"}}
+    assert_receive {:progress, %{done: 12, total: 34}, %{cell: "meeting_events", label: "meetings"}}
   end
 
   test "a total that is not yet known" do

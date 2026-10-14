@@ -100,6 +100,7 @@ defmodule ReactiveDag.KeyRuleContractTest do
       end)
 
     assert log =~ "returned :error"
+
     assert log =~ "lines -> totals",
            "the warning must name the edge — not naming it is what made the " <>
              "original crash hard to attribute"
@@ -117,5 +118,4 @@ defmodule ReactiveDag.KeyRuleContractTest do
     assert [{"totals", ["l1"]}] =
              ReactiveDag.Graph.claims_for(plan(), "lines", ["l1"], ReactiveDag.Node.KeyRule)
   end
-
 end

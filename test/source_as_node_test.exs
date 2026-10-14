@@ -48,17 +48,12 @@ defmodule ReactiveDag.SourceAsNodeTest do
   provenance, but is not the leaves' `over:` — or the payload loop grows a way
   to decline a key.
   """
-  use ExUnit.Case, async: false
+  use ReactiveDag.PostgresCase
+
+  alias ReactiveDag.Fixtures.SourceNodeGraph
+  alias ReactiveDag.Fixtures.SourceNodeGraph.{AgendaDocs, Documents, MinutesDocs}
 
   alias ReactiveDag.{Cascade}
-
-  defmodule Domain do
-    use Ash.Domain, validate_config_inclusion?: false
-
-    resources do
-      allow_unregistered?(true)
-    end
-  end
 
   defmodule Fetches do
     def start_link, do: Agent.start_link(fn -> 0 end, name: __MODULE__)
@@ -86,114 +81,17 @@ defmodule ReactiveDag.SourceAsNodeTest do
   # One row per discovered document, `kind` as an ordinary attribute. The leaves
   # are ordinary derived nodes that filter it.
 
-  defmodule Documents do
-    use Ash.Resource,
-      domain: Domain,
-      data_layer: Ash.DataLayer.Ets,
-      extensions: [ReactiveDag.Node]
-
-    ets do
-    end
-
-    attributes do
-      attribute :key, :string, primary_key?: true, allow_nil?: false, public?: true
-      attribute :kind, :string, public?: true
-      attribute :filed_as, :string, public?: true
-      attribute :body, :string, public?: true
-    end
-
-    actions do
-      defaults [:read, :destroy]
-      create :upsert, upsert?: true, accept: [:key, :kind, :filed_as, :body]
-    end
-
-    reactive do
-      id :documents
-      leaf? true
-    end
-  end
-
-  defmodule AgendaDocs do
-    use Ash.Resource,
-      domain: Domain,
-      data_layer: Ash.DataLayer.Ets,
-      extensions: [ReactiveDag.Node]
-
-    ets do
-    end
-
-    attributes do
-      attribute :key, :string, primary_key?: true, allow_nil?: false, public?: true
-      attribute :body, :string, public?: true
-    end
-
-    actions do
-      defaults [:read, :destroy]
-      create :upsert, upsert?: true, accept: [:key, :body]
-    end
-
-    reactive do
-      id :agenda_docs
-
-      # a projection of one kind out of the crawl. `expand` because a group
-      # yields zero rows or one — a document that is not this kind simply is
-      # not here.
-      reduce(
-        over: :documents,
-        group_by: :key,
-        expand: fn key, rows ->
-          case Enum.filter(rows, &(&1.kind == "agenda")) do
-            # not this leaf's document. DECLINE it — writing nothing would read
-            # as a retirement and churn on every poll.
-            [] -> [{:skip, key}]
-            [row | _] -> [%{key: key, body: row.body}]
-          end
-        end
-      )
-    end
-  end
-
-  defmodule MinutesDocs do
-    use Ash.Resource,
-      domain: Domain,
-      data_layer: Ash.DataLayer.Ets,
-      extensions: [ReactiveDag.Node]
-
-    ets do
-    end
-
-    attributes do
-      attribute :key, :string, primary_key?: true, allow_nil?: false, public?: true
-      attribute :body, :string, public?: true
-    end
-
-    actions do
-      defaults [:read, :destroy]
-      create :upsert, upsert?: true, accept: [:key, :body]
-    end
-
-    reactive do
-      id :minutes_docs
-
-      # a projection of one kind out of the crawl. `expand` because a group
-      # yields zero rows or one — a document that is not this kind simply is
-      # not here.
-      reduce(
-        over: :documents,
-        group_by: :key,
-        expand: fn key, rows ->
-          case Enum.filter(rows, &(&1.kind == "minutes")) do
-            # not this leaf's document. DECLINE it — writing nothing would read
-            # as a retirement and churn on every poll.
-            [] -> [{:skip, key}]
-            [row | _] -> [%{key: key, body: row.body}]
-          end
-        end
-      )
-    end
+  setup_all do
+    migrate!(SourceNodeGraph.Domain)
+    :ok
   end
 
   setup do
+    pid = Ecto.Adapters.SQL.Sandbox.start_owner!(ReactiveDag.TestRepo, shared: true)
+    on_exit(fn -> Ecto.Adapters.SQL.Sandbox.stop_owner(pid) end)
+
+    migrate_library_tables!()
+    truncate(SourceNodeGraph.tables())
     # A poll or a write now ENQUEUES a cascade rather than leaving a mark,
     # so without this the library reaches for Oban and these tests fail on
     # a missing instance rather than on anything they are about.
@@ -202,7 +100,6 @@ defmodule ReactiveDag.SourceAsNodeTest do
     start_supervised!(%{id: Fetches, start: {Fetches, :start_link, []}})
     start_supervised!(ReactiveDag.Test.FakeSuspensionRepo)
     ReactiveDag.Test.FakeSuspensionRepo.install()
-
 
     for r <- [Documents, AgendaDocs, MinutesDocs], row <- Ash.read!(r), do: Ash.destroy!(row)
     Fetches.reset()

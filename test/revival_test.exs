@@ -192,6 +192,7 @@ defmodule ReactiveDag.RevivalTest do
 
     test "the boolean form — the host decides, and is not second-guessed" do
       {:ok, _, _} = Rows.reconcile(cell(), ["a", "b"], upsert: &Map.get(@rows, &1))
+
       {:ok, _, _} =
         Rows.reconcile(cell(), ["a"],
           upsert: &Map.get(@rows, &1),
@@ -212,6 +213,7 @@ defmodule ReactiveDag.RevivalTest do
 
     test "a key whose bytes DID move is reported once, not twice" do
       {:ok, _, _} = Rows.reconcile(cell(), ["a", "b"], upsert: &Map.get(@rows, &1))
+
       {:ok, _, _} =
         Rows.reconcile(cell(), ["a"],
           upsert: &Map.get(@rows, &1),
@@ -246,6 +248,7 @@ defmodule ReactiveDag.RevivalTest do
 
     test "a key the host could not observe (nil) is not a revival" do
       {:ok, _, _} = Rows.reconcile(cell(), ["a", "b"], upsert: &Map.get(@rows, &1))
+
       {:ok, _, _} =
         Rows.reconcile(cell(), ["a"],
           upsert: &Map.get(@rows, &1),

@@ -197,15 +197,17 @@ defmodule ReactiveDag.BasisTest do
 
       reactive do
         id(:holdings)
-        recompute_by :owner, to: :machines, from: :owner
+        recompute_by(:owner, to: :machines, from: :owner)
 
-        reduce into: fn {owner}, machines ->
-                 %{
-                   owner: owner,
-                   count: length(machines),
-                   basis: ReactiveDag.Basis.digest(machines, fields: [:key, :serial])
-                 }
-               end
+        reduce(
+          into: fn {owner}, machines ->
+            %{
+              owner: owner,
+              count: length(machines),
+              basis: ReactiveDag.Basis.digest(machines, fields: [:key, :serial])
+            }
+          end
+        )
       end
     end
 

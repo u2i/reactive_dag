@@ -88,17 +88,18 @@ defmodule ReactiveDag.ReduceCombinatorTest do
       id(:summary)
       op(:map)
 
-      reduce over: :lines,
-             query: fn q, dirty ->
-               send(ReactiveDag.ReduceCombinatorTest, {:query, dirty})
-               q
-             end,
-             group_by: fn line -> line.k end,
-             key: fn k -> k end,
-             into: fn _k, [line | _] -> %{fp: line.fp} end
+      reduce(
+        over: :lines,
+        query: fn q, dirty ->
+          send(ReactiveDag.ReduceCombinatorTest, {:query, dirty})
+          q
+        end,
+        group_by: fn line -> line.k end,
+        key: fn k -> k end,
+        into: fn _k, [line | _] -> %{fp: line.fp} end
+      )
     end
   end
-
 
   setup do
     Process.register(self(), ReactiveDag.ReduceCombinatorTest)
@@ -183,9 +184,11 @@ defmodule ReactiveDag.ReduceCombinatorTest do
 
         # A table, so the failure under test is `into:` returning a LIST rather
         # than anything about where the row would go.
-        reduce over: :lines,
-               group_by: fn l -> l.k end,
-               into: fn k, _ -> [%{key: k}] end
+        reduce(
+          over: :lines,
+          group_by: fn l -> l.k end,
+          into: fn k, _ -> [%{key: k}] end
+        )
       end
     end
 

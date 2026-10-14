@@ -48,9 +48,9 @@ defmodule ReactiveDag.VerifierCoversBothFormsTest do
         end
 
         reactive do
-          id :composite_rollups
-          recompute_by [fund: :fund_code, fy: :fy], to: :lines
-          reduce into: [sum: [amount: :total]]
+          id(:composite_rollups)
+          recompute_by([fund: :fund_code, fy: :fy], to: :lines)
+          reduce(into: [sum: [amount: :total]])
         end
       end
 
@@ -97,10 +97,10 @@ defmodule ReactiveDag.VerifierCoversBothFormsTest do
         end
 
         reactive do
-          id :compute_with_fingerprint
-          depends_on [:upstream]
-          compute ReactiveDag.VerifierCoversBothFormsTest.NoopOp
-          fingerprint [:key]
+          id(:compute_with_fingerprint)
+          depends_on([:upstream])
+          compute(ReactiveDag.VerifierCoversBothFormsTest.NoopOp)
+          fingerprint([:key])
         end
       end
 
@@ -135,9 +135,9 @@ defmodule ReactiveDag.VerifierCoversBothFormsTest do
         end
 
         reactive do
-          id :leaf_with_fingerprint
-          leaf? true
-          fingerprint [:etag]
+          id(:leaf_with_fingerprint)
+          leaf?(true)
+          fingerprint([:etag])
         end
       end
 
@@ -164,9 +164,9 @@ defmodule ReactiveDag.VerifierCoversBothFormsTest do
         end
 
         reactive do
-          id :no_fingerprint
-          depends_on [:upstream]
-          compute ReactiveDag.VerifierCoversBothFormsTest.NoopOp
+          id(:no_fingerprint)
+          depends_on([:upstream])
+          compute(ReactiveDag.VerifierCoversBothFormsTest.NoopOp)
         end
       end
 

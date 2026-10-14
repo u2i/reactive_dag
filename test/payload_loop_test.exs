@@ -10,6 +10,7 @@ defmodule ReactiveDag.PayloadLoopTest do
 
   defmodule Domain do
     use Ash.Domain, validate_config_inclusion?: false
+
     resources do
       allow_unregistered? true
     end
@@ -19,22 +20,30 @@ defmodule ReactiveDag.PayloadLoopTest do
   # rollup's declarative read can resolve its resource at assembly.
   defmodule DmrRow do
     use Ash.Resource, domain: Domain, data_layer: Ash.DataLayer.Ets, extensions: [ReactiveDag.Node]
-    ets do private?(true) end
+
+    ets do
+      private?(true)
+    end
+
     attributes do
       attribute :id, :string, primary_key?: true, allow_nil?: false, public?: true
       attribute :plant, :string, public?: true
       attribute :month, :string, public?: true
       attribute :flow, :float, public?: true
     end
+
     actions do
       defaults [:read, :destroy]
-      create :create do accept([:id, :plant, :month, :flow]) end
+
+      create :create do
+        accept([:id, :plant, :month, :flow])
+      end
     end
 
     reactive do
-      id :dmr_rows
-      op :source
-      leaf? true
+      id(:dmr_rows)
+      op(:source)
+      leaf?(true)
     end
   end
 
@@ -42,7 +51,10 @@ defmodule ReactiveDag.PayloadLoopTest do
   # reactive node AND its own payload table. No `upsert:` — the lib closes the loop.
   defmodule FlowMonth do
     use Ash.Resource, domain: Domain, data_layer: Ash.DataLayer.Ets, extensions: [ReactiveDag.Node]
-    ets do private?(true) end
+
+    ets do
+      private?(true)
+    end
 
     attributes do
       attribute :key, :string, primary_key?: true, allow_nil?: false, public?: true
@@ -51,25 +63,34 @@ defmodule ReactiveDag.PayloadLoopTest do
       attribute :avg_flow, :float, public?: true
     end
 
-    identities do identity :by_key, [:key], pre_check_with: ReactiveDag.PayloadLoopTest.Domain end
+    identities do
+      identity :by_key, [:key], pre_check_with: ReactiveDag.PayloadLoopTest.Domain
+    end
 
     actions do
       defaults [:read, :destroy]
-      create :upsert do upsert?(true); upsert_identity(:by_key); accept([:key, :plant, :month, :avg_flow]) end
+
+      create :upsert do
+        upsert?(true)
+        upsert_identity(:by_key)
+        accept([:key, :plant, :month, :avg_flow])
+      end
     end
 
     reactive do
-      id :flow_month
-      op :fold
-      key_rule :all
+      id(:flow_month)
+      op(:fold)
+      key_rule(:all)
 
       # NB: no `read:` (the library reads :dmr_rows itself) and no `upsert:` —
       # into returns the row, the library writes it into THIS resource (keyed
       # by :key) and does the Op.put. group/key/into stay fn escapes here.
-      reduce over: :dmr_rows,
-             group_by: &ReactiveDag.PayloadLoopTest.group/1,
-             key: &ReactiveDag.PayloadLoopTest.key/1,
-             into: &ReactiveDag.PayloadLoopTest.into/2
+      reduce(
+        over: :dmr_rows,
+        group_by: &ReactiveDag.PayloadLoopTest.group/1,
+        key: &ReactiveDag.PayloadLoopTest.key/1,
+        into: &ReactiveDag.PayloadLoopTest.into/2
+      )
     end
   end
 
@@ -84,7 +105,6 @@ defmodule ReactiveDag.PayloadLoopTest do
   # a no-op coordination writer — this test exercises the PAYLOAD loop; the
 
   setup do
-
     for {p, m, f, i} <- [{"north", "2024-01", 1.0, "a"}, {"north", "2024-01", 3.0, "b"}, {"south", "2024-01", 2.0, "c"}] do
       DmrRow |> Ash.Changeset.for_create(:create, %{id: i, plant: p, month: m, flow: f}) |> Ash.create!()
     end
@@ -104,7 +124,8 @@ defmodule ReactiveDag.PayloadLoopTest do
 
     # the ROWS actually landed in the node's own resource
     rows = FlowMonth |> Ash.read!() |> Map.new(&{&1.key, &1})
-    assert rows["north|2024-01"].avg_flow == 2.0    # (1+3)/2
+    # (1+3)/2
+    assert rows["north|2024-01"].avg_flow == 2.0
     assert rows["south|2024-01"].avg_flow == 2.0
     assert rows["north|2024-01"].plant == "north"
   end

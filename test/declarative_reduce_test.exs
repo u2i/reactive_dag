@@ -93,9 +93,11 @@ defmodule ReactiveDag.DeclarativeReduceTest do
       op(:fold)
       key_rule(:all)
 
-      reduce over: :fiscal_lines,
-             group_by: [:fund, :fy],
-             into: [sum: [amount: :total], count: :n]
+      reduce(
+        over: :fiscal_lines,
+        group_by: [:fund, :fy],
+        into: [sum: [amount: :total], count: :n]
+      )
     end
   end
 
@@ -136,11 +138,13 @@ defmodule ReactiveDag.DeclarativeReduceTest do
       op(:fold)
       key_rule(:all)
 
-      reduce over: :fiscal_lines,
-             read: :only_gf,
-             group_by: :fund,
-             key_prefix: "roll",
-             into: [sum: [amount: :total]]
+      reduce(
+        over: :fiscal_lines,
+        read: :only_gf,
+        group_by: :fund,
+        key_prefix: "roll",
+        into: [sum: [amount: :total]]
+      )
     end
   end
 
@@ -180,15 +184,15 @@ defmodule ReactiveDag.DeclarativeReduceTest do
       id(:line_marks)
       op(:map)
 
-      reduce over: :fiscal_lines,
-             group_by: :key,
-             into: [count: :n, first: [amount: :amount_seen]]
+      reduce(
+        over: :fiscal_lines,
+        group_by: :key,
+        into: [count: :n, first: [amount: :amount_seen]]
+      )
     end
   end
 
-
   setup do
-
     for {k, fund, fy, amount} <- [
           {"l1", "gf", 2025, 10.0},
           {"l2", "gf", 2025, 5.0},
@@ -291,11 +295,13 @@ defmodule ReactiveDag.DeclarativeReduceTest do
         op(:fold)
         key_rule(:all)
 
-        reduce over: :fiscal_lines,
-               group_by: [:fund, :fy],
-               into: fn {_fund, _fy}, lines ->
-                 %{status: (if length(lines) > 1, do: "present", else: "thin")}
-               end
+        reduce(
+          over: :fiscal_lines,
+          group_by: [:fund, :fy],
+          into: fn {_fund, _fy}, lines ->
+            %{status: if(length(lines) > 1, do: "present", else: "thin")}
+          end
+        )
       end
     end
 
@@ -323,9 +329,11 @@ defmodule ReactiveDag.DeclarativeReduceTest do
           op(:reconcile)
           key_rule(:all)
 
-          reduce over: :fiscal_lines,
-                 group_by: :key,
-                 into: fn _k, _ -> %{status: "present"} end
+          reduce(
+            over: :fiscal_lines,
+            group_by: :key,
+            into: fn _k, _ -> %{status: "present"} end
+          )
         end
       end
 
@@ -365,9 +373,11 @@ defmodule ReactiveDag.DeclarativeReduceTest do
           op(:fold)
           key_rule(:all)
 
-          reduce over: :some_verdict,
-                 group_by: :key,
-                 into: fn _k, _ -> %{status: "present"} end
+          reduce(
+            over: :some_verdict,
+            group_by: :key,
+            into: fn _k, _ -> %{status: "present"} end
+          )
         end
       end
 
@@ -414,10 +424,12 @@ defmodule ReactiveDag.DeclarativeReduceTest do
           op(:fold)
           key_rule(:all)
 
-          reduce over: :fiscal_lines,
-                 read: :no_such_action,
-                 group_by: :key,
-                 into: fn _k, _ -> %{status: "present"} end
+          reduce(
+            over: :fiscal_lines,
+            read: :no_such_action,
+            group_by: :key,
+            into: fn _k, _ -> %{status: "present"} end
+          )
         end
       end
 
@@ -463,9 +475,11 @@ defmodule ReactiveDag.DeclarativeReduceTest do
           op(:fold)
           key_rule(:all)
 
-          reduce over: :fiscal_lines,
-                 group_by: :no_such_attr,
-                 into: fn _k, _ -> %{status: "present"} end
+          reduce(
+            over: :fiscal_lines,
+            group_by: :no_such_attr,
+            into: fn _k, _ -> %{status: "present"} end
+          )
         end
       end
 
@@ -498,9 +512,12 @@ defmodule ReactiveDag.DeclarativeReduceTest do
 
         reactive do
           id(:into_needs_group)
-          reduce over: :fiscal_lines,
-                 group_by: &Function.identity/1,
-                 into: [count: :n]
+
+          reduce(
+            over: :fiscal_lines,
+            group_by: &Function.identity/1,
+            into: [count: :n]
+          )
         end
       end
 
@@ -519,9 +536,12 @@ defmodule ReactiveDag.DeclarativeReduceTest do
 
         reactive do
           id(:bad_kind)
-          reduce over: :fiscal_lines,
-                 group_by: :fund,
-                 into: [median: :m]
+
+          reduce(
+            over: :fiscal_lines,
+            group_by: :fund,
+            into: [median: :m]
+          )
         end
       end
 
@@ -554,7 +574,7 @@ defmodule ReactiveDag.DeclarativeReduceTest do
 
         reactive do
           id(:bad_dest)
-          reduce over: :fiscal_lines, group_by: :fund, into: [sum: [amount: :no_such_column]]
+          reduce(over: :fiscal_lines, group_by: :fund, into: [sum: [amount: :no_such_column]])
         end
       end
 
@@ -574,11 +594,13 @@ defmodule ReactiveDag.DeclarativeReduceTest do
         reactive do
           id(:prefix_and_fn)
 
-          reduce over: :fiscal_lines,
-                 group_by: :fund,
-                 key: &to_string/1,
-                 key_prefix: "x",
-                 into: fn f, _ -> %{key: f} end
+          reduce(
+            over: :fiscal_lines,
+            group_by: :fund,
+            key: &to_string/1,
+            key_prefix: "x",
+            into: fn f, _ -> %{key: f} end
+          )
         end
       end
 

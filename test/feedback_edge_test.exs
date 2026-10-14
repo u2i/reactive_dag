@@ -313,7 +313,6 @@ defmodule ReactiveDag.FeedbackEdgeTest do
   # here, and the default scheduler's failure warning is noise, not signal.
   def no_scheduler(_point, _opts), do: :ok
 
-
   describe "the loop through a suspension" do
     # This is THE HOLE the per-cascade budget cannot see: a loop crossing a
     # `suspends` cell stops there, commits, and ends the cascade CLEANLY. The

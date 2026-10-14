@@ -77,6 +77,7 @@ defmodule ReactiveDag.NodeRunnableTest do
     # strategy/key_rule (read them) — the glue that makes graph -> Drain work.
     defmodule Domain2 do
       use Ash.Domain, validate_config_inclusion?: false
+
       resources do
         allow_unregistered?(true)
       end
@@ -114,9 +115,9 @@ defmodule ReactiveDag.NodeRunnableTest do
       end
 
       reactive do
-        op :fold
-        compute EchoOp
-        key_rule :all
+        op(:fold)
+        compute(EchoOp)
+        key_rule(:all)
       end
     end
 

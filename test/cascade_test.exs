@@ -47,19 +47,22 @@ defmodule ReactiveDag.CascadeTest do
           "INSERT INTO " <> _,
           [id, tenant, waiting, resource, row_uuid, recorded_at, reason, lap]
         ) do
-      Agent.update(__MODULE__, &[
-        %{
-          id: id,
-          tenant: tenant,
-          waiting: waiting,
-          resource: resource,
-          row_uuid: row_uuid,
-          recorded_at: recorded_at,
-          reason: reason,
-          lap: lap
-        }
-        | &1
-      ])
+      Agent.update(
+        __MODULE__,
+        &[
+          %{
+            id: id,
+            tenant: tenant,
+            waiting: waiting,
+            resource: resource,
+            row_uuid: row_uuid,
+            recorded_at: recorded_at,
+            reason: reason,
+            lap: lap
+          }
+          | &1
+        ]
+      )
 
       %{rows: [], num_rows: 1}
     end
@@ -250,6 +253,7 @@ defmodule ReactiveDag.CascadeTest do
       {:ok, _} = Cascade.run(plan, [%{cell: "leaf", keys: ["k1"]}])
 
       assert Ran.count("apex") == 1
+
       assert Ran.keys("apex") == ["L-k1", "R-k1"],
              "the apex must recompute BOTH sides' keys in its single run; " <>
                "keeping only the last arrival loses the other side's work"
@@ -317,7 +321,11 @@ defmodule ReactiveDag.CascadeTest do
 
       {:ok, _} =
         Cascade.run(plan, [
-          %{cell: "leaf", keys: ["a", "b", "c"], versions: %{"a" => ~U[2026-01-01 00:00:01.000000Z], "b" => ~U[2026-01-01 00:00:02.000000Z]}}
+          %{
+            cell: "leaf",
+            keys: ["a", "b", "c"],
+            versions: %{"a" => ~U[2026-01-01 00:00:01.000000Z], "b" => ~U[2026-01-01 00:00:02.000000Z]}
+          }
         ])
 
       recorded = FakeRepo.recorded()
@@ -452,6 +460,7 @@ defmodule ReactiveDag.CascadeTest do
       {:ok, _} = Cascade.run(plan, [%{cell: "slow", keys: ["k1"]}], resuming: "slow")
 
       assert_received {:ran_inside_txn?, "slow", false}
+
       assert_received {:ran_inside_txn?, "after_slow", true},
                       "the fast subtree below the resumed cell IS transactional — " <>
                         "only the expensive step is lifted out"
@@ -492,6 +501,7 @@ defmodule ReactiveDag.CascadeTest do
       {:ok, report} = Cascade.run(plan, [%{cell: "slow", keys: ["k1"]}], resuming: "slow")
 
       assert Ran.count("slow") == 1
+
       assert Ran.count("after_slow") == 0,
              "the ordinary outcome when a resumption`s input was already superseded"
 
@@ -615,9 +625,7 @@ defmodule ReactiveDag.CascadeTest do
       plan = plan_of([cell("leaf", []), compute("fast", ["leaf"])])
 
       {:ok, _} =
-        Cascade.run(plan, [%{cell: "leaf", keys: ["a"]}],
-          resumption_scheduler: fn _p, _o -> send(test_pid, :scheduled) end
-        )
+        Cascade.run(plan, [%{cell: "leaf", keys: ["a"]}], resumption_scheduler: fn _p, _o -> send(test_pid, :scheduled) end)
 
       refute_received :scheduled
     end

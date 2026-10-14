@@ -163,6 +163,7 @@ defmodule ReactiveDag.RowsPageTest do
     # A `compose` leg has no resource; that is a shape, not a fault.
     assert Rows.page_by_status(%{}, ["present"]) == %{rows: [], total: 0}
   end
+
   describe "a node with no status column" do
     setup do
       for i <- 1..5 do
@@ -193,5 +194,4 @@ defmodule ReactiveDag.RowsPageTest do
       assert Rows.page_by_status(totals_cell(), ["present"]) == %{rows: [], total: 0}
     end
   end
-
 end

@@ -120,19 +120,18 @@ defmodule ReactiveDag.UnionNodeTest do
     reactive do
       id(:all_verdicts)
 
-      union from: [:category_health, :fund_balance],
-            into: [check: :cell, subject: :key, status: :status]
+      union(
+        from: [:category_health, :fund_balance],
+        into: [check: :cell, subject: :key, status: :status]
+      )
     end
   end
-
 
   defp seed(resource, attrs) do
     resource |> Ash.Changeset.for_create(:upsert, attrs) |> Ash.create!()
   end
 
   setup do
-
-
     for r <- [AllVerdicts, CategoryHealth, FundBalance],
         row <- Ash.read!(r),
         do: Ash.destroy!(row)
@@ -237,8 +236,10 @@ defmodule ReactiveDag.UnionNodeTest do
       reactive do
         id(:with_headroom)
 
-        union from: [:fund_balance],
-              into: [check: :cell, subject: :key, status: :status, headroom: :headroom]
+        union(
+          from: [:fund_balance],
+          into: [check: :cell, subject: :key, status: :status, headroom: :headroom]
+        )
       end
     end
 
@@ -283,7 +284,7 @@ defmodule ReactiveDag.UnionNodeTest do
 
       reactive do
         id(:over_tableless)
-        union from: [:tableless], into: [check: :cell, subject: :key]
+        union(from: [:tableless], into: [check: :cell, subject: :key])
       end
     end
 

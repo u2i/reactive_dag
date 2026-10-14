@@ -10,93 +10,23 @@ defmodule ReactiveDag.RowsTest do
   derivations ever drifted, a status histogram would silently be keyed by
   something no claim could ever name.
   """
-  use ExUnit.Case, async: false
+  use ReactiveDag.PostgresCase
+
+  alias ReactiveDag.Fixtures.RowsGraph
+  alias ReactiveDag.Fixtures.RowsGraph.{Elsewhere, Health, Rollup}
 
   alias ReactiveDag.Node.Rows
 
-  defmodule Domain do
-    use Ash.Domain, validate_config_inclusion?: false
-
-    resources do
-      allow_unregistered?(true)
-    end
-  end
-
-  # single-column key, with a status
-  defmodule Health do
-    use Ash.Resource,
-      domain: Domain,
-      data_layer: Ash.DataLayer.Ets,
-      extensions: [ReactiveDag.Node]
-
-    ets do
-    end
-
-    attributes do
-      attribute(:key, :string, primary_key?: true, allow_nil?: false, public?: true)
-      attribute(:status, :string, public?: true)
-    end
-
-    actions do
-      defaults([:read, :destroy])
-
-      create :upsert do
-        upsert?(true)
-        accept([:key, :status])
-      end
-    end
-
-    reactive do
-      id(:health)
-      leaf?(true)
-    end
-  end
-
-  # composite PK → identity-keyed, and NO status column (a rollup, not a verdict)
-  defmodule Rollup do
-    use Ash.Resource,
-      domain: Domain,
-      data_layer: Ash.DataLayer.Ets,
-      extensions: [ReactiveDag.Node]
-
-    ets do
-    end
-
-    attributes do
-      attribute(:fund, :string, primary_key?: true, allow_nil?: false, public?: true)
-      attribute(:fy, :string, primary_key?: true, allow_nil?: false, public?: true)
-      attribute(:total, :float, public?: true)
-    end
-
-    actions do
-      defaults([:read, :destroy])
-
-      create :upsert do
-        upsert?(true)
-        accept([:fund, :fy, :total])
-      end
-    end
-
-    reactive do
-      id(:rollup)
-      leaf?(true)
-    end
-  end
-
-  # a node that writes elsewhere — no attributes of its own
-  defmodule Elsewhere do
-    use Ash.Resource,
-      domain: Domain,
-      data_layer: Ash.DataLayer.Simple,
-      extensions: [ReactiveDag.Node]
-
-    reactive do
-      id(:elsewhere)
-      leaf?(true)
-    end
+  setup_all do
+    migrate!(RowsGraph.Domain)
+    :ok
   end
 
   setup do
+    pid = Ecto.Adapters.SQL.Sandbox.start_owner!(ReactiveDag.TestRepo, shared: true)
+    on_exit(fn -> Ecto.Adapters.SQL.Sandbox.stop_owner(pid) end)
+
+    truncate(RowsGraph.tables())
     for r <- [Health, Rollup], row <- Ash.read!(r), do: Ash.destroy!(row)
 
     seed(Health, %{key: "travel", status: "failing"})
@@ -186,9 +116,7 @@ defmodule ReactiveDag.RowsTest do
     test "retires what vanished, and propagates both sides" do
       # the scan found travel + a new one; meals and lodging are gone
       {:ok, changed, _} =
-        Rows.reconcile(cell(Health), ["travel", "parking"],
-          upsert: fn key -> key == "parking" end
-        )
+        Rows.reconcile(cell(Health), ["travel", "parking"], upsert: fn key -> key == "parking" end)
 
       # parking was written; meals + lodging vanished. travel was re-seen unchanged.
       assert Enum.sort(changed) == ["lodging", "meals", "parking"]
@@ -227,9 +155,7 @@ defmodule ReactiveDag.RowsTest do
 
     test "nothing vanished → nothing retired, only real upserts propagate" do
       {:ok, changed, _} =
-        Rows.reconcile(cell(Health), ["travel", "meals", "lodging"],
-          upsert: fn key -> key == "meals" end
-        )
+        Rows.reconcile(cell(Health), ["travel", "meals", "lodging"], upsert: fn key -> key == "meals" end)
 
       assert changed == ["meals"]
       assert length(Ash.read!(Health)) == 3
@@ -272,9 +198,7 @@ defmodule ReactiveDag.RowsTest do
 
     test "retired keys are named, not merely counted" do
       {:ok, _changed, detail} =
-        Rows.reconcile(cell(Health), ["travel"],
-          upsert: fn key -> %{key: key, status: status_of(key)} end
-        )
+        Rows.reconcile(cell(Health), ["travel"], upsert: fn key -> %{key: key, status: status_of(key)} end)
 
       assert Enum.sort(detail.retired) == ["lodging", "meals"]
       assert detail.created == []
@@ -340,9 +264,7 @@ defmodule ReactiveDag.RowsTest do
       #   %{created: [], updated: ["a", "c"], ...}
       # for exactly this shape
       {:ok, _changed, before} =
-        Rows.reconcile(cell(Health), ["a", "b"],
-          upsert: fn key -> %{key: key, status: "present"} end
-        )
+        Rows.reconcile(cell(Health), ["a", "b"], upsert: fn key -> %{key: key, status: "present"} end)
 
       assert Enum.sort(before.created) == ["a", "b"]
 

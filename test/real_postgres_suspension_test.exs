@@ -665,7 +665,6 @@ defmodule ReactiveDag.RealPostgresSuspensionTest do
     end
   end
 
-
   test "the suite says so when this file is inert" do
     unless @url do
       IO.puts(

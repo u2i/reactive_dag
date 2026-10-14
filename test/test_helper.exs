@@ -22,7 +22,9 @@
 # Started here rather than in the case template because a repo is an
 # application-level process — starting it per module would fight the sandbox.
 if url = System.get_env("REACTIVE_DAG_TEST_DATABASE_URL") do
-  Application.put_env(:reactive_dag, ReactiveDag.TestRepo,
+  Application.put_env(
+    :reactive_dag,
+    ReactiveDag.TestRepo,
     Keyword.put(Application.get_env(:reactive_dag, ReactiveDag.TestRepo, []), :url, url)
   )
 

@@ -91,17 +91,19 @@ defmodule ReactiveDag.JoinExpandCombinatorTest do
       op(:reconcile)
       key_rule(:all)
 
-      join over: :fiscal,
-           left: fn %{kind: k, acct: a} -> k == "budget" && a end,
-           right: fn %{kind: k, acct: a} -> k == "actual" && a end,
-           key: fn acct -> "va|#{acct}" end,
-           into: fn _acct, budget, actual ->
-             %{
-               budget: budget.amount,
-               actual: actual && actual.amount,
-               variance: budget.amount - ((actual && actual.amount) || 0.0)
-             }
-           end
+      join(
+        over: :fiscal,
+        left: fn %{kind: k, acct: a} -> k == "budget" && a end,
+        right: fn %{kind: k, acct: a} -> k == "actual" && a end,
+        key: fn acct -> "va|#{acct}" end,
+        into: fn _acct, budget, actual ->
+          %{
+            budget: budget.amount,
+            actual: actual && actual.amount,
+            variance: budget.amount - ((actual && actual.amount) || 0.0)
+          }
+        end
+      )
     end
   end
 
@@ -141,18 +143,19 @@ defmodule ReactiveDag.JoinExpandCombinatorTest do
       op(:expand)
       key_rule(:all)
 
-      reduce over: :fiscal,
-             group_by: :fy,
-             expand: fn fy, lines ->
-               lines
-               |> Enum.group_by(& &1.kind)
-               |> Enum.map(fn {kind, ls} ->
-                 %{key: "#{fy}|#{kind}", n: length(ls)}
-               end)
-             end
+      reduce(
+        over: :fiscal,
+        group_by: :fy,
+        expand: fn fy, lines ->
+          lines
+          |> Enum.group_by(& &1.kind)
+          |> Enum.map(fn {kind, ls} ->
+            %{key: "#{fy}|#{kind}", n: length(ls)}
+          end)
+        end
+      )
     end
   end
-
 
   setup do
     Process.register(self(), ReactiveDag.JoinExpandCombinatorTest)
@@ -235,9 +238,11 @@ defmodule ReactiveDag.JoinExpandCombinatorTest do
 
         # The row has an `:n` but no `:key`, which is the error under test — the
         # table exists so the failure is the missing key, not a missing table.
-        reduce over: :fiscal,
-               group_by: :fy,
-               expand: fn _fy, lines -> [%{n: length(lines)}] end
+        reduce(
+          over: :fiscal,
+          group_by: :fy,
+          expand: fn _fy, lines -> [%{n: length(lines)}] end
+        )
       end
     end
 

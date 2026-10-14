@@ -91,15 +91,13 @@ defmodule ReactiveDag.IdentityKeysTest do
       # THE COMPOSITE UNIT, stated once: the grain IS the grouping, so there
       # is no `group_by:` to restate. Reads as
       # "rollups.fund = lines.fund_code AND rollups.fy = lines.fy".
-      recompute_by [fund: :fund_code, fy: :fy], to: :lines
+      recompute_by([fund: :fund_code, fy: :fy], to: :lines)
 
-      reduce into: [sum: [amount: :total], count: :n]
+      reduce(into: [sum: [amount: :total], count: :n])
     end
   end
 
-
   setup do
-
     for {k, fund, fy, amount} <- [
           {"l1", "gf", "2025", 10.0},
           {"l2", "gf", "2025", 5.0},
@@ -182,9 +180,11 @@ defmodule ReactiveDag.IdentityKeysTest do
         id(:uncovered)
         # groups only by fund — :fy could never be written, so the upsert
         # could not identify its row
-        reduce over: :lines,
-               group_by: [fund: :fund_code],
-               into: [sum: [amount: :total]]
+        reduce(
+          over: :lines,
+          group_by: [fund: :fund_code],
+          into: [sum: [amount: :total]]
+        )
       end
     end
 
@@ -194,6 +194,7 @@ defmodule ReactiveDag.IdentityKeysTest do
     assert msg =~ ":fy"
     assert msg =~ "identify its row"
   end
+
   test "a COMPOSITE unit scopes the read per column (a superset, never the whole table)" do
     plan = plan()
     cell = plan.cells["rollups"]
@@ -201,6 +202,7 @@ defmodule ReactiveDag.IdentityKeysTest do
     # the unit lowered to the pair form, and assembly proved both columns are
     # plain strings — the two facts composite scoping needs
     assert cell.meta.reduce.group_by == [fund: :fund_code, fy: :fy]
+
     assert cell.meta.over_source.group_key_plan ==
              [{:attr, :fund_code, true}, {:attr, :fy, true}]
 

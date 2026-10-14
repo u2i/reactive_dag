@@ -18,153 +18,25 @@ defmodule ReactiveDag.RowKeyTest do
   `payload_key` keeps working and is unchanged; `row_key` is what a node declares
   when the primary key is not the answer.
   """
-  use ExUnit.Case, async: false
+  use ReactiveDag.PostgresCase
+
+  alias ReactiveDag.Fixtures.RowKeyGraph
+  alias ReactiveDag.Fixtures.RowKeyGraph.{Doc, Filing, Line, Meeting}
 
   alias ReactiveDag.Node.{Payload, Rows}
 
-  defmodule Domain do
-    use Ash.Domain, validate_config_inclusion?: false
-
-    resources do
-      allow_unregistered?(true)
-    end
-  end
-
-  # ── rung 1: the key IS the id ──────────────────────────────────────────────
-  defmodule Doc do
-    use Ash.Resource,
-      domain: Domain,
-      data_layer: Ash.DataLayer.Ets,
-      extensions: [ReactiveDag.Node]
-
-    ets do
-      private?(true)
-    end
-
-    attributes do
-      uuid_primary_key(:id, writable?: true)
-      attribute :title, :string, public?: true
-    end
-
-    actions do
-      defaults [:read, :destroy]
-
-      create :upsert do
-        upsert?(true)
-        accept([:id, :title])
-      end
-    end
-
-    reactive do
-      id(:docs)
-      op(:source)
-      leaf?(true)
-      row_key(:uuid)
-    end
-  end
-
-  # ── rung 2: the columns that identify the row ──────────────────────────────
-  defmodule Line do
-    use Ash.Resource,
-      domain: Domain,
-      data_layer: Ash.DataLayer.Ets,
-      extensions: [ReactiveDag.Node]
-
-    ets do
-      private?(true)
-    end
-
-    attributes do
-      uuid_primary_key(:id)
-      attribute :fund, :string, public?: true
-      attribute :fiscal_year, :string, public?: true
-      attribute :total, :integer, public?: true
-    end
-
-    identities do
-      identity :by_unit, [:fund, :fiscal_year], pre_check_with: Domain
-    end
-
-    actions do
-      defaults [:read, :destroy]
-
-      create :upsert do
-        upsert?(true)
-        upsert_identity(:by_unit)
-        accept([:fund, :fiscal_year, :total])
-      end
-    end
-
-    reactive do
-      id(:lines)
-      op(:source)
-      leaf?(true)
-      row_key([:fund, :fiscal_year])
-    end
-  end
-
   # ── rung 3: sameness is a judgement ───────────────────────────────────────
-  defmodule Meetings do
-    @moduledoc "The resolver: a meeting within the same session, not merely the same key."
-    def resolve(_cell_key, attrs, opts) do
-      # The judgement: the SAME meeting if the board matches and the times are
-      # within an hour. Two rows already share (date, board) in a real host, so
-      # a tuple cannot answer this — which is why the rung exists.
-      ReactiveDag.RowKeyTest.Meeting
-      |> Ash.Query.do_filter(board: attrs.board, date: attrs.date)
-      |> then(fn q ->
-        case Keyword.get(opts, :tenant) do
-          nil -> q
-          t -> Ash.Query.set_tenant(q, t)
-        end
-      end)
-      |> Ash.read!()
-      |> Enum.find(fn row ->
-        abs(DateTime.diff(row.starts_at, attrs.starts_at, :minute)) <= 60
-      end)
-    end
-  end
 
-  defmodule Meeting do
-    use Ash.Resource,
-      domain: Domain,
-      data_layer: Ash.DataLayer.Ets,
-      extensions: [ReactiveDag.Node]
-
-    ets do
-      private?(true)
-    end
-
-    attributes do
-      uuid_primary_key(:id)
-      attribute :board, :string, public?: true
-      attribute :date, :date, public?: true
-      attribute :starts_at, :utc_datetime, public?: true
-      attribute :title, :string, public?: true
-    end
-
-    actions do
-      defaults [:read, :destroy]
-
-      create :upsert do
-        accept([:board, :date, :starts_at, :title])
-      end
-
-      update :revise do
-        accept([:board, :date, :starts_at, :title])
-      end
-    end
-
-    reactive do
-      id(:meetings)
-      op(:source)
-      leaf?(true)
-      row_key(&ReactiveDag.RowKeyTest.Meetings.resolve/3)
-      payload_update(:revise)
-    end
+  setup_all do
+    migrate!(RowKeyGraph.Domain)
+    :ok
   end
 
   setup do
+    pid = Ecto.Adapters.SQL.Sandbox.start_owner!(ReactiveDag.TestRepo, shared: true)
+    on_exit(fn -> Ecto.Adapters.SQL.Sandbox.stop_owner(pid) end)
+
+    truncate(RowKeyGraph.tables())
     for r <- [Doc, Line, Meeting], do: Ash.bulk_destroy!(r, :destroy, %{})
     :ok
   end
@@ -304,50 +176,6 @@ defmodule ReactiveDag.RowKeyTest do
     #
     # The tenant is a COLUMN, twice: on the row, and on the frontier. It is never
     # part of a cell key — the plan already carries it.
-    defmodule Filing do
-      use Ash.Resource,
-        domain: Domain,
-        data_layer: Ash.DataLayer.Ets,
-        extensions: [ReactiveDag.Node]
-
-      ets do
-        private?(true)
-      end
-
-      multitenancy do
-        strategy :attribute
-        attribute :org_id
-      end
-
-      attributes do
-        uuid_primary_key(:id)
-        attribute :doc_key, :string, allow_nil?: false, public?: true
-        attribute :org_id, :string, public?: true
-        attribute :total, :integer, public?: true
-      end
-
-      identities do
-        identity :by_org_doc, [:org_id, :doc_key], pre_check_with: Domain
-      end
-
-      actions do
-        defaults [:read, :destroy]
-
-        create :upsert do
-          upsert?(true)
-          upsert_identity(:by_org_doc)
-          accept([:doc_key, :org_id, :total])
-        end
-      end
-
-      reactive do
-        id(:filings)
-        op(:source)
-        leaf?(true)
-        payload_key(:doc_key)
-        row_key([:org_id, :doc_key])
-      end
-    end
 
     test "the key read back is the key written — the tenant is NOT in it" do
       Payload.upsert_row(Filing, meta(Filing), "osc:FY24", %{doc_key: "osc:FY24", total: 1}, tenant: "org_a")

@@ -52,9 +52,11 @@ defmodule ReactiveDag.FirstClassCoverageTest do
     test "the full three-valued split is intrinsic to ONE cell's histogram" do
       # given ONE guarantee cell holding failing + covered rows, each app's scoped
       # histogram alone resolves its verdict — no /set companion, no special-casing:
-      covered_app = %{"covered" => 5}          # evaluated, all fine
+      # evaluated, all fine
+      covered_app = %{"covered" => 5}
       failing_app = %{"covered" => 4, "failing" => 1}
-      never_app = %{}                          # never evaluated
+      # never evaluated
+      never_app = %{}
 
       assert Verdict.rollup(covered_app, []).status == :green
       assert Verdict.rollup(failing_app, ["x"]).status == :findings

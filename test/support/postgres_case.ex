@@ -75,10 +75,16 @@ defmodule ReactiveDag.PostgresCase do
       format: false
     )
 
+    # Only the resources on AshPostgres. A fixture may deliberately include a
+    # resource on `Ash.DataLayer.Simple` — one that owns no table is a shape
+    # worth testing — and asking it for a table name yields nil, which reaches
+    # the database as `DROP TABLE ""`.
     tables =
       domain
       |> Ash.Domain.Info.resources()
+      |> Enum.filter(&(Ash.DataLayer.data_layer(&1) == AshPostgres.DataLayer))
       |> Enum.map(&AshPostgres.DataLayer.Info.table/1)
+      |> Enum.reject(&is_nil/1)
 
     # Already migrated by another module in this run? Then the tables are
     # there and shared — nothing to do. Checked rather than assumed, because
