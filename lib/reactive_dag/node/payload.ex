@@ -40,7 +40,6 @@ defmodule ReactiveDag.Node.Payload do
   recomputes with no declaration at all.
   """
 
-
   alias ReactiveDag.Node.Fingerprint
 
   @doc """
@@ -107,13 +106,13 @@ defmodule ReactiveDag.Node.Payload do
         record -> if moved?(record, attrs, opts), do: :changed, else: :unchanged
       end
 
-    {:ok, written} = create(resource, action, attrs, verdict, prior, opts)
+    {:ok, _written} = create(resource, action, attrs, verdict, prior, opts)
 
     # This tail is `write/6`'s, duplicated — `upsert/6` predates the rung split
     # and never moved onto it. Worth collapsing, but not in the same change as
     # adding the diff: the two have different `find_prior` shapes and merging
     # them is its own piece of work with its own tests.
-    record_diff(cell_key, prior, attrs, verdict, written, opts)
+    record_diff(cell_key, prior, attrs, verdict)
     lapse(prior, attrs, resource, cell_key, opts)
 
     verdict
@@ -145,9 +144,7 @@ defmodule ReactiveDag.Node.Payload do
         [
           lapse: meta[:lapse],
           compare: meta[:compare],
-          payload_update: meta[:payload_update],
-          # so the write can record a version for the mark it will cause
-          version_id: meta[:version_id]
+          payload_update: meta[:payload_update]
         ],
         opts
       )
@@ -247,9 +244,9 @@ defmodule ReactiveDag.Node.Payload do
         record -> if moved?(record, attrs, opts), do: :changed, else: :unchanged
       end
 
-    {:ok, written} = create(resource, action, attrs, verdict, prior, opts)
+    {:ok, _written} = create(resource, action, attrs, verdict, prior, opts)
 
-    record_diff(cell_key, prior, attrs, verdict, written, opts)
+    record_diff(cell_key, prior, attrs, verdict)
     lapse(prior, attrs, resource, cell_key, opts)
 
     verdict
@@ -305,8 +302,6 @@ defmodule ReactiveDag.Node.Payload do
       (is_list(meta[:row_key]) or is_nil(meta[:row_key]))
   end
 
-  @versions __MODULE__.Versions
-
   @doc """
   Collect the diffs a block of payload writes produced, keyed by cell key.
 
@@ -335,123 +330,32 @@ defmodule ReactiveDag.Node.Payload do
   @spec collecting_diffs((-> result)) :: {result, %{optional(String.t()) => map()}}
         when result: term()
   def collecting_diffs(fun) when is_function(fun, 0) do
-    {result, diffs, _versions} = collecting_diffs_and_versions(fun)
-    {result, diffs}
-  end
-
-  @doc """
-  `collecting_diffs/1`, and the VERSIONS those writes recorded.
-
-  Two returns rather than one because they answer different questions: the diffs
-  are what this drain uses NOW to derive its parents' claims, and the versions are
-  the durable references it attaches to the marks it writes, so a LATER drain can
-  derive units from the same change.
-
-  A version appears only for a cell whose node declares `version_id`, keyed by the
-  cell key the write was made under.
-  """
-  @spec collecting_diffs_and_versions((-> result)) ::
-          {result, %{optional(String.t()) => map()}, %{optional(String.t()) => String.t()}}
-        when result: term()
-  def collecting_diffs_and_versions(fun) when is_function(fun, 0) do
     prev = Process.get(@diffs)
-    prev_v = Process.get(@versions)
     Process.put(@diffs, %{})
-    Process.put(@versions, %{})
 
     try do
       result = fun.()
       # Returned as VALUES, not left in the process dictionary: `after` restores
       # the caller's dict, and the drain's propagation runs outside this block.
-      {result, Process.get(@diffs, %{}), Process.get(@versions, %{})}
+      {result, Process.get(@diffs, %{})}
     after
       if prev, do: Process.put(@diffs, prev), else: Process.delete(@diffs)
-      if prev_v, do: Process.put(@versions, prev_v), else: Process.delete(@versions)
     end
   end
 
   # Outside a `collecting_diffs/1` block this is a no-op, so every existing
   # caller — a host op writing its own rows, a test driving `upsert/6` — behaves
   # exactly as before and pays nothing.
-  defp record_diff(_cell_key, _prior, _attrs, :unchanged, _written, _opts), do: :ok
+  defp record_diff(_cell_key, _prior, _attrs, :unchanged), do: :ok
 
-  defp record_diff(cell_key, prior, attrs, _verdict, written, opts) do
+  defp record_diff(cell_key, prior, attrs, _verdict) do
     case Process.get(@diffs) do
       nil ->
         :ok
 
       acc ->
         Process.put(@diffs, Map.put(acc, cell_key, diff(prior, attrs)))
-        record_version(cell_key, written, prior, opts)
     end
-  end
-
-  # The VERSION this write produced, if the node declared how to record one.
-  #
-  # Why the payload path needs this and not just `dirties_on`: a graph-written row
-  # propagates to its parents, and a propagated mark can only REFERENCE a change
-  # if the write that caused it recorded one. Without this the mark carries a NULL
-  # version, and the parent falls back to splitting its `"|"` key — the round-trip
-  # `Diff.groups/2` exists to remove.
-  #
-  # Same MFA/fun contract as `MarkDirty`'s resolver, so a host declares
-  # `version_id` once and both producers honour it. The arguments differ by
-  # necessity: the payload loop builds attrs rather than accepting a caller's
-  # changeset, so a resolver here receives the written record and the prior one.
-  @doc """
-  Record a version for `key` from OUTSIDE the payload path.
-
-  For a host whose leaf writes its own rows. A source-fed leaf often must — a
-  crawl needs `upsert_fields:` scoped to one document family, so an agenda
-  write does not blank the minutes columns — and such a write never reaches
-  `upsert_row/5`, where a `version_id` resolver is normally called.
-
-  Without this, declaring `version_id` on such a leaf is INERT: it satisfies
-  the assembly check that a suspendable cell's inputs record versions, and then
-  records none. Every suspension downstream carries `"*"` and every resumption
-  recomputes a whole cell — correct, expensive, and reported nowhere.
-
-  Only has an effect inside `collecting_diffs_and_versions/1`, which
-  `Source.refresh/3` wraps a poll in. Outside one it is a no-op, so a host can
-  call it unconditionally.
-  """
-  @spec put_version(String.t(), String.t()) :: :ok
-  def put_version(key, version_id) when is_binary(key) and is_binary(version_id) do
-    case Process.get(@versions) do
-      nil -> :ok
-      acc -> Process.put(@versions, Map.put(acc, key, version_id))
-    end
-
-    :ok
-  end
-
-  def put_version(_key, _version_id), do: :ok
-
-  defp record_version(cell_key, written, prior, opts) do
-    with resolver when not is_nil(resolver) <- opts[:version_id],
-         acc when not is_nil(acc) <- Process.get(@versions),
-         id when is_binary(id) <- resolve_version(resolver, written, prior) do
-      Process.put(@versions, Map.put(acc, cell_key, id))
-    else
-      _ -> :ok
-    end
-  end
-
-  defp resolve_version(resolver, record, prior) do
-    case resolver do
-      {m, f, a} -> apply(m, f, [record, prior | a])
-      fun when is_function(fun, 2) -> fun.(record, prior)
-    end
-  rescue
-    e ->
-      require Logger
-
-      Logger.warning(
-        "reactive_dag: version_id resolver failed on a payload write " <>
-          "(#{Exception.message(e)}); the propagated mark will carry no reference"
-      )
-
-      nil
   end
 
   # The `:full_diff` shape `ash_paper_trail` writes, and which

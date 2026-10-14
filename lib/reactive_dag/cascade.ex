@@ -236,9 +236,9 @@ defmodule ReactiveDag.Cascade do
       %{cell: cell_id, step: 0, claimed_keys: keys, outside_transaction: true}
     )
 
-    {{outcome, diffs, new_versions}, us} =
+    {{outcome, diffs}, us} =
       timed(fn ->
-        ReactiveDag.Node.Payload.collecting_diffs_and_versions(fn ->
+        ReactiveDag.Node.Payload.collecting_diffs(fn ->
           {narrowed, claimed_groups} = derive_units(plan, cell_id, keys, origin_diffs)
 
           recompute(
@@ -316,7 +316,7 @@ defmodule ReactiveDag.Cascade do
         # change would still recompute everything below it. The ordinary case
         # for that is a resumption whose input was superseded before the job
         # ran, which is common rather than exotic.
-        merged_versions = Map.merge(versions, new_versions)
+        merged_versions = versions
 
         parent_origins =
           case changed do
@@ -469,9 +469,9 @@ defmodule ReactiveDag.Cascade do
       %{cell: cell_id, step: n, claimed_keys: keys}
     )
 
-    {{outcome, new_diffs, new_versions}, us} =
+    {{outcome, new_diffs}, us} =
       timed(fn ->
-        ReactiveDag.Node.Payload.collecting_diffs_and_versions(fn ->
+        ReactiveDag.Node.Payload.collecting_diffs(fn ->
           Suspension.savepoint(fn ->
             recompute(
               cell,
@@ -534,7 +534,7 @@ defmodule ReactiveDag.Cascade do
         # origin's versions at the very first hop, and every suspension
         # downstream carries `"*"` and resumes whole-cell. Silently, since a
         # whole-cell resumption is correct.
-        versions = Map.merge(work.versions, new_versions)
+        versions = work.versions
 
         # A recompute reporting NO change propagates nothing — the point of
         # reporting changed keys rather than claimed ones. `claims_for/5`
