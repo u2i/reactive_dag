@@ -92,11 +92,11 @@ defmodule ReactiveDag.PostgresCase do
     if Enum.all?(tables, &table_exists?/1) do
       tables
     else
-      do_migrate(dir, tables)
+      do_migrate(dir, tables, domain)
     end
   end
 
-  defp do_migrate(dir, tables) do
+  defp do_migrate(dir, tables, domain) do
     # A run that died mid-migration can leave SOME of the tables. Drop the
     # partial set so `create table` starts from a known state.
     drop(tables)
@@ -118,12 +118,22 @@ defmodule ReactiveDag.PostgresCase do
       |> Path.wildcard()
       |> Enum.sort()
       |> Enum.each(fn path ->
-        # The file's own timestamp as the version, NOT a counter. A counter
-        # collides with versions `schema_migrations` already holds from an
-        # earlier module or run, and the migrator then silently SKIPS the
-        # migration — leaving the test to fail on a table that was never
-        # created, which reads like a bug in the code under test.
-        version = path |> Path.basename() |> String.split("_") |> hd() |> String.to_integer()
+        # The version is derived from the DOMAIN, not from the file's
+        # timestamp and not from a counter. Both of those collide:
+        #
+        #   * a counter collides with versions an earlier module recorded;
+        #   * the generator's timestamp has SECOND resolution, so two fixtures
+        #     generated in the same second produce the same version.
+        #
+        # Either way the migrator silently SKIPS the migration and the test
+        # fails on a table that was never created — which reads like a bug in
+        # the code under test rather than in the harness. Measured: that is
+        # exactly how `fx_rp_docs` went missing.
+        #
+        # `schema_migrations` persists across runs in a long-lived container,
+        # so the version must be stable for a given domain AND distinct between
+        # domains. A hash of the domain name is both.
+        version = 20_000_000_000_000 + :erlang.phash2(domain, 1_000_000_000)
 
         Ecto.Migrator.run(ReactiveDag.MigrationRepo, [{version, path}], :up,
           all: true,

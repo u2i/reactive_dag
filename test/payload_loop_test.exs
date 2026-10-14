@@ -6,105 +6,22 @@ defmodule ReactiveDag.PayloadLoopTest do
   way to author a stateful node; writing into a SEPARATE resource is the explicit
   deviation (a custom `upsert:`), not the default.
   """
-  use ExUnit.Case, async: false
+  use ReactiveDag.PostgresCase
 
-  defmodule Domain do
-    use Ash.Domain, validate_config_inclusion?: false
+  alias ReactiveDag.Fixtures.PayloadLoopGraph
+  alias ReactiveDag.Fixtures.PayloadLoopGraph.{DmrRow, FlowMonth}
 
-    resources do
-      allow_unregistered? true
-    end
+  setup_all do
+    migrate!(PayloadLoopGraph.Domain)
+    :ok
   end
-
-  # the input the fold reads (raw per-day flow rows) — a leaf NODE, so the
-  # rollup's declarative read can resolve its resource at assembly.
-  defmodule DmrRow do
-    use Ash.Resource, domain: Domain, data_layer: Ash.DataLayer.Ets, extensions: [ReactiveDag.Node]
-
-    ets do
-      private?(true)
-    end
-
-    attributes do
-      attribute :id, :string, primary_key?: true, allow_nil?: false, public?: true
-      attribute :plant, :string, public?: true
-      attribute :month, :string, public?: true
-      attribute :flow, :float, public?: true
-    end
-
-    actions do
-      defaults [:read, :destroy]
-
-      create :create do
-        accept([:id, :plant, :month, :flow])
-      end
-    end
-
-    reactive do
-      id(:dmr_rows)
-      op(:source)
-      leaf?(true)
-    end
-  end
-
-  # THE UNIFIED NODE: an AshPostgres-shaped (here Ets) resource that is BOTH the
-  # reactive node AND its own payload table. No `upsert:` — the lib closes the loop.
-  defmodule FlowMonth do
-    use Ash.Resource, domain: Domain, data_layer: Ash.DataLayer.Ets, extensions: [ReactiveDag.Node]
-
-    ets do
-      private?(true)
-    end
-
-    attributes do
-      attribute :key, :string, primary_key?: true, allow_nil?: false, public?: true
-      attribute :plant, :string, public?: true
-      attribute :month, :string, public?: true
-      attribute :avg_flow, :float, public?: true
-    end
-
-    identities do
-      identity :by_key, [:key], pre_check_with: ReactiveDag.PayloadLoopTest.Domain
-    end
-
-    actions do
-      defaults [:read, :destroy]
-
-      create :upsert do
-        upsert?(true)
-        upsert_identity(:by_key)
-        accept([:key, :plant, :month, :avg_flow])
-      end
-    end
-
-    reactive do
-      id(:flow_month)
-      op(:fold)
-      key_rule(:all)
-
-      # NB: no `read:` (the library reads :dmr_rows itself) and no `upsert:` —
-      # into returns the row, the library writes it into THIS resource (keyed
-      # by :key) and does the Op.put. group/key/into stay fn escapes here.
-      reduce(
-        over: :dmr_rows,
-        group_by: &ReactiveDag.PayloadLoopTest.group/1,
-        key: &ReactiveDag.PayloadLoopTest.key/1,
-        into: &ReactiveDag.PayloadLoopTest.into/2
-      )
-    end
-  end
-
-  def group(r), do: {r.plant, r.month}
-  def key({plant, month}), do: "#{plant}|#{month}"
-
-  def into({plant, month}, rows) do
-    avg = rows |> Enum.map(& &1.flow) |> then(&(Enum.sum(&1) / length(&1)))
-    %{key: "#{plant}|#{month}", plant: plant, month: month, avg_flow: avg}
-  end
-
-  # a no-op coordination writer — this test exercises the PAYLOAD loop; the
 
   setup do
+    pid = Ecto.Adapters.SQL.Sandbox.start_owner!(ReactiveDag.TestRepo, shared: true)
+    on_exit(fn -> Ecto.Adapters.SQL.Sandbox.stop_owner(pid) end)
+
+    truncate(PayloadLoopGraph.tables())
+
     for {p, m, f, i} <- [{"north", "2024-01", 1.0, "a"}, {"north", "2024-01", 3.0, "b"}, {"south", "2024-01", 2.0, "c"}] do
       DmrRow |> Ash.Changeset.for_create(:create, %{id: i, plant: p, month: m, flow: f}) |> Ash.create!()
     end

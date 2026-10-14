@@ -13,19 +13,14 @@ defmodule ReactiveDag.VerdictNodeTest do
   `:status` column — written by `into:` like any other column, queryable with
   ordinary Ash reads, and free to carry whatever else the domain needs.
   """
-  use ExUnit.Case, async: false
+  use ReactiveDag.PostgresCase
+
+  alias ReactiveDag.Fixtures.VerdictGraph
+  alias ReactiveDag.Fixtures.VerdictGraph.{Health, Totals}
 
   require Ash.Query
 
   alias ReactiveDag.Node.Recompute
-
-  defmodule Domain do
-    use Ash.Domain, validate_config_inclusion?: false
-
-    resources do
-      allow_unregistered?(true)
-    end
-  end
 
   # the observed stores — a leaf node the verdict reads declaratively.
   # `verdict? true` saves you a table when the result is one word. The moment
@@ -34,80 +29,17 @@ defmodule ReactiveDag.VerdictNodeTest do
   # a :status column is an ordinary payload node whose row happens to be a
   # verdict, so it carries whatever it likes.
 
-  setup do
+  setup_all do
+    migrate!(VerdictGraph.Domain)
     :ok
   end
 
-  defmodule Totals do
-    use Ash.Resource,
-      domain: ReactiveDag.VerdictNodeTest.Domain,
-      data_layer: Ash.DataLayer.Ets,
-      extensions: [ReactiveDag.Node]
+  setup do
+    pid = Ecto.Adapters.SQL.Sandbox.start_owner!(ReactiveDag.TestRepo, shared: true)
+    on_exit(fn -> Ecto.Adapters.SQL.Sandbox.stop_owner(pid) end)
 
-    ets do
-    end
-
-    attributes do
-      attribute :key, :string, primary_key?: true, allow_nil?: false, public?: true
-      attribute :total, :float, public?: true
-    end
-
-    actions do
-      defaults [:read, :destroy]
-
-      create :create do
-        accept([:key, :total])
-      end
-    end
-
-    reactive do
-      id(:totals)
-      leaf?(true)
-    end
-  end
-
-  defmodule Health do
-    use Ash.Resource,
-      domain: ReactiveDag.VerdictNodeTest.Domain,
-      data_layer: Ash.DataLayer.Ets,
-      extensions: [ReactiveDag.Node]
-
-    ets do
-    end
-
-    attributes do
-      attribute :key, :string, primary_key?: true, allow_nil?: false, public?: true
-      attribute :status, :string, public?: true
-      # the column a tableless verdict node cannot have at all
-      attribute :headroom, :float, public?: true
-    end
-
-    actions do
-      defaults [:read, :destroy]
-
-      create :upsert do
-        upsert?(true)
-        accept([:key, :status, :headroom])
-      end
-    end
-
-    reactive do
-      id(:health)
-
-      # a verdict WITH a table is an ordinary payload node: the status is a
-      # column, written by `into:` like any other. `status:` is the tableless
-      # node's slot and has no business here.
-      reduce(
-        over: :totals,
-        group_by: :key,
-        into: fn _k, [r | _] ->
-          %{
-            status: if(r.total < 1000.0, do: "present", else: "failing"),
-            headroom: 1000.0 - r.total
-          }
-        end
-      )
-    end
+    truncate(VerdictGraph.tables())
+    :ok
   end
 
   setup do
