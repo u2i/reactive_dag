@@ -350,13 +350,46 @@ holds one version per key, exactly as ETS does. (There is still an assertion
 that the generated PK really is `WITHOUT OVERLAPS`: it proves the DSL's
 `temporal` block reached the schema rather than being silently ignored.)
 
-### Why both substrates, rather than porting the suite
+### The suite now runs on Postgres
 
-The 64 resource files run on ETS and should stay there — but the reason is
-NOT that porting is impractical. With `migrate!/1` it is now mechanical. The
-reason is that those files test the DSL, and ETS answers DSL questions
-correctly and faster. Postgres earns its place only where the substrates
-disagree.
+All 49 files that hold rows were converted. 963 tests, 0 failures, verified
+from a `DROP SCHEMA`-clean database.
+
+What stayed on ETS: 15 files that never touch a data layer (they assert on
+DSL lowering, `meta` shapes and verifier errors), and ~70 resources declared
+inside test bodies purely to be REJECTED at compile time. Being invalid is
+their job, so they neither need nor can have a table.
+
+Resources live in `test/support/fixtures/` as shared graphs — about 30 of
+them, several serving multiple files. The rule that emerged, after hitting it
+six times: **anything a resource declaration references belongs beside the
+resource**. A compute module, a `retain_if_vanished mark:` function, a fold's
+`group_by`/`into`, a `poll` module — each one failed identically, as an
+`UndefinedFunctionError` from inside a recompute, because a graph assembled
+from a fixture cannot run without them.
+
+### What the move actually found
+
+Three things that were not visible on ETS:
+
+`per_key_test`'s intermittent `:table_not_found` was an ETS artefact, and the
+old fixture's own comment said so: `max_concurrency:` writes each row from a
+TASK process, and a private ETS table is owned by its creator, so those writes
+silently vanished. The workaround was a bare `ets do end` with a note reading
+"real hosts on AshPostgres are unaffected; this is the fixture matching
+reality". It is now that reality, and the flake is gone.
+
+The all-or-nothing derivation rule had NO coverage. Its only test drove the
+rule through a `version_id` resolver — deleted earlier in this migration — so
+rewriting it forced the question, and weakening `entries_for`'s length check
+broke nothing across 963 tests. The rewritten test fails on exactly that
+mutation.
+
+Six `FakeRepo` modules are gone. Each was ~30-40 lines matching on
+`"INSERT INTO " <> _`, emulating the frontier table. One survives at ten
+lines, and only because an advisory lock is always granted and the KEY it was
+taken on leaves no trace — that is the shape a fake should have, a window onto
+the one fact the database does not expose, not a stand-in for the database.
 
 What Postgres is for is the places where ETS CANNOT give a trustworthy answer:
 
