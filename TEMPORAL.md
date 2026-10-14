@@ -117,12 +117,36 @@ looks fresh and the derivation layer is silent. `status_since` is what
 distinguishes a URL that has 404'd for months (expected) from one that was 200
 last week (a regression).
 
-## Open questions
+## MEASURED, against PostgreSQL 18.4
 
-  * Does an `:unchanged`-gated write produce exactly one period per real change?
-    Assumed, not yet measured. My record on "what does this timestamp do" is one
-    for two today, so this gets tested before anything depends on it.
+`spike/temporal_behaviour.exs`. Run it with a PG18 on 5545; it needs
+`btree_gist` for a `text` column in a `WITHOUT OVERLAPS` primary key.
+
+    after first write:      1 period    Budget/abc      [t0 .. inf)
+    after UNCHANGED write:  2 periods   Budget/abc      [t0 .. t1)
+                                        Budget/abc      [t1 .. inf)   <- noise
+    after CHANGED write:    3 periods   Budget/abc      [t0 .. t1)
+                                        Budget/abc      [t1 .. t2)
+                                        Budget(rev)/def [t2 .. inf)
+
+**An unchanged write splits the period.** Two adjacent periods with identical
+values, divided at an instant when nothing happened. So the write gate is a
+precondition, not an optimisation: without it a cascade that merely passes
+through a cell fragments its history permanently.
+
+**`recorded_at` needs a default** — `default: &DateTime.utc_now/0` plus
+`update_default:`. It is not stamped merely by naming it in the `temporal`
+block, which the DSL docs do not spell out. It came back NULL on the first run
+of this spike.
+
+**The earlier period keeps its original `recorded_at`.** The `__leftovers`
+reinsertion copies the old row's value rather than restamping, so an earlier
+period still records when WE first wrote it. That is what makes it a genuine
+transaction-time axis rather than a touch counter.
+
+## Still open
+
   * Can a temporal write update WITHOUT splitting, for bookkeeping fields? If
     so the leaf split is unnecessary even where observation columns are live.
-  * Does `recorded_at` survive an unchanged-but-written row, or is it stamped
-    per period?
+  * What does `as_of` return for an instant inside a closed period — the
+    staleness query needs the prior boundary, not just point-in-time.
