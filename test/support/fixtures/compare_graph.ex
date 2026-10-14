@@ -72,9 +72,9 @@ defmodule ReactiveDag.Fixtures.CompareGraph do
     end
 
     reactive do
-      id(:narrowed)
-      leaf?(true)
-      compare([:a, :b])
+      id :narrowed
+      leaf? true
+      compare [:a, :b]
     end
   end
 
@@ -113,8 +113,8 @@ defmodule ReactiveDag.Fixtures.CompareGraph do
     end
 
     reactive do
-      id(:everything)
-      leaf?(true)
+      id :everything
+      leaf? true
     end
   end
 
@@ -148,10 +148,10 @@ defmodule ReactiveDag.Fixtures.CompareGraph do
     end
 
     reactive do
-      id(:both)
-      leaf?(true)
-      fingerprint([:a])
-      compare([:b])
+      id :both
+      leaf? true
+      fingerprint [:a]
+      compare [:b]
     end
   end
 
@@ -186,9 +186,9 @@ defmodule ReactiveDag.Fixtures.CompareGraph do
     end
 
     reactive do
-      id(:rollups)
-      leaf?(true)
-      compare([:total])
+      id :rollups
+      leaf? true
+      compare [:total]
     end
   end
 
@@ -221,9 +221,9 @@ defmodule ReactiveDag.Fixtures.CompareGraph do
     end
 
     reactive do
-      id(:extracted_lines)
-      op(:source)
-      leaf?(true)
+      id :extracted_lines
+      op :source
+      leaf? true
     end
   end
 
@@ -264,12 +264,12 @@ defmodule ReactiveDag.Fixtures.CompareGraph do
     end
 
     reactive do
-      id(:account_totals)
-      op(:fold)
-      key_rule(:all)
+      id :account_totals
+      op :fold
+      key_rule :all
 
       # `account` and `total` ARE the answer; doc_id/ordinal are the record.
-      compare([:account, :total])
+      compare [:account, :total]
 
       reduce(
         over: :extracted_lines,
@@ -316,9 +316,9 @@ defmodule ReactiveDag.Fixtures.CompareGraph do
     end
 
     reactive do
-      id(:account_totals_wide)
-      op(:fold)
-      key_rule(:all)
+      id :account_totals_wide
+      op :fold
+      key_rule :all
 
       reduce(
         over: :extracted_lines,
@@ -411,12 +411,12 @@ defmodule ReactiveDag.Fixtures.CompareGraph do
     end
 
     reactive do
-      id(:plant_months)
-      op(:fold)
-      key_rule(:all)
-      compare([:avg_flow])
+      id :plant_months
+      op :fold
+      key_rule :all
+      compare [:avg_flow]
 
-      aggregate(over: :readings, avg: [flow: :avg_flow], count: :reading_count)
+      aggregate over: :readings, avg: [flow: :avg_flow], count: :reading_count
     end
   end
 
@@ -464,11 +464,11 @@ defmodule ReactiveDag.Fixtures.CompareGraph do
     end
 
     reactive do
-      id(:plant_months_wide)
-      op(:fold)
-      key_rule(:all)
+      id :plant_months_wide
+      op :fold
+      key_rule :all
 
-      aggregate(over: :readings, avg: [flow: :avg_flow], count: :reading_count)
+      aggregate over: :readings, avg: [flow: :avg_flow], count: :reading_count
     end
   end
 

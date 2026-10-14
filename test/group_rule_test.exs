@@ -113,14 +113,14 @@ defmodule ReactiveDag.GroupRuleTest do
         extensions: [ReactiveDag.Node]
 
       reactive do
-        id(:both_places)
-        key_rule(:all)
+        id :both_places
+        key_rule :all
 
         # the unit already says what a change invalidates — `key_rule` is the
         # same fact stated twice, and the two can disagree
-        recompute_by(:category, to: :expenses, from: :category)
+        recompute_by :category, to: :expenses, from: :category
 
-        reduce(into: fn _c, _rows -> %{} end)
+        reduce into: fn _c, _rows -> %{} end
       end
     end
 

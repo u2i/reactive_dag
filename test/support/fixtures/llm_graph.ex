@@ -46,9 +46,9 @@ defmodule ReactiveDag.Fixtures.LlmGraph do
     end
 
     reactive do
-      id(:transcripts)
-      op(:source)
-      leaf?(true)
+      id :transcripts
+      op :source
+      leaf? true
     end
   end
 
@@ -78,9 +78,9 @@ defmodule ReactiveDag.Fixtures.LlmGraph do
     end
 
     reactive do
-      id(:people)
-      op(:source)
-      leaf?(true)
+      id :people
+      op :source
+      leaf? true
     end
   end
 
@@ -155,13 +155,13 @@ defmodule ReactiveDag.Fixtures.LlmGraph do
     end
 
     reactive do
-      id(:events)
-      op(:extract)
+      id :events
+      op :extract
 
       # THE LLM RUNG, today: a generic action + the edges that feed it.
-      run(:extract_events)
-      ref(:transcripts)
-      context(:people)
+      run :extract_events
+      ref :transcripts
+      context :people
     end
   end
 
@@ -207,10 +207,10 @@ defmodule ReactiveDag.Fixtures.LlmGraph do
     end
 
     reactive do
-      id(:sentiment)
-      op(:analyse)
-      compute(ReactiveDag.LlmNodeTest.SentimentOp)
-      ref(:transcripts)
+      id :sentiment
+      op :analyse
+      compute ReactiveDag.LlmNodeTest.SentimentOp
+      ref :transcripts
     end
   end
 

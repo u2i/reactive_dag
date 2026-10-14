@@ -42,9 +42,9 @@ defmodule ReactiveDag.Fixtures.JoinExpandGraph do
     end
 
     reactive do
-      id(:fiscal)
-      op(:source)
-      leaf?(true)
+      id :fiscal
+      op :source
+      leaf? true
     end
   end
 
@@ -83,9 +83,9 @@ defmodule ReactiveDag.Fixtures.JoinExpandGraph do
     end
 
     reactive do
-      id(:variance)
-      op(:reconcile)
-      key_rule(:all)
+      id :variance
+      op :reconcile
+      key_rule :all
 
       join(
         over: :fiscal,
@@ -136,9 +136,9 @@ defmodule ReactiveDag.Fixtures.JoinExpandGraph do
     end
 
     reactive do
-      id(:year_buckets)
-      op(:expand)
-      key_rule(:all)
+      id :year_buckets
+      op :expand
+      key_rule :all
 
       reduce(
         over: :fiscal,
@@ -185,9 +185,9 @@ defmodule ReactiveDag.Fixtures.JoinExpandGraph do
     end
 
     reactive do
-      id(:keyless_expand)
-      op(:expand)
-      key_rule(:all)
+      id :keyless_expand
+      op :expand
+      key_rule :all
 
       # The row has an `:n` but no `:key`, which is the error under test — the
       # table exists so the failure is the missing key, not a missing table.

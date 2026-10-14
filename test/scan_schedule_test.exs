@@ -81,11 +81,11 @@ defmodule ReactiveDag.ScanScheduleTest do
     end
 
     reactive do
-      id(:minutes)
+      id :minutes
 
       # a consumer of the crawl, not a second poller of it. One source is one
       # node now, so "two leaves on one scanner" is not a shape that exists.
-      reduce(over: :agendas, group_by: :key, expand: fn key, _rows -> [%{key: key}] end)
+      reduce over: :agendas, group_by: :key, expand: fn key, _rows -> [%{key: key}] end
     end
   end
 
@@ -118,9 +118,9 @@ defmodule ReactiveDag.ScanScheduleTest do
     end
 
     reactive do
-      id(:zulu)
-      leaf?(true)
-      poll(ReactiveDag.ScanScheduleTest.ZuluScan, every: "0 2 * * *")
+      id :zulu
+      leaf? true
+      poll ReactiveDag.ScanScheduleTest.ZuluScan, every: "0 2 * * *"
     end
   end
 
@@ -152,10 +152,10 @@ defmodule ReactiveDag.ScanScheduleTest do
     end
 
     reactive do
-      id(:aaa_dependent)
-      leaf?(true)
-      poll(ReactiveDag.ScanScheduleTest.DependentScan, every: "0 * * * *")
-      depends_on([:zulu])
+      id :aaa_dependent
+      leaf? true
+      poll ReactiveDag.ScanScheduleTest.DependentScan, every: "0 * * * *"
+      depends_on [:zulu]
     end
   end
 
@@ -178,9 +178,9 @@ defmodule ReactiveDag.ScanScheduleTest do
     end
 
     reactive do
-      id(:agendas)
-      leaf?(true)
-      poll(ReactiveDag.ScanScheduleTest.Crawler, args: [recent: true], every: "0 * * * *")
+      id :agendas
+      leaf? true
+      poll ReactiveDag.ScanScheduleTest.Crawler, args: [recent: true], every: "0 * * * *"
     end
   end
 
@@ -203,9 +203,9 @@ defmodule ReactiveDag.ScanScheduleTest do
     end
 
     reactive do
-      id(:transcripts)
-      leaf?(true)
-      poll(ReactiveDag.ScanScheduleTest.Listing)
+      id :transcripts
+      leaf? true
+      poll ReactiveDag.ScanScheduleTest.Listing
     end
   end
 
@@ -229,8 +229,8 @@ defmodule ReactiveDag.ScanScheduleTest do
     end
 
     reactive do
-      id(:derived)
-      reduce(over: :agendas, group_by: :key, into: [count: :n])
+      id :derived
+      reduce over: :agendas, group_by: :key, into: [count: :n]
     end
   end
 

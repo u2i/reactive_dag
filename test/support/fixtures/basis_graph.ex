@@ -46,8 +46,8 @@ defmodule ReactiveDag.Fixtures.BasisGraph do
     end
 
     reactive do
-      id(:machines)
-      leaf?(true)
+      id :machines
+      leaf? true
     end
   end
 
@@ -87,8 +87,8 @@ defmodule ReactiveDag.Fixtures.BasisGraph do
     end
 
     reactive do
-      id(:holdings)
-      recompute_by(:owner, to: :machines, from: :owner)
+      id :holdings
+      recompute_by :owner, to: :machines, from: :owner
 
       reduce(
         into: fn {owner}, machines ->

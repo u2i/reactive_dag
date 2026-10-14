@@ -153,12 +153,12 @@ defmodule ReactiveDag.RecomputeByTest do
       end
 
       reactive do
-        id(:by_amount)
+        id :by_amount
         # whole-cell unit: any change re-prices everything, so the reduce
         # still says how rows are folded
-        recompute_by(:cell, to: :expenses)
+        recompute_by :cell, to: :expenses
 
-        reduce(group_by: [:amount], into: [count: :n])
+        reduce group_by: [:amount], into: [count: :n]
       end
     end
 
@@ -181,8 +181,8 @@ defmodule ReactiveDag.RecomputeByTest do
           extensions: [ReactiveDag.Node]
 
         reactive do
-          id(:no_edge)
-          reduce(group_by: [:category], into: [count: :n])
+          id :no_edge
+          reduce group_by: [:category], into: [count: :n]
         end
       end
 
@@ -200,11 +200,11 @@ defmodule ReactiveDag.RecomputeByTest do
           extensions: [ReactiveDag.Node]
 
         reactive do
-          id(:twice_declared)
+          id :twice_declared
 
-          recompute_by(:category, to: :expenses, from: :expense_cat)
+          recompute_by :category, to: :expenses, from: :expense_cat
 
-          reduce(over: :expenses, into: [count: :n])
+          reduce over: :expenses, into: [count: :n]
         end
       end
 
@@ -222,11 +222,11 @@ defmodule ReactiveDag.RecomputeByTest do
           extensions: [ReactiveDag.Node]
 
         reactive do
-          id(:half_pair)
+          id :half_pair
 
-          recompute_by(:category, to: :expenses)
+          recompute_by :category, to: :expenses
 
-          reduce(into: [count: :n])
+          reduce into: [count: :n]
         end
       end
 
@@ -244,8 +244,8 @@ defmodule ReactiveDag.RecomputeByTest do
           extensions: [ReactiveDag.Node]
 
         reactive do
-          id(:no_group)
-          reduce(over: :expenses, into: [count: :n])
+          id :no_group
+          reduce over: :expenses, into: [count: :n]
         end
       end
 

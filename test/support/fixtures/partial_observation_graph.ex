@@ -39,9 +39,9 @@ defmodule ReactiveDag.Fixtures.PartialObservationGraph do
     end
 
     reactive do
-      id(:docs)
-      leaf?(true)
-      fingerprint([:content_md5])
+      id :docs
+      leaf? true
+      fingerprint [:content_md5]
     end
   end
 

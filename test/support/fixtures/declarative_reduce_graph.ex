@@ -51,9 +51,9 @@ defmodule ReactiveDag.Fixtures.DeclarativeReduceGraph do
     end
 
     reactive do
-      id(:fiscal_lines)
-      op(:source)
-      leaf?(true)
+      id :fiscal_lines
+      op :source
+      leaf? true
     end
   end
 
@@ -92,9 +92,9 @@ defmodule ReactiveDag.Fixtures.DeclarativeReduceGraph do
     end
 
     reactive do
-      id(:budget_rollups)
-      op(:fold)
-      key_rule(:all)
+      id :budget_rollups
+      op :fold
+      key_rule :all
 
       reduce(
         over: :fiscal_lines,
@@ -138,9 +138,9 @@ defmodule ReactiveDag.Fixtures.DeclarativeReduceGraph do
     end
 
     reactive do
-      id(:gf_totals)
-      op(:fold)
-      key_rule(:all)
+      id :gf_totals
+      op :fold
+      key_rule :all
 
       reduce(
         over: :fiscal_lines,
@@ -186,8 +186,8 @@ defmodule ReactiveDag.Fixtures.DeclarativeReduceGraph do
     end
 
     reactive do
-      id(:line_marks)
-      op(:map)
+      id :line_marks
+      op :map
 
       reduce(
         over: :fiscal_lines,
@@ -223,9 +223,9 @@ defmodule ReactiveDag.Fixtures.DeclarativeReduceGraph do
     end
 
     reactive do
-      id(:mixed_rollup)
-      op(:fold)
-      key_rule(:all)
+      id :mixed_rollup
+      op :fold
+      key_rule :all
 
       reduce(
         over: :fiscal_lines,
@@ -268,9 +268,9 @@ defmodule ReactiveDag.Fixtures.DeclarativeReduceGraph do
     end
 
     reactive do
-      id(:over_verdict)
-      op(:fold)
-      key_rule(:all)
+      id :over_verdict
+      op :fold
+      key_rule :all
 
       reduce(
         over: :some_verdict,

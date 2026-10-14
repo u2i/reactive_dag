@@ -40,9 +40,9 @@ defmodule ReactiveDag.KeyRuleContractTest do
       extensions: [ReactiveDag.Node]
 
     reactive do
-      id(:lines)
-      op(:leaf)
-      leaf?(true)
+      id :lines
+      op :leaf
+      leaf? true
     end
   end
 
@@ -66,10 +66,10 @@ defmodule ReactiveDag.KeyRuleContractTest do
     end
 
     reactive do
-      id(:totals)
-      op(:fold)
-      depends_on([:lines])
-      compute(ReactiveDag.KeyRuleContractTest.Noop)
+      id :totals
+      op :fold
+      depends_on [:lines]
+      compute ReactiveDag.KeyRuleContractTest.Noop
     end
   end
 

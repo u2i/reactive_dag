@@ -68,9 +68,9 @@ defmodule ReactiveDag.TenancyFlowTest do
     end
 
     reactive do
-      id(:src)
-      leaf?(true)
-      row_key([:org_id, :key])
+      id :src
+      leaf? true
+      row_key [:org_id, :key]
     end
   end
 
@@ -95,10 +95,10 @@ defmodule ReactiveDag.TenancyFlowTest do
     end
 
     reactive do
-      id(:rollup)
-      op(:fold)
-      payload_key(:key)
-      depends_on([:src])
+      id :rollup
+      op :fold
+      payload_key :key
+      depends_on [:src]
 
       reduce(
         over: :src,
@@ -144,11 +144,11 @@ defmodule ReactiveDag.TenancyFlowTest do
     end
 
     reactive do
-      id(:rollup)
-      op(:fold)
-      payload_key(:key)
-      row_key([:org_id, :key])
-      depends_on([:src])
+      id :rollup
+      op :fold
+      payload_key :key
+      row_key [:org_id, :key]
+      depends_on [:src]
 
       reduce(
         over: :src,
@@ -180,8 +180,8 @@ defmodule ReactiveDag.TenancyFlowTest do
     end
 
     reactive do
-      id(:src)
-      leaf?(true)
+      id :src
+      leaf? true
     end
   end
 

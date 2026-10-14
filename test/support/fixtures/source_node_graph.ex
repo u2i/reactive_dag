@@ -40,8 +40,8 @@ defmodule ReactiveDag.Fixtures.SourceNodeGraph do
     end
 
     reactive do
-      id(:documents)
-      leaf?(true)
+      id :documents
+      leaf? true
     end
   end
 
@@ -67,7 +67,7 @@ defmodule ReactiveDag.Fixtures.SourceNodeGraph do
     end
 
     reactive do
-      id(:agenda_docs)
+      id :agenda_docs
 
       # a projection of one kind out of the crawl. `expand` because a group
       # yields zero rows or one — a document that is not this kind simply is
@@ -109,7 +109,7 @@ defmodule ReactiveDag.Fixtures.SourceNodeGraph do
     end
 
     reactive do
-      id(:minutes_docs)
+      id :minutes_docs
 
       # a projection of one kind out of the crawl. `expand` because a group
       # yields zero rows or one — a document that is not this kind simply is

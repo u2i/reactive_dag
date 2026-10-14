@@ -44,8 +44,8 @@ defmodule ReactiveDag.Fixtures.UnionGraph do
     end
 
     reactive do
-      id(:category_health)
-      leaf?(true)
+      id :category_health
+      leaf? true
     end
   end
 
@@ -77,8 +77,8 @@ defmodule ReactiveDag.Fixtures.UnionGraph do
     end
 
     reactive do
-      id(:fund_balance)
-      leaf?(true)
+      id :fund_balance
+      leaf? true
     end
   end
 
@@ -110,7 +110,7 @@ defmodule ReactiveDag.Fixtures.UnionGraph do
     end
 
     reactive do
-      id(:all_verdicts)
+      id :all_verdicts
 
       union(
         from: [:category_health, :fund_balance],
@@ -147,7 +147,7 @@ defmodule ReactiveDag.Fixtures.UnionGraph do
     end
 
     reactive do
-      id(:with_headroom)
+      id :with_headroom
 
       union(
         from: [:fund_balance],
@@ -163,8 +163,8 @@ defmodule ReactiveDag.Fixtures.UnionGraph do
       extensions: [ReactiveDag.Node]
 
     reactive do
-      id(:tableless)
-      leaf?(true)
+      id :tableless
+      leaf? true
     end
   end
 

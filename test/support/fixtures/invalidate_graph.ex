@@ -40,8 +40,8 @@ defmodule ReactiveDag.Fixtures.InvalidateGraph do
     end
 
     reactive do
-      id(:transcripts)
-      leaf?(true)
+      id :transcripts
+      leaf? true
     end
   end
 
@@ -79,9 +79,9 @@ defmodule ReactiveDag.Fixtures.InvalidateGraph do
     end
 
     reactive do
-      id(:summaries)
-      recompute_by(:key, to: :transcripts, from: :key)
-      slice(:year, values: ["2024", "2025"])
+      id :summaries
+      recompute_by :key, to: :transcripts, from: :key
+      slice :year, values: ["2024", "2025"]
 
       per_key(:summarise,
         args: [text: :body, year: :year],
@@ -133,9 +133,9 @@ defmodule ReactiveDag.Fixtures.InvalidateGraph do
     end
 
     reactive do
-      id(:tenanted_summaries)
-      leaf?(true)
-      row_key([:org_id, :key])
+      id :tenanted_summaries
+      leaf? true
+      row_key [:org_id, :key]
     end
   end
 

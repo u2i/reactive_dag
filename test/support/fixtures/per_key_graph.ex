@@ -65,9 +65,9 @@ defmodule ReactiveDag.Fixtures.PerKeyGraph do
     end
 
     reactive do
-      id(:transcripts)
-      op(:source)
-      leaf?(true)
+      id :transcripts
+      op :source
+      leaf? true
     end
   end
 
@@ -115,10 +115,10 @@ defmodule ReactiveDag.Fixtures.PerKeyGraph do
     end
 
     reactive do
-      id(:summaries)
-      op(:summarise)
+      id :summaries
+      op :summarise
 
-      recompute_by(:key, to: :transcripts, from: :key)
+      recompute_by :key, to: :transcripts, from: :key
 
       per_key(:summarise,
         args: [text: :body],
@@ -163,9 +163,9 @@ defmodule ReactiveDag.Fixtures.PerKeyGraph do
     end
 
     reactive do
-      id(:always)
-      recompute_by(:key, to: :transcripts, from: :key)
-      per_key(:summarise, args: [text: :body], into: [summary: :summary])
+      id :always
+      recompute_by :key, to: :transcripts, from: :key
+      per_key :summarise, args: [text: :body], into: [summary: :summary]
     end
   end
 
@@ -218,8 +218,8 @@ defmodule ReactiveDag.Fixtures.PerKeyGraph do
     end
 
     reactive do
-      id(:concurrent)
-      recompute_by(:key, to: :transcripts, from: :key)
+      id :concurrent
+      recompute_by :key, to: :transcripts, from: :key
 
       per_key(:summarise,
         args: [text: :body],
@@ -272,8 +272,8 @@ defmodule ReactiveDag.Fixtures.PerKeyGraph do
     end
 
     reactive do
-      id(:embeddings)
-      recompute_by(:key, to: :transcripts, from: :key)
+      id :embeddings
+      recompute_by :key, to: :transcripts, from: :key
 
       per_key(:embed,
         args: [text: :body],

@@ -146,8 +146,8 @@ defmodule ReactiveDag.UnionNodeTest do
       end
 
       reactive do
-        id(:over_tableless)
-        union(from: [:tableless], into: [check: :cell, subject: :key])
+        id :over_tableless
+        union from: [:tableless], into: [check: :cell, subject: :key]
       end
     end
 

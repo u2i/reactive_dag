@@ -102,9 +102,9 @@ defmodule ReactiveDag.DslCompositionTest do
     use Ash.Resource, domain: Domain, data_layer: Ash.DataLayer.Simple, extensions: [ReactiveDag.Node]
 
     reactive do
-      id(:baseline)
-      op(:leaf)
-      leaf?(true)
+      id :baseline
+      op :leaf
+      leaf? true
       source :baseline_scan
     end
   end
@@ -118,12 +118,12 @@ defmodule ReactiveDag.DslCompositionTest do
       extensions: [ReactiveDag.Node, ComplianceExt]
 
     reactive do
-      id(:merge_gated)
-      op(:reconcile)
+      id :merge_gated
+      op :reconcile
       guarantee("every merge to a protected branch was reviewed & gated")
       addresses(:CC8_1)
       addresses(:CC8_2)
-      ref(:baseline)
+      ref :baseline
     end
   end
 

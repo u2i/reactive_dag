@@ -37,10 +37,10 @@ defmodule ReactiveDag.Fixtures.TenantScanGraph do
     end
 
     reactive do
-      id(:docs)
-      op(:source)
-      leaf?(true)
-      poll(ReactiveDag.Fixtures.TenantScanGraph.Crawler, every: "0 12 * * *")
+      id :docs
+      op :source
+      leaf? true
+      poll ReactiveDag.Fixtures.TenantScanGraph.Crawler, every: "0 12 * * *"
     end
   end
 

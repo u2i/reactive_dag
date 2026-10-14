@@ -206,9 +206,9 @@ defmodule ReactiveDag.RetireVanishedTest do
         extensions: [ReactiveDag.Node]
 
       reactive do
-        id(:tableless)
-        recompute_by(:category, to: :expenses, from: :category)
-        reduce(into: fn cat, items -> %{category: cat, n: length(items)} end)
+        id :tableless
+        recompute_by :category, to: :expenses, from: :category
+        reduce into: fn cat, items -> %{category: cat, n: length(items)} end
       end
     end
 

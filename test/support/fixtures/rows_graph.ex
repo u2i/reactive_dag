@@ -51,8 +51,8 @@ defmodule ReactiveDag.Fixtures.RowsGraph do
     end
 
     reactive do
-      id(:health)
-      leaf?(true)
+      id :health
+      leaf? true
     end
   end
 
@@ -84,8 +84,8 @@ defmodule ReactiveDag.Fixtures.RowsGraph do
     end
 
     reactive do
-      id(:rollup)
-      leaf?(true)
+      id :rollup
+      leaf? true
     end
   end
 
@@ -97,8 +97,8 @@ defmodule ReactiveDag.Fixtures.RowsGraph do
       extensions: [ReactiveDag.Node]
 
     reactive do
-      id(:elsewhere)
-      leaf?(true)
+      id :elsewhere
+      leaf? true
     end
   end
 

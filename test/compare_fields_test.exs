@@ -468,9 +468,9 @@ defmodule ReactiveDag.CompareFieldsTest do
         end
 
         reactive do
-          id(:compares_nothing)
-          leaf?(true)
-          compare([])
+          id :compares_nothing
+          leaf? true
+          compare []
         end
       end
 
@@ -504,11 +504,11 @@ defmodule ReactiveDag.CompareFieldsTest do
         end
 
         reactive do
-          id(:compares_ghost)
-          leaf?(true)
+          id :compares_ghost
+          leaf? true
           # :ammount is a typo; `Map.take` would silently omit it, narrowing the
           # comparison further than the declaration reads
-          compare([:amount, :ammount])
+          compare [:amount, :ammount]
         end
       end
 

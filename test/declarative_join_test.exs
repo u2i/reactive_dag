@@ -93,7 +93,7 @@ defmodule ReactiveDag.DeclarativeJoinTest do
       end
 
       reactive do
-        id(:bad_side)
+        id :bad_side
 
         join(
           over: :entries,
@@ -133,7 +133,7 @@ defmodule ReactiveDag.DeclarativeJoinTest do
       end
 
       reactive do
-        id(:bad_picks)
+        id :bad_picks
 
         join(
           over: :entries,

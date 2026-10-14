@@ -32,9 +32,9 @@ defmodule ReactiveDag.NativeGuaranteesTest do
     use Ash.Resource, domain: Domain, data_layer: Ash.DataLayer.Simple, extensions: [ReactiveDag.Node]
 
     reactive do
-      id(:stores)
-      op(:leaf)
-      leaf?(true)
+      id :stores
+      op :leaf
+      leaf? true
     end
   end
 
@@ -43,20 +43,20 @@ defmodule ReactiveDag.NativeGuaranteesTest do
     use Ash.Resource, domain: Domain, data_layer: Ash.DataLayer.Simple, extensions: [ReactiveDag.Node]
 
     reactive do
-      id(:"g:store_encrypted")
-      op(:guarantee)
-      key_rule(:all)
+      id :"g:store_encrypted"
+      op :guarantee
+      key_rule :all
       # guarantee-level compliance metadata — must survive to meta.
-      meta(claim: "every store is encrypted as declared", addresses: [:C1_1], shape: :delta)
+      meta claim: "every store is encrypted as declared", addresses: [:C1_1], shape: :delta
 
       compose :reconcile do
-        as(:"g:store_encrypted/set")
-        ref(:stores)
+        as :"g:store_encrypted/set"
+        ref :stores
         # an observed leaf WITH domain binding metadata.
         compose :leaf do
-          as(:"g:store_encrypted/set/1")
-          leaf?(true)
-          meta(strength: :measured, source: :probe, check: "store_config")
+          as :"g:store_encrypted/set/1"
+          leaf? true
+          meta strength: :measured, source: :probe, check: "store_config"
         end
       end
     end
@@ -85,9 +85,9 @@ defmodule ReactiveDag.NativeGuaranteesTest do
     use Ash.Resource, domain: Domain, data_layer: Ash.DataLayer.Simple, extensions: [ReactiveDag.Node]
 
     reactive do
-      id(:people)
-      op(:leaf)
-      leaf?(true)
+      id :people
+      op :leaf
+      leaf? true
     end
   end
 
@@ -95,9 +95,9 @@ defmodule ReactiveDag.NativeGuaranteesTest do
     use Ash.Resource, domain: Domain, data_layer: Ash.DataLayer.Simple, extensions: [ReactiveDag.Node]
 
     reactive do
-      id(:systems)
-      op(:leaf)
-      leaf?(true)
+      id :systems
+      op :leaf
+      leaf? true
     end
   end
 
@@ -105,22 +105,22 @@ defmodule ReactiveDag.NativeGuaranteesTest do
     use Ash.Resource, domain: Domain, data_layer: Ash.DataLayer.Simple, extensions: [ReactiveDag.Node]
 
     reactive do
-      id(:"g:strong_auth")
-      op(:guarantee)
-      key_rule(:all)
-      meta(claim: "every principal authenticates strongly on every system", addresses: [:CC6_1])
+      id :"g:strong_auth"
+      op :guarantee
+      key_rule :all
+      meta claim: "every principal authenticates strongly on every system", addresses: [:CC6_1]
 
       compose :product do
-        as(:"g:strong_auth/set")
+        as :"g:strong_auth/set"
         # axis a
-        ref(:people)
+        ref :people
         # axis b
-        ref(:systems)
+        ref :systems
         # coverage fn leaf
         compose :leaf do
-          as(:"g:strong_auth/set/2")
-          leaf?(true)
-          meta(source: :probe, check: "mfa")
+          as :"g:strong_auth/set/2"
+          leaf? true
+          meta source: :probe, check: "mfa"
         end
       end
     end
@@ -139,19 +139,19 @@ defmodule ReactiveDag.NativeGuaranteesTest do
     use Ash.Resource, domain: Domain, data_layer: Ash.DataLayer.Simple, extensions: [ReactiveDag.Node]
 
     reactive do
-      id(:"g:duty_has_owner")
-      op(:guarantee)
-      key_rule(:all)
+      id :"g:duty_has_owner"
+      op :guarantee
+      key_rule :all
 
       compose :relation do
-        as(:"g:duty_has_owner/set")
+        as :"g:duty_has_owner/set"
         # members
-        ref(:duties)
+        ref :duties
         # fn leg (the performer assignment)
         compose :leaf do
-          as(:"g:duty_has_owner/set/1")
-          leaf?(true)
-          meta(strength: :attested, attest_for: "CC1_3", cadence: :annual)
+          as :"g:duty_has_owner/set/1"
+          leaf? true
+          meta strength: :attested, attest_for: "CC1_3", cadence: :annual
         end
       end
     end
@@ -171,14 +171,14 @@ defmodule ReactiveDag.NativeGuaranteesTest do
     use Ash.Resource, domain: Domain, data_layer: Ash.DataLayer.Simple, extensions: [ReactiveDag.Node]
 
     reactive do
-      id(:"g:hire_screened_before_access")
-      op(:guarantee)
-      key_rule(:all)
-      meta(rests_on: [:"g:hire_screened"], depends_on: [:"g:access_removed_on_leave"])
+      id :"g:hire_screened_before_access"
+      op :guarantee
+      key_rule :all
+      meta rests_on: [:"g:hire_screened"], depends_on: [:"g:access_removed_on_leave"]
 
       compose :fold do
-        as(:"g:hire_screened_before_access/set")
-        ref(:hire_events)
+        as :"g:hire_screened_before_access/set"
+        ref :hire_events
       end
     end
   end
@@ -220,11 +220,11 @@ defmodule ReactiveDag.NativeGuaranteesTest do
     end
 
     reactive do
-      id(:"g:readiness")
-      op(:guarantee)
-      over(:findings)
+      id :"g:readiness"
+      op :guarantee
+      over :findings
       # second-order needs a host recompute, not a set-expr
-      compute(FakeReadinessOp)
+      compute FakeReadinessOp
     end
   end
 
@@ -239,18 +239,18 @@ defmodule ReactiveDag.NativeGuaranteesTest do
     use Ash.Resource, domain: Domain, data_layer: Ash.DataLayer.Simple, extensions: [ReactiveDag.Node]
 
     reactive do
-      id(:"g:concern_discharged")
-      op(:guarantee)
-      key_rule(:all)
-      for_each(:walk_risks)
+      id :"g:concern_discharged"
+      op :guarantee
+      key_rule :all
+      for_each :walk_risks
 
       # a generator's sub-tree uses POSITIONAL ids (no absolute `as:`) so it
       # RE-ROOTS per member: g:concern_discharged.<m>/0, …/0/0. (Absolute `as:` is
       # for stable, cross-ref'd names — incompatible with per-member re-rooting.)
       compose :fold do
         compose :leaf do
-          leaf?(true)
-          meta(source: :probe, check: "risk_posture", strength: :examined)
+          leaf? true
+          meta source: :probe, check: "risk_posture", strength: :examined
         end
       end
     end

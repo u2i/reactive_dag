@@ -48,9 +48,9 @@ defmodule ReactiveDag.Fixtures.LeafFingerprintGraph do
     end
 
     reactive do
-      id(:docs)
-      leaf?(true)
-      fingerprint([:content_md5])
+      id :docs
+      leaf? true
+      fingerprint [:content_md5]
     end
   end
 
@@ -85,10 +85,10 @@ defmodule ReactiveDag.Fixtures.LeafFingerprintGraph do
     end
 
     reactive do
-      id(:agendas)
-      leaf?(true)
-      fingerprint(fn row -> "#{row.content_md5}|#{:erlang.phash2(row.title)}" end)
-      fingerprint_attribute(:digest)
+      id :agendas
+      leaf? true
+      fingerprint fn row -> "#{row.content_md5}|#{:erlang.phash2(row.title)}" end
+      fingerprint_attribute :digest
     end
   end
 
@@ -120,8 +120,8 @@ defmodule ReactiveDag.Fixtures.LeafFingerprintGraph do
     end
 
     reactive do
-      id(:plain)
-      leaf?(true)
+      id :plain
+      leaf? true
     end
   end
 

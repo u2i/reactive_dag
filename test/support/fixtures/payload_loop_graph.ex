@@ -41,9 +41,9 @@ defmodule ReactiveDag.Fixtures.PayloadLoopGraph do
     end
 
     reactive do
-      id(:dmr_rows)
-      op(:source)
-      leaf?(true)
+      id :dmr_rows
+      op :source
+      leaf? true
     end
   end
 
@@ -82,9 +82,9 @@ defmodule ReactiveDag.Fixtures.PayloadLoopGraph do
     end
 
     reactive do
-      id(:flow_month)
-      op(:fold)
-      key_rule(:all)
+      id :flow_month
+      op :fold
+      key_rule :all
 
       # NB: no `read:` (the library reads :dmr_rows itself) and no `upsert:` —
       # into returns the row, the library writes it into THIS resource (keyed

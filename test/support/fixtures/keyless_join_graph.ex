@@ -47,11 +47,11 @@ defmodule ReactiveDag.Fixtures.KeylessJoinGraph do
     end
 
     reactive do
-      id(:machine_register)
-      op(:source)
-      leaf?(true)
-      payload_key(false)
-      row_key([:serial])
+      id :machine_register
+      op :source
+      leaf? true
+      payload_key false
+      row_key [:serial]
     end
   end
 
@@ -87,11 +87,11 @@ defmodule ReactiveDag.Fixtures.KeylessJoinGraph do
     end
 
     reactive do
-      id(:edr_agents)
-      op(:source)
-      leaf?(true)
-      payload_key(false)
-      row_key([:serial])
+      id :edr_agents
+      op :source
+      leaf? true
+      payload_key false
+      row_key [:serial]
     end
   end
 
@@ -118,8 +118,8 @@ defmodule ReactiveDag.Fixtures.KeylessJoinGraph do
     end
 
     reactive do
-      id(:machine_observations)
-      op(:reconcile)
+      id :machine_observations
+      op :reconcile
 
       join(
         left_over: :machine_register,

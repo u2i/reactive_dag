@@ -61,9 +61,9 @@ defmodule ReactiveDag.RunActionTest do
     end
 
     reactive do
-      id(:extractor)
-      op(:map)
-      run(:recompute_keys)
+      id :extractor
+      op :map
+      run :recompute_keys
     end
   end
 
@@ -104,9 +104,9 @@ defmodule ReactiveDag.RunActionTest do
     end
 
     reactive do
-      id(:no_args)
-      op(:map)
-      run(:refresh)
+      id :no_args
+      op :map
+      run :refresh
     end
   end
 
@@ -143,9 +143,9 @@ defmodule ReactiveDag.RunActionTest do
     end
 
     reactive do
-      id(:failing)
-      op(:map)
-      run(:boom)
+      id :failing
+      op :map
+      run :boom
     end
   end
 
@@ -197,8 +197,8 @@ defmodule ReactiveDag.RunActionTest do
       end
 
       reactive do
-        id(:missing_action)
-        run(:no_such_action)
+        id :missing_action
+        run :no_such_action
       end
     end
 
@@ -223,8 +223,8 @@ defmodule ReactiveDag.RunActionTest do
       end
 
       reactive do
-        id(:wrong_type)
-        run(:read)
+        id :wrong_type
+        run :read
       end
     end
 
@@ -250,8 +250,8 @@ defmodule ReactiveDag.RunActionTest do
       end
 
       reactive do
-        id(:two_computations)
-        run(:refresh)
+        id :two_computations
+        run :refresh
 
         reduce(
           over: :somewhere,

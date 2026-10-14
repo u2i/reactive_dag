@@ -574,12 +574,12 @@ defmodule ReactiveDag.LapseTest do
         end
 
         reactive do
-          id(:bad_over)
-          recompute_by(:fy, to: :lines, from: :fy)
-          reduce(into: [sum: [amount: :total]])
+          id :bad_over
+          recompute_by :fy, to: :lines, from: :fy
+          reduce into: [sum: [amount: :total]]
 
           # :quarter is not the unit this node recomputes by
-          lapse(:approved_at, when_changed: :any, over: :quarter)
+          lapse :approved_at, when_changed: :any, over: :quarter
         end
       end
 
@@ -638,11 +638,11 @@ defmodule ReactiveDag.LapseTest do
         end
 
         reactive do
-          id(:bad_child)
-          recompute_by(:fy, to: :lines, from: :fy)
-          reduce(into: [sum: [amount: :total]])
+          id :bad_child
+          recompute_by :fy, to: :lines, from: :fy
+          reduce into: [sum: [amount: :total]]
 
-          lapse(Undestroyable, key: :fy, when_changed: :any)
+          lapse Undestroyable, key: :fy, when_changed: :any
         end
       end
 
@@ -680,12 +680,12 @@ defmodule ReactiveDag.LapseTest do
         end
 
         reactive do
-          id(:bad_attr)
-          recompute_by(:fy, to: :lines, from: :fy)
-          reduce(into: [sum: [amount: :total]])
+          id :bad_attr
+          recompute_by :fy, to: :lines, from: :fy
+          reduce into: [sum: [amount: :total]]
 
           # neither an attribute of this resource nor a resource
-          lapse(:approved_at, when_changed: :any)
+          lapse :approved_at, when_changed: :any
         end
       end
 
@@ -730,11 +730,11 @@ defmodule ReactiveDag.LapseTest do
         end
 
         reactive do
-          id(:unaccepting_lapse)
-          recompute_by(:fy, to: :lines, from: :fy)
-          reduce(into: [sum: [amount: :total]])
+          id :unaccepting_lapse
+          recompute_by :fy, to: :lines, from: :fy
+          reduce into: [sum: [amount: :total]]
 
-          lapse(:approved_at, when_changed: :any)
+          lapse :approved_at, when_changed: :any
         end
       end
 
@@ -778,12 +778,12 @@ defmodule ReactiveDag.LapseTest do
         end
 
         reactive do
-          id(:bad_watch)
-          recompute_by(:fy, to: :lines, from: :fy)
-          reduce(into: [sum: [amount: :total]])
+          id :bad_watch
+          recompute_by :fy, to: :lines, from: :fy
+          reduce into: [sum: [amount: :total]]
 
           # :vote_count is not an attribute here, so this could never fire
-          lapse(:approved_at, when_changed: [:total, :vote_count])
+          lapse :approved_at, when_changed: [:total, :vote_count]
         end
       end
 

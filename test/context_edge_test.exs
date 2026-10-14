@@ -22,9 +22,9 @@ defmodule ReactiveDag.ContextEdgeTest do
     use Ash.Resource, domain: Domain, data_layer: Ash.DataLayer.Simple, extensions: [ReactiveDag.Node]
 
     reactive do
-      id(:transcripts)
-      op(:leaf)
-      leaf?(true)
+      id :transcripts
+      op :leaf
+      leaf? true
     end
   end
 
@@ -32,9 +32,9 @@ defmodule ReactiveDag.ContextEdgeTest do
     use Ash.Resource, domain: Domain, data_layer: Ash.DataLayer.Simple, extensions: [ReactiveDag.Node]
 
     reactive do
-      id(:people)
-      op(:leaf)
-      leaf?(true)
+      id :people
+      op :leaf
+      leaf? true
     end
   end
 
@@ -65,11 +65,11 @@ defmodule ReactiveDag.ContextEdgeTest do
     end
 
     reactive do
-      id(:enhanced_minutes)
-      op(:map)
-      compute(ReactiveDag.ContextEdgeTest.FakeOp)
+      id :enhanced_minutes
+      op :map
+      compute ReactiveDag.ContextEdgeTest.FakeOp
       # RECOMPUTE edge — a transcript change re-runs the LLM
-      ref(:transcripts)
+      ref :transcripts
       # CONTEXT edge — a people edit does NOT re-run it
       context :people
     end

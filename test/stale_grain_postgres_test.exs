@@ -65,8 +65,8 @@ defmodule ReactiveDag.StaleGrainPostgresTest do
     end
 
     reactive do
-      id(:lines)
-      leaf?(true)
+      id :lines
+      leaf? true
     end
   end
 
@@ -106,10 +106,10 @@ defmodule ReactiveDag.StaleGrainPostgresTest do
     end
 
     reactive do
-      id(:rollups)
-      op(:fold)
-      recompute_by([fy: :fy], to: :lines)
-      reduce(into: [sum: [amount: :total]])
+      id :rollups
+      op :fold
+      recompute_by [fy: :fy], to: :lines
+      reduce into: [sum: [amount: :total]]
     end
   end
 

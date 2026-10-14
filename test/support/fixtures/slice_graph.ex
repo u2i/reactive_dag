@@ -39,13 +39,13 @@ defmodule ReactiveDag.Fixtures.SliceGraph do
     end
 
     reactive do
-      id(:lines)
-      leaf?(true)
+      id :lines
+      leaf? true
 
       # the year is not the recompute unit and not the whole key — it is what a
       # person asks about
-      slice(:fiscal_year, values: {ReactiveDag.SliceTest, :available_years, []})
-      slice(:version, label: "processed by version")
+      slice :fiscal_year, values: {ReactiveDag.SliceTest, :available_years, []}
+      slice :version, label: "processed by version"
     end
   end
 
@@ -81,10 +81,10 @@ defmodule ReactiveDag.Fixtures.SliceGraph do
     end
 
     reactive do
-      id(:tenanted_lines)
-      leaf?(true)
-      row_key([:org_id, :fund, :fiscal_year])
-      slice(:fiscal_year)
+      id :tenanted_lines
+      leaf? true
+      row_key [:org_id, :fund, :fiscal_year]
+      slice :fiscal_year
     end
   end
 
@@ -109,8 +109,8 @@ defmodule ReactiveDag.Fixtures.SliceGraph do
     end
 
     reactive do
-      id(:plain)
-      leaf?(true)
+      id :plain
+      leaf? true
     end
   end
 
@@ -121,9 +121,9 @@ defmodule ReactiveDag.Fixtures.SliceGraph do
       extensions: [ReactiveDag.Node]
 
     reactive do
-      id(:tableless)
-      leaf?(true)
-      slice(:fiscal_year)
+      id :tableless
+      leaf? true
+      slice :fiscal_year
     end
   end
 
@@ -149,9 +149,9 @@ defmodule ReactiveDag.Fixtures.SliceGraph do
     end
 
     reactive do
-      id(:not_a_source)
-      leaf?(true)
-      slice(:fiscal_year, poll_as: :fiscal)
+      id :not_a_source
+      leaf? true
+      slice :fiscal_year, poll_as: :fiscal
     end
   end
 

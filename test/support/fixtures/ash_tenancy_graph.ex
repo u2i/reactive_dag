@@ -65,13 +65,13 @@ defmodule ReactiveDag.Fixtures.AshTenancyGraph do
     end
 
     reactive do
-      id(:meeting)
-      op(:source)
-      leaf?(true)
+      id :meeting
+      op :source
+      leaf? true
       # REQUIRED: `derived_payload_key/1` returns the single-attribute PK, which
       # here is `:id` — without this the library writes cell keys into the UUID
       # column. See ADR-003.
-      payload_key(:key)
+      payload_key :key
     end
   end
 
@@ -103,9 +103,9 @@ defmodule ReactiveDag.Fixtures.AshTenancyGraph do
     end
 
     reactive do
-      id(:shared)
-      op(:source)
-      leaf?(true)
+      id :shared
+      op :source
+      leaf? true
     end
   end
 
@@ -147,13 +147,13 @@ defmodule ReactiveDag.Fixtures.AshTenancyGraph do
     end
 
     reactive do
-      id(:rollup)
-      op(:fold)
-      payload_key(:key)
+      id :rollup
+      op :fold
+      payload_key :key
       # A `reduce` is what RETIRES: `compute Mod` writes its own rows and never
       # reaches `materialize/4`. The `over` leaf holds nothing, so this pass
       # produces nothing and every key the cell holds is retired.
-      reduce(over: :meeting, group_by: :key, into: [count: :total])
+      reduce over: :meeting, group_by: :key, into: [count: :total]
     end
   end
 
@@ -196,16 +196,16 @@ defmodule ReactiveDag.Fixtures.AshTenancyGraph do
 
       action :summarise, :map do
         argument :text, :string
-        run(fn input, _ -> {:ok, %{"summary" => "sum:" <> (input.arguments.text || "")}} end)
+        run fn input, _ -> {:ok, %{"summary" => "sum:" <> (input.arguments.text || "")}} end
       end
     end
 
     reactive do
-      id(:summary)
-      op(:map)
-      payload_key(:key)
+      id :summary
+      op :map
+      payload_key :key
 
-      recompute_by(:key, to: :meeting, from: :key)
+      recompute_by :key, to: :meeting, from: :key
 
       per_key(:summarise,
         args: [text: :title],
@@ -248,9 +248,9 @@ defmodule ReactiveDag.Fixtures.AshTenancyGraph do
     end
 
     reactive do
-      id(:readings)
-      op(:source)
-      leaf?(true)
+      id :readings
+      op :source
+      leaf? true
     end
   end
 
@@ -299,10 +299,10 @@ defmodule ReactiveDag.Fixtures.AshTenancyGraph do
     end
 
     reactive do
-      id(:plants)
-      op(:fold)
-      payload_key(:key)
-      aggregate(over: :readings, sum: [flow: :total])
+      id :plants
+      op :fold
+      payload_key :key
+      aggregate over: :readings, sum: [flow: :total]
     end
   end
 

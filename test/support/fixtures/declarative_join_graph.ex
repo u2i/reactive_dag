@@ -46,9 +46,9 @@ defmodule ReactiveDag.Fixtures.DeclarativeJoinGraph do
     end
 
     reactive do
-      id(:entries)
-      op(:source)
-      leaf?(true)
+      id :entries
+      op :source
+      leaf? true
     end
   end
 
@@ -85,9 +85,9 @@ defmodule ReactiveDag.Fixtures.DeclarativeJoinGraph do
     end
 
     reactive do
-      id(:variance)
-      op(:reconcile)
-      key_rule(:all)
+      id :variance
+      op :reconcile
+      key_rule :all
 
       join(
         over: :entries,
@@ -125,9 +125,9 @@ defmodule ReactiveDag.Fixtures.DeclarativeJoinGraph do
     end
 
     reactive do
-      id(:outer_variance)
-      op(:reconcile)
-      key_rule(:all)
+      id :outer_variance
+      op :reconcile
+      key_rule :all
 
       join(
         over: :entries,
@@ -175,9 +175,9 @@ defmodule ReactiveDag.Fixtures.DeclarativeJoinGraph do
     end
 
     reactive do
-      id(:linked)
-      op(:reconcile)
-      key_rule(:all)
+      id :linked
+      op :reconcile
+      key_rule :all
 
       # every entry is on the left by acct; only actuals land on the right
       # via a fn (mixing forms is fine — each slot resolves independently)

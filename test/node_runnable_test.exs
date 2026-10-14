@@ -115,9 +115,9 @@ defmodule ReactiveDag.NodeRunnableTest do
       end
 
       reactive do
-        op(:fold)
-        compute(EchoOp)
-        key_rule(:all)
+        op :fold
+        compute EchoOp
+        key_rule :all
       end
     end
 

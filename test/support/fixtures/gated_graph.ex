@@ -48,11 +48,11 @@ defmodule ReactiveDag.Fixtures.GatedGraph do
     end
 
     reactive do
-      id(:versioned)
-      leaf?(true)
-      payload_key(:key)
-      dirties_on([:create, :update])
-      gated(true)
+      id :versioned
+      leaf? true
+      payload_key :key
+      dirties_on [:create, :update]
+      gated true
       # Nothing to declare: the resource's own period is the record. A
       # consumer that needs to narrow reads the row as of the instant the
       # enqueue carries.
@@ -81,14 +81,14 @@ defmodule ReactiveDag.Fixtures.GatedGraph do
     end
 
     reactive do
-      id(:notes)
-      leaf?(true)
-      payload_key(:key)
-      dirties_on([:create, :update])
+      id :notes
+      leaf? true
+      payload_key :key
+      dirties_on [:create, :update]
       # `gated` alone is what lowers to the :approval suspend reason —
       # `suspends` is the :expensive one, and declaring it here would make the
       # cascade stop for the wrong reason (`:expensive` wins when both are set).
-      gated(human?: {ReactiveDag.GatedTest, :person?, []})
+      gated human?: {ReactiveDag.GatedTest, :person?, []}
       # Required of any suspending cell: a resumption has to be able to read
       # back the change that stopped it, or it recomputes the whole cell.
     end

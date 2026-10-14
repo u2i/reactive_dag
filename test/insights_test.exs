@@ -169,8 +169,8 @@ defmodule ReactiveDag.InsightsTest do
         end
 
         reactive do
-          id(:unreadable)
-          leaf?(true)
+          id :unreadable
+          leaf? true
         end
       end
 

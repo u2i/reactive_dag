@@ -40,9 +40,9 @@ defmodule ReactiveDag.Fixtures.RowsPageGraph do
     end
 
     reactive do
-      id(:docs)
-      leaf?(true)
-      row_key([:key])
+      id :docs
+      leaf? true
+      row_key [:key]
     end
   end
 
@@ -72,9 +72,9 @@ defmodule ReactiveDag.Fixtures.RowsPageGraph do
     end
 
     reactive do
-      id(:totals)
-      leaf?(true)
-      row_key([:key])
+      id :totals
+      leaf? true
+      row_key [:key]
     end
   end
 

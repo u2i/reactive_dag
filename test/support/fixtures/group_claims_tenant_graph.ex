@@ -53,10 +53,10 @@ defmodule ReactiveDag.Fixtures.GroupClaimsTenantGraph do
     end
 
     reactive do
-      id(:lines)
-      leaf?(true)
-      payload_key(:line_key)
-      row_key([:org_id, :line_key])
+      id :lines
+      leaf? true
+      payload_key :line_key
+      row_key [:org_id, :line_key]
     end
   end
 
@@ -97,16 +97,16 @@ defmodule ReactiveDag.Fixtures.GroupClaimsTenantGraph do
     end
 
     reactive do
-      id(:rollup)
-      op(:fold)
-      payload_key(:fund)
-      row_key([:org_id, :fund])
+      id :rollup
+      op :fold
+      payload_key :fund
+      row_key [:org_id, :fund]
 
       # THE narrowing declaration: a changed line invalidates its FUND's unit,
       # not the whole cell. Lowers to `key_rule :group` plus the `over:` and
       # `group_by:` the reduce needs.
-      recompute_by(:fund, to: :lines, from: :fund)
-      reduce(into: [sum: [amount: :total]])
+      recompute_by :fund, to: :lines, from: :fund
+      reduce into: [sum: [amount: :total]]
     end
   end
 

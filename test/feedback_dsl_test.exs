@@ -43,9 +43,9 @@ defmodule ReactiveDag.FeedbackDslTest do
     use Ash.Resource, domain: Domain, data_layer: Ash.DataLayer.Simple, extensions: [ReactiveDag.Node]
 
     reactive do
-      id(:meeting_docs)
-      op(:leaf)
-      leaf?(true)
+      id :meeting_docs
+      op :leaf
+      leaf? true
     end
   end
 
@@ -61,13 +61,13 @@ defmodule ReactiveDag.FeedbackDslTest do
     end
 
     reactive do
-      id(:meetings)
-      op(:map)
-      compute(ReactiveDag.FeedbackDslTest.Echo)
-      depends_on([:meeting_docs])
+      id :meetings
+      op :map
+      compute ReactiveDag.FeedbackDslTest.Echo
+      depends_on [:meeting_docs]
       # A meeting's minutes announce future meetings, and those meetings are
       # rows of THIS resource — the loop the whole feature exists for.
-      feedback(:schedule)
+      feedback :schedule
     end
   end
 
@@ -83,10 +83,10 @@ defmodule ReactiveDag.FeedbackDslTest do
     end
 
     reactive do
-      id(:minutes)
-      op(:map)
-      compute(ReactiveDag.FeedbackDslTest.Echo)
-      ref(:meetings)
+      id :minutes
+      op :map
+      compute ReactiveDag.FeedbackDslTest.Echo
+      ref :meetings
     end
   end
 
@@ -102,10 +102,10 @@ defmodule ReactiveDag.FeedbackDslTest do
     end
 
     reactive do
-      id(:schedule)
-      op(:map)
-      compute(ReactiveDag.FeedbackDslTest.Echo)
-      ref(:minutes)
+      id :schedule
+      op :map
+      compute ReactiveDag.FeedbackDslTest.Echo
+      ref :minutes
     end
   end
 
@@ -148,10 +148,10 @@ defmodule ReactiveDag.FeedbackDslTest do
       end
 
       reactive do
-        id(:per_key_loop)
-        recompute_by(:key, to: :transcripts, from: :key)
-        per_key(:summarise, into: [summary: :summary])
-        feedback(:downstream)
+        id :per_key_loop
+        recompute_by :key, to: :transcripts, from: :key
+        per_key :summarise, into: [summary: :summary]
+        feedback :downstream
       end
     end
 
@@ -179,10 +179,10 @@ defmodule ReactiveDag.FeedbackDslTest do
       end
 
       reactive do
-        id(:reduce_loop)
-        recompute_by(:cat, to: :lines, from: :cat)
-        reduce(into: [count: :n])
-        feedback(:verdicts)
+        id :reduce_loop
+        recompute_by :cat, to: :lines, from: :cat
+        reduce into: [count: :n]
+        feedback :verdicts
       end
     end
 
@@ -200,10 +200,10 @@ defmodule ReactiveDag.FeedbackDslTest do
         extensions: [ReactiveDag.Node]
 
       reactive do
-        id(:poll_loop)
-        leaf?(true)
-        poll(ReactiveDag.FeedbackDslTest.Echo)
-        feedback(:derived)
+        id :poll_loop
+        leaf? true
+        poll ReactiveDag.FeedbackDslTest.Echo
+        feedback :derived
       end
     end
 
@@ -222,9 +222,9 @@ defmodule ReactiveDag.FeedbackDslTest do
         extensions: [ReactiveDag.Node]
 
       reactive do
-        id(:leaf_loop)
-        leaf?(true)
-        feedback(:derived)
+        id :leaf_loop
+        leaf? true
+        feedback :derived
       end
     end
 
@@ -251,11 +251,11 @@ defmodule ReactiveDag.FeedbackDslTest do
       end
 
       reactive do
-        id(:both_ways)
-        op(:map)
-        compute(ReactiveDag.FeedbackDslTest.Echo)
-        ref(:schedule)
-        feedback(:schedule)
+        id :both_ways
+        op :map
+        compute ReactiveDag.FeedbackDslTest.Echo
+        ref :schedule
+        feedback :schedule
       end
     end
 
@@ -281,12 +281,12 @@ defmodule ReactiveDag.FeedbackDslTest do
       end
 
       reactive do
-        id(:twice)
-        op(:map)
-        compute(ReactiveDag.FeedbackDslTest.Echo)
-        depends_on([:upstream])
-        feedback(:schedule)
-        feedback(:schedule)
+        id :twice
+        op :map
+        compute ReactiveDag.FeedbackDslTest.Echo
+        depends_on [:upstream]
+        feedback :schedule
+        feedback :schedule
       end
     end
 
@@ -311,9 +311,9 @@ defmodule ReactiveDag.FeedbackDslTest do
         extensions: [ReactiveDag.Node]
 
       reactive do
-        id(:pk_docs)
-        op(:leaf)
-        leaf?(true)
+        id :pk_docs
+        op :leaf
+        leaf? true
       end
     end
 
@@ -332,9 +332,9 @@ defmodule ReactiveDag.FeedbackDslTest do
       end
 
       reactive do
-        id(:pk_transcripts)
-        op(:leaf)
-        leaf?(true)
+        id :pk_transcripts
+        op :leaf
+        leaf? true
       end
     end
 
@@ -355,10 +355,10 @@ defmodule ReactiveDag.FeedbackDslTest do
       end
 
       reactive do
-        id(:two_input_per_key)
-        recompute_by(:key, to: :pk_transcripts, from: :key)
-        per_key(:summarise, into: [summary: :summary])
-        ref(:pk_docs)
+        id :two_input_per_key
+        recompute_by :key, to: :pk_transcripts, from: :key
+        per_key :summarise, into: [summary: :summary]
+        ref :pk_docs
       end
     end
 

@@ -90,14 +90,14 @@ defmodule ReactiveDag.Fixtures.AugmentedGraph do
     end
 
     reactive do
-      id(:category_totals)
-      op(:fold)
+      id :category_totals
+      op :fold
 
-      recompute_by(:category, to: :expenses, from: :category)
-      reduce(into: [sum: [amount: :total], count: :n])
+      recompute_by :category, to: :expenses, from: :category
+      reduce into: [sum: [amount: :total], count: :n]
 
       # THE FEATURE: these three actions mark; `:upsert` and `:annotate` do not
-      augmented_by([:add, :correct, :approve])
+      augmented_by [:add, :correct, :approve]
     end
   end
 
@@ -127,10 +127,10 @@ defmodule ReactiveDag.Fixtures.AugmentedGraph do
     end
 
     reactive do
-      id(:expenses)
-      op(:source)
-      leaf?(true)
-      dirties_on([:create, :update, :destroy])
+      id :expenses
+      op :source
+      leaf? true
+      dirties_on [:create, :update, :destroy]
     end
   end
 
@@ -167,9 +167,9 @@ defmodule ReactiveDag.Fixtures.AugmentedGraph do
     end
 
     reactive do
-      id(:rollups)
-      leaf?(true)
-      augmented_by([:correct])
+      id :rollups
+      leaf? true
+      augmented_by [:correct]
     end
   end
 
@@ -205,9 +205,9 @@ defmodule ReactiveDag.Fixtures.AugmentedGraph do
     end
 
     reactive do
-      id(:verdicts)
-      leaf?(true)
-      augmented_by([:override])
+      id :verdicts
+      leaf? true
+      augmented_by [:override]
     end
   end
 
@@ -242,11 +242,11 @@ defmodule ReactiveDag.Fixtures.AugmentedGraph do
     end
 
     reactive do
-      id(:readings)
-      leaf?(true)
+      id :readings
+      leaf? true
       # :correct is an `:update`, so BOTH cover it
-      dirties_on([:create, :update])
-      augmented_by([:correct])
+      dirties_on [:create, :update]
+      augmented_by [:correct]
     end
   end
 
