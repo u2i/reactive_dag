@@ -189,9 +189,19 @@ defmodule ReactiveDag.GatedTest do
         private?(true)
       end
 
+      temporal do
+        attribute :valid_at
+        recorded_at :recorded_at
+      end
+
       attributes do
         attribute :key, :string, primary_key?: true, allow_nil?: false, public?: true
         attribute :body, :string, public?: true
+
+        attribute :recorded_at, :utc_datetime_usec,
+          public?: true,
+          default: &DateTime.utc_now/0,
+          update_default: &DateTime.utc_now/0
       end
 
       actions do
@@ -205,30 +215,36 @@ defmodule ReactiveDag.GatedTest do
         payload_key(:key)
         dirties_on([:create, :update])
         gated(true)
-        # The HOST resolves it: a version resource is the host's, with whatever
-        # name and key type it chose. A real one would look up the row
-        # `ash_paper_trail` just wrote in the same transaction.
+        # Nothing to declare: the resource's own period is the record. A
+        # consumer that needs to narrow reads the row as of the instant the
+        # enqueue carries.
       end
     end
 
-    test "the change carries the version id, and a reviewer gets it back" do
-      # Was read off the held frontier row via `awaiting/1`; it now rides on the
-      # enqueued cascade's `versions:`. Same reference, same guarantee — the
-      # change is referenced, not copied.
+    test "the change carries WHEN it happened, and a reviewer gets it back" do
+      # Was read off the held frontier row via `awaiting/1`, then rode as a
+      # host-resolved version id. It now rides as the instant the row recorded
+      # — the change is still referenced rather than copied, and a reviewer
+      # reads the row as of that moment to see what they are approving.
       Ash.create!(Versioned, %{key: "v1", body: "extracted"}, action: :upsert)
 
       assert [{"versioned", ["v1"], opts}] = ReactiveDag.Test.Pending.enqueued()
-      assert Keyword.fetch!(opts, :versions) == %{"v1" => "version-for-v1"}
+      assert %{"v1" => %DateTime{}} = Keyword.fetch!(opts, :versions)
     end
 
-    test "a resolver that raises costs the record, not the write" do
-      # Failing a host's write over a bookkeeping lookup would be the wrong
-      # trade. The change is still enqueued and still propagates; only the
-      # durable reference is missing.
+    test "there is no resolver left to raise" do
+      # This used to test that a host's version-id resolver blowing up cost the
+      # durable record and not the write — the right trade, for a mechanism
+      # that could fail.
+      #
+      # Nothing resolves anything now. The instant is already on the record the
+      # write produced, so the failure mode is gone rather than handled: a key
+      # that would once have lost its reference to a raising lookup now carries
+      # one like any other.
       Ash.create!(Versioned, %{key: "boom", body: "x"}, action: :upsert)
 
       assert [{"versioned", ["boom"], opts}] = ReactiveDag.Test.Pending.enqueued()
-      assert Keyword.fetch!(opts, :versions) == %{}
+      assert %{"boom" => %DateTime{}} = Keyword.fetch!(opts, :versions)
     end
   end
 end

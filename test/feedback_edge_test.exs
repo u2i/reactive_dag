@@ -455,7 +455,7 @@ defmodule ReactiveDag.FeedbackEdgeTest do
       # point: recoverable, but only at the next scan, with the page stale until
       # then.
       point = %{tenant: "*", waiting: "minutes", resource: "meetings", row_uuid: @future}
-      ReactiveDag.Suspension.record(point, "*", :expensive, 2)
+      ReactiveDag.Suspension.record(point, nil, :expensive, 2)
 
       job = %Oban.Job{
         args: %{
@@ -491,7 +491,7 @@ defmodule ReactiveDag.FeedbackEdgeTest do
       # `feedback_lap:` from the worker's opts and every resumption restarts
       # at lap 0.
       point = %{tenant: "*", waiting: "minutes", resource: "meetings", row_uuid: @future}
-      ReactiveDag.Suspension.record(point, "*", :expensive, 2)
+      ReactiveDag.Suspension.record(point, nil, :expensive, 2)
 
       job = %Oban.Job{
         args: %{
