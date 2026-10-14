@@ -173,7 +173,7 @@ defmodule ReactiveDag.Node.Changes.MarkDirty do
           # reads the row as of that instant and diffs it against now — so the
           # cascade carries a timestamp rather than a reference to a stored
           # diff, and there is nothing to resolve or to fail.
-          case recorded_at(record) do
+          case recorded_at(record, changeset) do
             nil -> {[key], %{}}
             at -> {[key], %{key => at}}
           end
@@ -214,14 +214,31 @@ defmodule ReactiveDag.Node.Changes.MarkDirty do
   # No resolver, no host MFA, nothing to raise: the value is already on the
   # record. That removes the failure the old `version_id` resolver had, where a
   # blown-up lookup cost the durable record and said so only in a log line.
-  defp recorded_at(record) do
-    case Ash.Resource.Info.temporal_recorded_at(record.__struct__) do
+  defp recorded_at(record, %Ash.Changeset{action_type: :destroy} = changeset) do
+    # A DESTROY closes the period at the write's own instant; the record still
+    # carries the `recorded_at` of its LAST WRITE, which is a different moment
+    # entirely. Reading just before that one lands before the row existed, so
+    # the diff compares nil to nil and the claim degrades to whole-cell — which
+    # is how a deleted row stopped naming the unit it left.
+    case Ash.Temporal.resolve_write_as_of(changeset.as_of) do
+      %DateTime{} = at -> at
+      # No `as_of` means the destroy happened now, and the period closed now.
+      _ -> if temporal_attr(record), do: DateTime.utc_now()
+    end
+  rescue
+    _ -> nil
+  end
+
+  defp recorded_at(record, _changeset) do
+    case temporal_attr(record) do
       nil -> nil
       attr -> Map.get(record, attr)
     end
   rescue
     _ -> nil
   end
+
+  defp temporal_attr(record), do: Ash.Resource.Info.temporal_recorded_at(record.__struct__)
 
   # Does this change need a human, given who made it?
   #

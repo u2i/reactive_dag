@@ -523,27 +523,29 @@ defmodule ReactiveDag.DirtiesOnTest do
     # `dirties_on` records the row AS IT WAS at mark time, so a parent derives
     # its claim from what the row was — the only thing that survives a delete,
     # and the only thing that names where a moved row came from.
-    test "a VERSION REFERENCE rides on the frontier row" do
+    test "WHEN the change happened rides on the enqueue" do
       Expenses
       |> Ash.Changeset.for_create(:create, %{key: "e1", category: "travel", amount: 10.0})
       |> Ash.create!()
 
-      # The version reference used to ride on the frontier row and come back
-      # through `claim_with_diffs`. There is no row to ride on now, so it rides
-      # on the enqueue itself — same reference, same job, carried by the
-      # cascade's `versions:` rather than read back out of a queue table.
+      # A version id used to ride here — a reference to a row in a host-owned
+      # table, resolved later through a declared MFA. Now the enqueue carries
+      # WHEN, and a consumer that needs to narrow reads the row as of that
+      # instant and diffs it against now. Nothing is stored, so nothing can be
+      # unreadable: the old failure was a reference that could not be resolved
+      # silently widening the claim to the whole cell.
       assert [{"expenses", ["e1"], opts}] = ReactiveDag.Test.Pending.enqueued()
-      assert %{"e1" => version_id} = Keyword.fetch!(opts, :versions)
-      assert is_binary(version_id), "the cascade references the record of the change"
+      assert %{"e1" => %DateTime{} = at} = Keyword.fetch!(opts, :versions)
 
-      # …and the record holds what moved. `%{"to" => v}` throughout here, because
-      # a create had nothing before it; an update carries
-      # `%{"from" => old, "to" => new}` for what moved and `%{"unchanged" => v}`
-      # for the rest.
-      changes = Versions.changes(version_id)
+      # …and the history answers what moved. Reading just BEFORE the instant is
+      # the whole trick: `recorded_at` is when the new period OPENS, so reading
+      # at it returns the row after the change and the diff compares a row to
+      # itself.
+      before = Expenses |> Ash.Query.as_of(DateTime.add(at, -1, :microsecond)) |> Ash.read!()
+      now = Expenses |> Ash.read!()
 
-      assert changes["category"] == %{"to" => "travel"}
-      assert changes["amount"] == %{"to" => 10.0}
+      assert before == [], "nothing existed before the create"
+      assert [%{category: "travel", amount: 10.0}] = now
     end
 
     test "a DELETED row still names its unit — the claim stays precise" do
