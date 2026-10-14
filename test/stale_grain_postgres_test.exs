@@ -113,37 +113,20 @@ defmodule ReactiveDag.StaleGrainPostgresTest do
     end
   end
 
+  # Listed explicitly, not `allow_unregistered?`: the migration generator reads
+  # `Ash.Domain.Info.resources/1`, and an unregistered domain reports none — so
+  # there would be nothing to generate DDL from.
+  defmodule Domain do
+    use Ash.Domain, validate_config_inclusion?: false
+
+    resources do
+      resource ReactiveDag.StaleGrainPostgresTest.Lines
+      resource ReactiveDag.StaleGrainPostgresTest.Rollups
+    end
+  end
+
   setup_all do
-    temporal_table(
-      "rd_grain_lines",
-      [
-        {"key", "text NOT NULL"},
-        {"fy", "text"},
-        {"amount", "double precision"},
-        {"recorded_at", "timestamptz NOT NULL"},
-        {"valid_at", "tstzrange NOT NULL"}
-      ],
-      keys: ["key"],
-      period: "valid_at"
-    )
-
-    temporal_table(
-      "rd_grain_rollups",
-      [
-        {"fy", "text NOT NULL"},
-        {"total", "double precision"},
-        {"recorded_at", "timestamptz NOT NULL"},
-        {"valid_at", "tstzrange NOT NULL"}
-      ],
-      keys: ["fy"],
-      period: "valid_at"
-    )
-
-    on_exit(fn ->
-      exec("DROP TABLE IF EXISTS rd_grain_lines")
-      exec("DROP TABLE IF EXISTS rd_grain_rollups")
-    end)
-
+    migrate!(Domain)
     :ok
   end
 
@@ -163,10 +146,14 @@ defmodule ReactiveDag.StaleGrainPostgresTest do
     resource |> Ash.Changeset.for_create(:upsert, attrs) |> Ash.create!()
   end
 
-  test "the table really is WITHOUT OVERLAPS" do
+  test "the GENERATED table really is WITHOUT OVERLAPS" do
     # Guards the fixture itself. On a plain primary key every other test in
     # this file would still pass while testing nothing about history — the
     # table would simply hold one version per key, exactly as ETS does.
+    #
+    # Worth asserting even though the DDL is generated: it proves the DSL's
+    # `temporal` block actually reached the schema, rather than being silently
+    # ignored on the way through.
     %{rows: [[definition]]} =
       exec_sandboxed("""
       SELECT pg_get_constraintdef(oid)

@@ -21,6 +21,13 @@ config :ash, default_string_length_count: :codepoints
 if config_env() == :test do
   config :reactive_dag, ecto_repos: [ReactiveDag.TestRepo]
 
+  # Same database, ordinary pool — see `ReactiveDag.MigrationRepo`.
+  config :reactive_dag, ReactiveDag.MigrationRepo,
+    url:
+      System.get_env("REACTIVE_DAG_TEST_DATABASE_URL") ||
+        "postgres://cascade:cascade@localhost:5545/reactive_dag_test",
+    pool_size: 2
+
   config :reactive_dag, ReactiveDag.TestRepo,
     url:
       System.get_env("REACTIVE_DAG_TEST_DATABASE_URL") ||
