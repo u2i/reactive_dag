@@ -33,7 +33,8 @@ defmodule ReactiveDag.SuspendsTest do
   def changes_for(_version_id), do: %{}
   def version_for(record, _changeset), do: "v-" <> record.key
 
-  # A leaf that RECORDS versions — the shape a suspendable node's input needs.
+  # A TEMPORAL leaf — the shape a suspendable node's input needs. Its period is
+  # what lets a resumption read the row back as of the instant that stopped it.
   defmodule VersionedLeaf do
     use Ash.Resource,
       domain: ReactiveDag.SuspendsTest.Domain,
@@ -44,9 +45,19 @@ defmodule ReactiveDag.SuspendsTest do
       private?(true)
     end
 
+    temporal do
+      attribute :valid_at
+      recorded_at :recorded_at
+    end
+
     attributes do
       attribute :key, :string, primary_key?: true, allow_nil?: false, public?: true
       attribute :body, :string, public?: true
+
+      attribute :recorded_at, :utc_datetime_usec,
+        public?: true,
+        default: &DateTime.utc_now/0,
+        update_default: &DateTime.utc_now/0
     end
 
     actions do
@@ -60,7 +71,8 @@ defmodule ReactiveDag.SuspendsTest do
     end
   end
 
-  # The same leaf without `version_id` — nothing records WHICH row moved.
+  # The same leaf without a period — nothing records WHEN the row moved, so a
+  # resumption has nothing to read back and would recompute the whole cell.
   defmodule BareLeaf do
     use Ash.Resource,
       domain: ReactiveDag.SuspendsTest.Domain,
@@ -268,14 +280,21 @@ defmodule ReactiveDag.SuspendsTest do
   end
 
   describe "assembly refuses a graph that could not resume" do
-    test "a suspendable node with no version_diff" do
-      assert_raise ArgumentError, ~r/declares no `version_diff`/, fn ->
-        ReactiveDag.Node.graph([VersionedLeaf, SlowNoReader])
-      end
+    test "a suspendable node needs no declaration of its own" do
+      # The reader half is GONE. A node used to declare `version_diff` — how to
+      # read a version back — and its inputs `version_id` — how to record one.
+      # Two declarations that had to agree, checked at assembly because no
+      # Spark verifier can see across an edge.
+      #
+      # Now the input's PERIOD carries it: a suspension records when, and
+      # resuming reads the row as of that instant. The suspending node needs to
+      # declare nothing, so a graph whose inputs are temporal assembles however
+      # the suspending node is written.
+      assert %ReactiveDag.Plan{} = ReactiveDag.Node.graph([VersionedLeaf, SlowNoReader])
     end
 
     test "a suspendable node whose INPUT records no version" do
-      assert_raise ArgumentError, ~r/must declare `version_id`/, fn ->
+      assert_raise ArgumentError, ~r/must be TEMPORAL/, fn ->
         ReactiveDag.Node.graph([BareLeaf, SlowBareInput])
       end
     end
@@ -296,7 +315,7 @@ defmodule ReactiveDag.SuspendsTest do
       # The case that matters in practice: expensive nodes sit one hop from a
       # scanner. Exempting leaves would let the check pass while delivering
       # none of the precision it exists to guarantee.
-      assert_raise ArgumentError, ~r/its input "bare_leaf" must declare `version_id`/, fn ->
+      assert_raise ArgumentError, ~r/its input "bare_leaf" must be TEMPORAL/, fn ->
         ReactiveDag.Node.graph([BareLeaf, SlowBareInput])
       end
     end

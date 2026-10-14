@@ -103,10 +103,24 @@ defmodule ReactiveDag.DirtiesOnTest do
     ets do
     end
 
+    # TEMPORAL. A suspension records when a change happened, and resuming reads
+    # the row as of that instant — which is what lets a MOVED row claim both
+    # the unit it joined and the one it left. The period holds the old
+    # membership; current values alone only ever name the destination.
+    temporal do
+      attribute :valid_at
+      recorded_at :recorded_at
+    end
+
     attributes do
       attribute :key, :string, primary_key?: true, allow_nil?: false, public?: true
       attribute :category, :string, public?: true
       attribute :amount, :float, public?: true
+
+      attribute :recorded_at, :utc_datetime_usec,
+        public?: true,
+        default: &DateTime.utc_now/0,
+        update_default: &DateTime.utc_now/0
     end
 
     actions do
