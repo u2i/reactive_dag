@@ -8,156 +8,23 @@ defmodule ReactiveDag.JoinExpandCombinatorTest do
   `upsert:` override, which is gone: a node owns its rows, so the assertions read
   the payload table the library wrote.
   """
-  use ExUnit.Case, async: false
+  use ReactiveDag.PostgresCase
+
+  alias ReactiveDag.Fixtures.JoinExpandGraph
+  alias ReactiveDag.Fixtures.JoinExpandGraph.{Fiscal, KeylessExpand, Variance, YearBuckets}
 
   alias ReactiveDag.Node.Recompute
 
-  defmodule Domain do
-    use Ash.Domain, validate_config_inclusion?: false
-
-    resources do
-      allow_unregistered?(true)
-    end
-  end
-
-  defmodule Fiscal do
-    use Ash.Resource,
-      domain: Domain,
-      data_layer: Ash.DataLayer.Ets,
-      extensions: [ReactiveDag.Node]
-
-    ets do
-      private?(true)
-    end
-
-    attributes do
-      attribute :k, :string, primary_key?: true, allow_nil?: false, public?: true
-      attribute :kind, :string, public?: true
-      attribute :acct, :string, public?: true
-      attribute :amount, :float, public?: true
-      attribute :fy, :integer, public?: true
-    end
-
-    actions do
-      defaults [:read, :destroy]
-
-      create :create do
-        accept([:k, :kind, :acct, :amount, :fy])
-      end
-    end
-
-    reactive do
-      id(:fiscal)
-      op(:source)
-      leaf?(true)
-    end
-  end
-
-  # fn everything: computed side keys (the `&&` discriminator idiom), a fn key
-  # with a literal prefix, a computed-columns into, an upsert capture.
-  defmodule Variance do
-    use Ash.Resource,
-      domain: Domain,
-      data_layer: Ash.DataLayer.Ets,
-      extensions: [ReactiveDag.Node]
-
-    ets do
-      private?(true)
-    end
-
-    attributes do
-      attribute :key, :string, primary_key?: true, allow_nil?: false, public?: true
-      attribute :budget, :float, public?: true
-      attribute :actual, :float, public?: true
-      attribute :variance, :float, public?: true
-    end
-
-    actions do
-      defaults [:read, :destroy]
-
-      create :upsert do
-        upsert?(true)
-        upsert_identity(:by_key)
-        accept([:key, :budget, :actual, :variance])
-      end
-    end
-
-    identities do
-      identity :by_key, [:key]
-    end
-
-    reactive do
-      id(:variance)
-      op(:reconcile)
-      key_rule(:all)
-
-      join(
-        over: :fiscal,
-        left: fn %{kind: k, acct: a} -> k == "budget" && a end,
-        right: fn %{kind: k, acct: a} -> k == "actual" && a end,
-        key: fn acct -> "va|#{acct}" end,
-        into: fn _acct, budget, actual ->
-          %{
-            budget: budget.amount,
-            actual: actual && actual.amount,
-            variance: budget.amount - ((actual && actual.amount) || 0.0)
-          }
-        end
-      )
-    end
-  end
-
-  # EXPAND: one group (a fiscal year) fans out to one row per bucket — each
-  # row self-keyed, because one group → many keys.
-  defmodule YearBuckets do
-    use Ash.Resource,
-      domain: Domain,
-      data_layer: Ash.DataLayer.Ets,
-      extensions: [ReactiveDag.Node]
-
-    ets do
-      private?(true)
-    end
-
-    attributes do
-      attribute :key, :string, primary_key?: true, allow_nil?: false, public?: true
-      attribute :n, :integer, public?: true
-    end
-
-    actions do
-      defaults [:read, :destroy]
-
-      create :upsert do
-        upsert?(true)
-        upsert_identity(:by_key)
-        accept([:key, :n])
-      end
-    end
-
-    identities do
-      identity :by_key, [:key]
-    end
-
-    reactive do
-      id(:year_buckets)
-      op(:expand)
-      key_rule(:all)
-
-      reduce(
-        over: :fiscal,
-        group_by: :fy,
-        expand: fn fy, lines ->
-          lines
-          |> Enum.group_by(& &1.kind)
-          |> Enum.map(fn {kind, ls} ->
-            %{key: "#{fy}|#{kind}", n: length(ls)}
-          end)
-        end
-      )
-    end
+  setup_all do
+    migrate!(JoinExpandGraph.Domain)
+    :ok
   end
 
   setup do
+    pid = Ecto.Adapters.SQL.Sandbox.start_owner!(ReactiveDag.TestRepo, shared: true)
+    on_exit(fn -> Ecto.Adapters.SQL.Sandbox.stop_owner(pid) end)
+
+    truncate(JoinExpandGraph.tables())
     Process.register(self(), ReactiveDag.JoinExpandCombinatorTest)
 
     for {k, kind, acct, amount, fy} <- [
@@ -202,50 +69,6 @@ defmodule ReactiveDag.JoinExpandCombinatorTest do
   end
 
   test "an expand: row WITHOUT its own :key raises instructively" do
-    defmodule KeylessExpand do
-      use Ash.Resource,
-        domain: ReactiveDag.JoinExpandCombinatorTest.Domain,
-        data_layer: Ash.DataLayer.Ets,
-        extensions: [ReactiveDag.Node]
-
-      ets do
-        private?(true)
-      end
-
-      attributes do
-        attribute :key, :string, primary_key?: true, allow_nil?: false, public?: true
-        attribute :n, :integer, public?: true
-      end
-
-      actions do
-        defaults [:read, :destroy]
-
-        create :upsert do
-          upsert?(true)
-          upsert_identity(:by_key)
-          accept([:key, :n])
-        end
-      end
-
-      identities do
-        identity :by_key, [:key]
-      end
-
-      reactive do
-        id(:keyless_expand)
-        op(:expand)
-        key_rule(:all)
-
-        # The row has an `:n` but no `:key`, which is the error under test — the
-        # table exists so the failure is the missing key, not a missing table.
-        reduce(
-          over: :fiscal,
-          group_by: :fy,
-          expand: fn _fy, lines -> [%{n: length(lines)}] end
-        )
-      end
-    end
-
     plan = ReactiveDag.Node.graph([Fiscal, KeylessExpand])
 
     assert_raise RuntimeError, ~r/must carry its own :key/s, fn ->
