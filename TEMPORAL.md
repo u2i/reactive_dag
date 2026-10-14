@@ -184,3 +184,54 @@ period that is already open.
     returns the period as `%Ash.Range{lower: ~U[...], upper: nil}`. No extra
     query, no field selection, no API change. `prior.valid_at.lower` is the
     `as_of` an in-place write needs.
+
+## The three consumers of `version_id`
+
+Not one mechanism — three, with different needs. Mapping each before cutting.
+
+### 1. Resumption narrowing (`resumption_worker.ex`, `cascade.ex`)
+
+A suspension carries `version_id`; resuming reads it back through the
+suspending node's `version_diff` and derives the units that moved.
+
+`version_map/2` takes the EARLIEST version for a key: "the change that
+succeeded the last settled state. A later one describes a state the graph never
+saw settled."
+
+**Replacement:** `recorded_at`. Strictly better — earliest-is-smallest is
+intrinsic to a timestamp, where today it relies on `at/1` returning rows in
+insertion order. Resuming reads the row `as_of` that instant and `as_of` now,
+and diffs them. The diff becomes DERIVED rather than stored, so it cannot drift
+from the data.
+
+### 2. The `"*"` escalation (`resumption_worker.ex`, `suspension.ex`)
+
+`version_id == "*"` means "this change could not be attributed", and one such
+suspension escalates the whole cell. That is a sentinel, not a version.
+
+**Replacement:** a nullable `recorded_at`. `NULL` means unattributable, which
+is more honest than a magic string — and it cannot collide with a real value.
+
+### 3. Approval (`approval.ex`)
+
+    approved?(row) = row.<reference>.version_id == row.version_id
+
+The argument is that an equality which stops holding cannot be forgotten,
+unlike a flag that needs clearing on every write path.
+
+**Replacement:** the same comparison on `recorded_at`. The property is
+preserved exactly — content moves, `recorded_at` moves, the equality lapses.
+Arguably improves it: `approval.recorded_at >= row.recorded_at` also answers
+"approved at or after this state", which an opaque id cannot.
+
+The module's stated constraint stands: the library reads two columns and
+nothing else, so a host's approval scheme stays the host's business.
+
+### What goes
+
+  * `version_id` and `version_diff` node declarations, and the assembly check
+    that they agree across an edge
+  * `Versions`-style host resources and their tables (cascade's
+    `derived_row_versions`)
+  * `read_version/2`, `resolve_versions/3`, and the MFA-reader contract whose
+    failure mode is a silent widening to whole-cell recompute
