@@ -1031,53 +1031,87 @@ defmodule ReactiveDag.Cascade do
     end
   end
 
-  # A version reference was written by the cell whose ROW changed, so the reader
-  # that resolves it is that cell's — this cell for its own write, one of its
-  # INPUTS for a propagated change. Try this cell first, then its inputs; a
-  # reference nothing can read leaves the claim un-narrowed rather than failing
-  # it.
+  # WHAT CHANGED, read back from the row's own history.
+  #
+  # A suspension records WHEN a change happened. Resuming reads the input row
+  # as of that instant and as of now, and diffs the two. The diff is therefore
+  # DERIVED rather than stored, which removes the failure this replaces: a
+  # version reference that could not be read left the claim un-narrowed and
+  # said so only in a log line, so an unreadable reference silently became a
+  # whole-cell recompute — "the cost shows up as a bill".
+  #
+  # A row with no period, or one whose resource is not temporal, yields no
+  # diff and the claim stays un-narrowed. That is the same conservative
+  # direction as before: over-claiming is wasteful, under-claiming is wrong.
   defp resolve_versions(_plan, nil, _versions), do: %{}
 
   defp resolve_versions(plan, cell, versions) when map_size(versions) > 0 do
-    readers =
-      [cell.meta[:version_diff] | Enum.map(cell.inputs, &input_reader(plan, &1))]
+    # The CELL, not just a resource: which column holds a key is the node's
+    # declaration (`payload_key`), and the resource alone does not say.
+    sources =
+      [cell | Enum.map(cell.inputs, &Map.get(plan.cells, &1))]
       |> Enum.reject(&is_nil/1)
-      |> Enum.uniq()
+      |> Enum.filter(&temporal_cell?/1)
+      |> Enum.uniq_by(& &1.id)
 
-    if readers == [] do
+    if sources == [] do
       %{}
     else
-      for {k, vid} <- versions,
-          is_binary(vid),
-          diff = Enum.find_value(readers, &read_version(&1, vid)),
+      for {key, %DateTime{} = at} <- versions,
+          diff = Enum.find_value(sources, &diff_across(&1, key, at, plan)),
           into: %{} do
-        {k, diff}
+        {key, diff}
       end
     end
   end
 
   defp resolve_versions(_plan, _cell, _versions), do: %{}
 
-  defp input_reader(plan, input_id) do
-    case Map.get(plan.cells, input_id) do
-      nil -> nil
-      input -> input.meta[:version_diff]
-    end
-  end
+  # The row as it was AT the suspension, against the row as it is now.
+  defp diff_across(%Cell{meta: meta}, key, at, plan) do
+    opts = Plan.frontier_opts(plan)
+    resource = meta[:resource]
+    key_attr = meta[:payload_key] || :key
 
-  defp read_version(reader, version_id) do
-    case reader do
-      {m, f, a} -> apply(m, f, [version_id | a])
-      fun when is_function(fun, 1) -> fun.(version_id)
+    before = read_as_of(resource, key_attr, key, at, opts)
+    now = read_as_of(resource, key_attr, key, nil, opts)
+
+    if is_nil(before) and is_nil(now) do
+      nil
+    else
+      ReactiveDag.Node.Diff.between(before, now)
     end
   rescue
     e ->
       Logger.warning(
-        "reactive_dag: version_diff reader failed for #{inspect(version_id)} " <>
+        "reactive_dag: could not read #{inspect(meta[:resource])} as of #{inspect(at)} " <>
           "(#{Exception.message(e)}); this claim will not be narrowed"
       )
 
       nil
+  end
+
+  defp read_as_of(resource, key_attr, key, at, opts) do
+    resource
+    |> Ash.Query.do_filter([{key_attr, key}])
+    |> then(&if at, do: Ash.Query.as_of(&1, at), else: &1)
+    |> Ash.read_one(Keyword.take(opts, [:tenant]))
+    |> case do
+      {:ok, record} -> record
+      _ -> nil
+    end
+  end
+
+  defp temporal_cell?(%Cell{meta: meta}) do
+    case meta[:resource] do
+      nil -> false
+      resource -> temporal?(resource)
+    end
+  end
+
+  defp temporal?(resource) do
+    function_exported?(Ash.Resource.Info, :temporal?, 1) and
+      Ash.Resource.Info.temporal?(resource)
   end
 
   defp grain_of(nil), do: nil

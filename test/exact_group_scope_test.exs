@@ -102,8 +102,6 @@ defmodule ReactiveDag.ExactGroupScopeTest do
       payload_key(:key)
       depends_on([:lines])
       compute(ReactiveDag.ExactGroupScopeTest.Project)
-      version_id({ReactiveDag.ExactGroupScopeTest.Versions, :record, []})
-      version_diff({ReactiveDag.ExactGroupScopeTest.Versions, :changes, []})
     end
   end
 

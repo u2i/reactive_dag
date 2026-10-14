@@ -122,8 +122,6 @@ defmodule ReactiveDag.GatedTest do
         gated(human?: {ReactiveDag.GatedTest, :person?, []})
         # Required of any suspending cell: a resumption has to be able to read
         # back the change that stopped it, or it recomputes the whole cell.
-        version_id({ReactiveDag.GatedTest, :fake_version_for, []})
-        version_diff({ReactiveDag.GatedTest, :fake_changes, []})
       end
     end
 
@@ -210,7 +208,6 @@ defmodule ReactiveDag.GatedTest do
         # The HOST resolves it: a version resource is the host's, with whatever
         # name and key type it chose. A real one would look up the row
         # `ash_paper_trail` just wrote in the same transaction.
-        version_id({ReactiveDag.GatedTest, :fake_version_for, []})
       end
     end
 

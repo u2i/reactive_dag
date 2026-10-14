@@ -369,7 +369,7 @@ defmodule ReactiveDag.RealPostgresRunTest do
           CREATE TABLE #{@susp_table} (
             id text PRIMARY KEY, tenant text NOT NULL, waiting text NOT NULL,
             resource text NOT NULL, row_uuid text NOT NULL DEFAULT '*',
-            version_id text NOT NULL DEFAULT '*', reason text NOT NULL,
+            recorded_at timestamptz, reason text NOT NULL,
             inserted_at timestamp NOT NULL DEFAULT now(), lap integer NOT NULL DEFAULT 0
           )
           """,
@@ -447,7 +447,7 @@ defmodule ReactiveDag.RealPostgresRunTest do
         # because there was no job to be in one.
         Repo.query!(
           "INSERT INTO #{@susp_table} (id, tenant, waiting, resource, row_uuid, " <>
-            "version_id, reason, inserted_at) VALUES ($1,$2,$3,$4,$5,'*','expensive',now())",
+            "recorded_at, reason, inserted_at) VALUES ($1,$2,$3,$4,$5,NULL,'expensive',now())",
           ["s-orphan", "t", "MotionZip", "TranscriptExtract", "_06082026-738"]
         )
 
@@ -471,7 +471,7 @@ defmodule ReactiveDag.RealPostgresRunTest do
         for key <- ~w(_m1 _m2) do
           Repo.query!(
             "INSERT INTO #{@susp_table} (id, tenant, waiting, resource, row_uuid, " <>
-              "version_id, reason, inserted_at) VALUES ($1,'t','Zip','Docs',$2,'*','expensive',now())",
+              "recorded_at, reason, inserted_at) VALUES ($1,'t','Zip','Docs',$2,NULL,'expensive',now())",
             ["s-#{key}", key]
           )
         end
@@ -499,7 +499,7 @@ defmodule ReactiveDag.RealPostgresRunTest do
         # as abandoned would make the panel noise, and noise gets ignored.
         Repo.query!(
           "INSERT INTO #{@susp_table} (id, tenant, waiting, resource, row_uuid, " <>
-            "version_id, reason, inserted_at) VALUES ($1,$2,$3,$4,$5,'*','expensive',now())",
+            "recorded_at, reason, inserted_at) VALUES ($1,$2,$3,$4,$5,NULL,'expensive',now())",
           ["s-healthy", "t", "Extract", "Docs", "_m1"]
         )
 

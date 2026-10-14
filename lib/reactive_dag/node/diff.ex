@@ -142,6 +142,51 @@ defmodule ReactiveDag.Node.Diff do
   end
 
   @doc """
+  The `:full_diff`-shaped changes between two records.
+
+  The shape `groups/3` and `units/3` consume — `%{field => %{"from" =>, "to" =>}}`,
+  with `%{"unchanged" => v}` where a field held still.
+
+  This is how a diff is obtained under a temporal resource: read the row as of
+  the instant a suspension recorded, read it as of now, and compare. Nothing
+  stores the diff, so nothing can store a WRONG one — the failure this
+  replaces was an unreadable version reference silently widening a claim to the
+  whole cell.
+
+  Either side may be nil: a row that did not exist then, or does not now.
+  """
+  @spec between(map() | nil, map() | nil) :: map()
+  def between(nil, nil), do: %{}
+
+  def between(nil, now), do: Map.new(fields(now), &{to_string(&1), %{"to" => Map.get(now, &1)}})
+
+  def between(before, nil),
+    do: Map.new(fields(before), &{to_string(&1), %{"from" => Map.get(before, &1)}})
+
+  def between(before, now) do
+    Map.new(fields(now), fn field ->
+      was = Map.get(before, field)
+      is = Map.get(now, field)
+
+      if was == is do
+        {to_string(field), %{"unchanged" => is}}
+      else
+        {to_string(field), %{"from" => was, "to" => is}}
+      end
+    end)
+  end
+
+  # The record's own attributes. `__struct__` and Ash's metadata are not fields
+  # a consumer folds on, and comparing them would report a change nothing made.
+  defp fields(%resource{} = _record) do
+    resource
+    |> Ash.Resource.Info.attributes()
+    |> Enum.map(& &1.name)
+  end
+
+  defp fields(map) when is_map(map), do: Map.keys(map)
+
+  @doc """
   The row as it was, as a plain map — `nil` for a create.
 
   Keys are ATOMS, because a grain declaration names attributes as atoms and a
