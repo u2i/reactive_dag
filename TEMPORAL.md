@@ -235,3 +235,21 @@ nothing else, so a host's approval scheme stays the host's business.
     `derived_row_versions`)
   * `read_version/2`, `resolve_versions/3`, and the MFA-reader contract whose
     failure mode is a silent widening to whole-cell recompute
+
+## ETS supports temporal — the test graphs need no database
+
+`Ash.DataLayer.Ets` answers `can?(_, :temporal) -> true` and implements period
+handling. I had assumed temporal was Postgres-only because `strategy :context`
+"defers to native data layer support"; it is not.
+
+So the library's own test graphs can be temporal without standing up Postgres,
+and `spike/temporal_on_ets.exs` exercises the read path a resumption actually
+takes:
+
+    as_of(t0).title = "Budget"
+    now.title       = "Budget (revised)"
+    DIFF: %{"title" => %{"from" => "Budget", "to" => "Budget (revised)"}}
+
+That is the `:full_diff` shape `Diff.groups/3` consumes, derived from history
+with nothing stored. The path removed with `version_id` is replaced and
+measured, not merely compiled.
