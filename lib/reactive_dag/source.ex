@@ -417,8 +417,8 @@ defmodule ReactiveDag.Source do
     # version there has nowhere to put it otherwise. Without this the enqueue
     # carries bare keys, every suspension downstream carries `"*"`, and every
     # resumption recomputes a whole cell.
-    {polled, _diffs, versions} =
-      ReactiveDag.Node.Payload.collecting_diffs_and_versions(fn ->
+    {polled, _diffs} =
+      ReactiveDag.Node.Payload.collecting_diffs(fn ->
         poll_cell(graph, cell_id, poll_opts)
       end)
 
@@ -429,7 +429,7 @@ defmodule ReactiveDag.Source do
         # on it — the reported crash was only the first of them, so fixing that
         # site alone would have moved the failure rather than removed it.
         result = normalise(raw)
-        marked = mark(graph, cell_id, result, reason, versions)
+        marked = mark(graph, cell_id, result, reason)
 
         {:ok,
          %{
@@ -484,7 +484,7 @@ defmodule ReactiveDag.Source do
   end
 
   # A flat list belongs to the cell that was polled; a map names its own leaves.
-  defp mark(graph, cell_id, result, _reason, versions) do
+  defp mark(graph, cell_id, result, _reason) do
     by_leaf = by_leaf(result, cell_id)
 
     # A poll originates THIS graph's cascade. Without the tenant a tenanted scan
@@ -497,11 +497,7 @@ defmodule ReactiveDag.Source do
     # named one cell and something had to name the next; a cascade follows the
     # graph itself, so handing it the changed leaf keys is the whole job.
     for {leaf, keys} <- by_leaf, keys != [], into: %{} do
-      # Only this leaf's versions: the collector is per-process and a fan-out
-      # poll feeds several leaves, so handing every leaf the whole map would
-      # attach another leaf's version to this one's key — a version describes
-      # one row, and the wrong one derives the wrong unit.
-      enqueue_cascade(leaf, keys, Keyword.put(opts, :versions, Map.take(versions, keys)))
+      enqueue_cascade(leaf, keys, opts)
       {leaf, keys}
     end
   end
@@ -511,7 +507,7 @@ defmodule ReactiveDag.Source do
   defp enqueue_cascade(cell, keys, opts) do
     enqueuer =
       Application.get_env(:reactive_dag, :cascade_enqueuer) ||
-        &ReactiveDag.CascadeWorker.enqueue/3
+        (&ReactiveDag.CascadeWorker.enqueue/3)
 
     case enqueuer.(cell, keys, opts) do
       {:ok, _} ->
