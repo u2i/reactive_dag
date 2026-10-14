@@ -26,424 +26,35 @@ defmodule ReactiveDag.CompareFieldsTest do
   ones you must NOT compare and the honest witness is a hash of the ones you
   must; it wins when both are declared, which "precedence" below pins.
   """
-  use ExUnit.Case, async: false
+  use ReactiveDag.PostgresCase
+
+  alias ReactiveDag.Fixtures.CompareGraph
+
+  alias ReactiveDag.Fixtures.CompareGraph.{
+    AccountTotal,
+    AccountTotalWide,
+    Both,
+    Everything,
+    ExtractedLine,
+    Narrowed,
+    PlantMonth,
+    PlantMonthWide,
+    Reading,
+    Rollups
+  }
 
   alias ReactiveDag.Node.{Payload, Recompute, Rows}
   alias ReactiveDag.Node.Verifiers.VerifyReactive
 
-  defmodule Domain do
-    use Ash.Domain, validate_config_inclusion?: false
-
-    resources do
-      allow_unregistered?(true)
-    end
-  end
-
-  # the core shape: :a and :b are the result, :c rides along on the record
-  defmodule Narrowed do
-    use Ash.Resource, domain: Domain, data_layer: Ash.DataLayer.Ets, extensions: [ReactiveDag.Node]
-
-    ets do
-      private?(true)
-    end
-
-    attributes do
-      attribute :key, :string, primary_key?: true, allow_nil?: false, public?: true
-      attribute :a, :string, public?: true
-      attribute :b, :string, public?: true
-      attribute :c, :string, public?: true
-    end
-
-    identities do
-      identity :by_key, [:key], pre_check_with: ReactiveDag.CompareFieldsTest.Domain
-    end
-
-    actions do
-      defaults [:read, :destroy]
-
-      create :upsert do
-        upsert?(true)
-        upsert_identity(:by_key)
-        accept([:key, :a, :b, :c])
-      end
-    end
-
-    reactive do
-      id(:narrowed)
-      leaf?(true)
-      compare([:a, :b])
-    end
-  end
-
-  # the same row shape with NO `compare` — the default, which every existing
-  # node relies on: every field the row carries is compared.
-  defmodule Everything do
-    use Ash.Resource, domain: Domain, data_layer: Ash.DataLayer.Ets, extensions: [ReactiveDag.Node]
-
-    ets do
-      private?(true)
-    end
-
-    attributes do
-      attribute :key, :string, primary_key?: true, allow_nil?: false, public?: true
-      attribute :a, :string, public?: true
-      attribute :b, :string, public?: true
-      attribute :c, :string, public?: true
-    end
-
-    identities do
-      identity :by_key, [:key], pre_check_with: ReactiveDag.CompareFieldsTest.Domain
-    end
-
-    actions do
-      defaults [:read, :destroy]
-
-      create :upsert do
-        upsert?(true)
-        upsert_identity(:by_key)
-        accept([:key, :a, :b, :c])
-      end
-    end
-
-    reactive do
-      id(:everything)
-      leaf?(true)
-    end
-  end
-
-  # BOTH declared. The doc says the fingerprint wins; this resource exists to
-  # pin it, so `compare` cannot quietly start overriding it.
-  defmodule Both do
-    use Ash.Resource, domain: Domain, data_layer: Ash.DataLayer.Ets, extensions: [ReactiveDag.Node]
-
-    ets do
-      private?(true)
-    end
-
-    attributes do
-      attribute :key, :string, primary_key?: true, allow_nil?: false, public?: true
-      attribute :a, :string, public?: true
-      attribute :b, :string, public?: true
-      attribute :fingerprint, :string, public?: true
-    end
-
-    actions do
-      defaults [:read, :destroy]
-
-      create :upsert do
-        upsert?(true)
-        accept([:key, :a, :b, :fingerprint])
-      end
-    end
-
-    reactive do
-      id(:both)
-      leaf?(true)
-      fingerprint([:a])
-      compare([:b])
-    end
-  end
-
-  # a COMPOSITE-PK node: no key column, its cell key is the identity's "|"
-  # serialization. It goes through `upsert_identity`, which shares `moved?/3`,
-  # so `compare` must narrow there identically.
-  defmodule Rollups do
-    use Ash.Resource, domain: Domain, data_layer: Ash.DataLayer.Ets, extensions: [ReactiveDag.Node]
-
-    ets do
-      private?(true)
-    end
-
-    attributes do
-      attribute :fund, :string, primary_key?: true, allow_nil?: false, public?: true
-      attribute :fy, :string, primary_key?: true, allow_nil?: false, public?: true
-      attribute :total, :float, public?: true
-      attribute :ordinal, :integer, public?: true
-    end
-
-    actions do
-      defaults [:read, :destroy]
-
-      create :upsert do
-        upsert?(true)
-        accept([:fund, :fy, :total, :ordinal])
-      end
-    end
-
-    reactive do
-      id(:rollups)
-      leaf?(true)
-      compare([:total])
-    end
-  end
-
-  # ── the realistic host shape, through the DSL ────────────────────────────
-  #
-  # THE CASE THE FEATURE EXISTS FOR. Extracted line items: the amount is the
-  # result; `doc_id` is provenance and `ordinal` is position in the source
-  # document. A re-parse that reorders the document moves every `ordinal`
-  # without changing a single amount.
-
-  defmodule ExtractedLine do
-    use Ash.Resource, domain: Domain, data_layer: Ash.DataLayer.Ets, extensions: [ReactiveDag.Node]
-
-    ets do
-      private?(true)
-    end
-
-    attributes do
-      attribute :id, :string, primary_key?: true, allow_nil?: false, public?: true
-      attribute :account, :string, public?: true
-      attribute :amount, :float, public?: true
-      attribute :doc_id, :string, public?: true
-      attribute :ordinal, :integer, public?: true
-    end
-
-    actions do
-      defaults [:read, :destroy]
-
-      create :upsert do
-        upsert?(true)
-        accept([:id, :account, :amount, :doc_id, :ordinal])
-      end
-    end
-
-    reactive do
-      id(:extracted_lines)
-      op(:source)
-      leaf?(true)
-    end
-  end
-
-  # the derived node: one row per account, folded from the extracted lines.
-  # Its `into` carries the provenance and position of the FIRST line it saw —
-  # part of the record, useless as a change signal.
-  defmodule AccountTotal do
-    use Ash.Resource, domain: Domain, data_layer: Ash.DataLayer.Ets, extensions: [ReactiveDag.Node]
-
-    ets do
-      private?(true)
-    end
-
-    attributes do
-      attribute :key, :string, primary_key?: true, allow_nil?: false, public?: true
-      attribute :account, :string, public?: true
-      attribute :total, :float, public?: true
-      attribute :doc_id, :string, public?: true
-      attribute :ordinal, :integer, public?: true
-    end
-
-    identities do
-      identity :by_key, [:key], pre_check_with: ReactiveDag.CompareFieldsTest.Domain
-    end
-
-    actions do
-      defaults [:read, :destroy]
-
-      create :upsert do
-        upsert?(true)
-        upsert_identity(:by_key)
-        accept([:key, :account, :total, :doc_id, :ordinal])
-      end
-    end
-
-    reactive do
-      id(:account_totals)
-      op(:fold)
-      key_rule(:all)
-
-      # `account` and `total` ARE the answer; doc_id/ordinal are the record.
-      compare([:account, :total])
-
-      reduce over: :extracted_lines,
-             group_by: &ReactiveDag.CompareFieldsTest.group/1,
-             key: &ReactiveDag.CompareFieldsTest.key/1,
-             into: &ReactiveDag.CompareFieldsTest.into/2
-    end
-  end
-
-  # the same fold with no `compare` — the regression guard's DSL twin: a
-  # reorder DOES propagate here, which is the behaviour being fixed.
-  defmodule AccountTotalWide do
-    use Ash.Resource, domain: Domain, data_layer: Ash.DataLayer.Ets, extensions: [ReactiveDag.Node]
-
-    ets do
-      private?(true)
-    end
-
-    attributes do
-      attribute :key, :string, primary_key?: true, allow_nil?: false, public?: true
-      attribute :account, :string, public?: true
-      attribute :total, :float, public?: true
-      attribute :doc_id, :string, public?: true
-      attribute :ordinal, :integer, public?: true
-    end
-
-    identities do
-      identity :by_key, [:key], pre_check_with: ReactiveDag.CompareFieldsTest.Domain
-    end
-
-    actions do
-      defaults [:read, :destroy]
-
-      create :upsert do
-        upsert?(true)
-        upsert_identity(:by_key)
-        accept([:key, :account, :total, :doc_id, :ordinal])
-      end
-    end
-
-    reactive do
-      id(:account_totals_wide)
-      op(:fold)
-      key_rule(:all)
-
-      reduce over: :extracted_lines,
-             group_by: &ReactiveDag.CompareFieldsTest.group/1,
-             key: &ReactiveDag.CompareFieldsTest.key/1,
-             into: &ReactiveDag.CompareFieldsTest.into/2
-    end
-  end
-
-  def group(line), do: line.account
-  def key(account), do: account
-
-  def into(account, lines) do
-    first = Enum.min_by(lines, & &1.ordinal)
-
-    %{
-      key: account,
-      account: account,
-      total: lines |> Enum.map(& &1.amount) |> Enum.sum(),
-      doc_id: first.doc_id,
-      ordinal: first.ordinal
-    }
-  end
-
-  # ── an AGGREGATE node: the third threading site ──────────────────────────
-  #
-  # `Recompute.Aggregate` writes through its own `lapse_opts/1`, a different
-  # line from the reduce/join path's.
-  #
-  # Note what it takes to make `compare` load-bearing here. The aggregate's
-  # `project/3` builds the payload from the key column plus each aggregate's
-  # `dest` and NOTHING else — a column merely sitting on the resource never
-  # reaches `attrs`, so narrowing past it would be a no-op. The narrowing only
-  # bites when the node declares TWO aggregates and only one is the result:
-  # `avg_flow` is the answer, `reading_count` is bookkeeping about the source
-  # (how many rows the parse happened to emit), and a re-parse that splits one
-  # reading into two without moving the average must not propagate.
-  defmodule Reading do
-    use Ash.Resource, domain: Domain, data_layer: Ash.DataLayer.Ets
-
-    ets do
-      private?(true)
-    end
-
-    attributes do
-      attribute :id, :string, primary_key?: true, allow_nil?: false, public?: true
-      attribute :pm_key, :string, public?: true
-      attribute :flow, :float, public?: true
-    end
-
-    actions do
-      defaults [:read, :destroy]
-      create :create do accept([:id, :pm_key, :flow]) end
-    end
-  end
-
-  defmodule PlantMonth do
-    use Ash.Resource, domain: Domain, data_layer: Ash.DataLayer.Ets, extensions: [ReactiveDag.Node]
-
-    ets do
-      private?(true)
-    end
-
-    attributes do
-      attribute :key, :string, primary_key?: true, allow_nil?: false, public?: true
-      attribute :avg_flow, :float, public?: true
-      # bookkeeping: how many rows the source happened to emit
-      attribute :reading_count, :integer, public?: true
-    end
-
-    identities do
-      identity :by_key, [:key], pre_check_with: ReactiveDag.CompareFieldsTest.Domain
-    end
-
-    relationships do
-      has_many :readings, ReactiveDag.CompareFieldsTest.Reading do
-        source_attribute :key
-        destination_attribute :pm_key
-      end
-    end
-
-    actions do
-      defaults [:read, :destroy]
-      create :seed do accept([:key]) end
-
-      create :upsert do
-        upsert?(true)
-        upsert_identity(:by_key)
-        accept([:key, :avg_flow, :reading_count])
-      end
-    end
-
-    reactive do
-      id(:plant_months)
-      op(:fold)
-      key_rule(:all)
-      compare([:avg_flow])
-
-      aggregate over: :readings, avg: [flow: :avg_flow], count: :reading_count
-    end
-  end
-
-  # the same aggregate with NO `compare` — the count moving DOES propagate here
-  defmodule PlantMonthWide do
-    use Ash.Resource, domain: Domain, data_layer: Ash.DataLayer.Ets, extensions: [ReactiveDag.Node]
-
-    ets do
-      private?(true)
-    end
-
-    attributes do
-      attribute :key, :string, primary_key?: true, allow_nil?: false, public?: true
-      attribute :avg_flow, :float, public?: true
-      attribute :reading_count, :integer, public?: true
-    end
-
-    identities do
-      identity :by_key, [:key], pre_check_with: ReactiveDag.CompareFieldsTest.Domain
-    end
-
-    relationships do
-      has_many :readings, ReactiveDag.CompareFieldsTest.Reading do
-        source_attribute :key
-        destination_attribute :pm_key
-      end
-    end
-
-    actions do
-      defaults [:read, :destroy]
-      create :seed do accept([:key]) end
-
-      create :upsert do
-        upsert?(true)
-        upsert_identity(:by_key)
-        accept([:key, :avg_flow, :reading_count])
-      end
-    end
-
-    reactive do
-      id(:plant_months_wide)
-      op(:fold)
-      key_rule(:all)
-
-      aggregate over: :readings, avg: [flow: :avg_flow], count: :reading_count
-    end
+  setup_all do
+    migrate!(CompareGraph.Domain)
+    :ok
   end
 
   setup do
+    pid = Ecto.Adapters.SQL.Sandbox.start_owner!(ReactiveDag.TestRepo, shared: true)
+    on_exit(fn -> Ecto.Adapters.SQL.Sandbox.stop_owner(pid) end)
+
     for r <- [
           Narrowed,
           Everything,
@@ -838,7 +449,10 @@ defmodule ReactiveDag.CompareFieldsTest do
   describe "the verifier" do
     test "`compare []` is refused — a node that can never report a change" do
       defmodule ComparesNothing do
-        use Ash.Resource, domain: ReactiveDag.CompareFieldsTest.Domain, data_layer: Ash.DataLayer.Ets, extensions: [ReactiveDag.Node]
+        use Ash.Resource,
+          domain: ReactiveDag.CompareFieldsTest.Domain,
+          data_layer: Ash.DataLayer.Ets,
+          extensions: [ReactiveDag.Node]
 
         ets do
           private?(true)
@@ -871,7 +485,10 @@ defmodule ReactiveDag.CompareFieldsTest do
 
     test "a name that is not an attribute is refused, and the message names it" do
       defmodule ComparesGhost do
-        use Ash.Resource, domain: ReactiveDag.CompareFieldsTest.Domain, data_layer: Ash.DataLayer.Ets, extensions: [ReactiveDag.Node]
+        use Ash.Resource,
+          domain: ReactiveDag.CompareFieldsTest.Domain,
+          data_layer: Ash.DataLayer.Ets,
+          extensions: [ReactiveDag.Node]
 
         ets do
           private?(true)
