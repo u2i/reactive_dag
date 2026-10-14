@@ -135,7 +135,7 @@ defmodule ReactiveDag.Node.Changes.MarkDirty do
       &ReactiveDag.CascadeWorker.enqueue/3
   end
 
-  defp originate(record, _prior, opts, tenant, actor, changeset) do
+  defp originate(record, _prior, opts, tenant, actor, _changeset) do
     cell = Keyword.fetch!(opts, :cell)
 
     # The tenant off the CHANGESET, which is where a tenanted write already put
@@ -152,12 +152,13 @@ defmodule ReactiveDag.Node.Changes.MarkDirty do
           {["*"], %{}}
 
         key ->
-          # WHICH entity changed, and a reference to WHAT the change did. The
-          # version holds the diff; the cascade carries only the reference, and
-          # resolves it when a consumer needs to narrow.
-          case version_id(opts[:version_id], record, changeset) do
+          # WHICH entity changed, and WHEN. A consumer that needs to narrow
+          # reads the row as of that instant and diffs it against now — so the
+          # cascade carries a timestamp rather than a reference to a stored
+          # diff, and there is nothing to resolve or to fail.
+          case recorded_at(record) do
             nil -> {[key], %{}}
-            vid -> {[key], %{key => vid}}
+            at -> {[key], %{key => at}}
           end
       end
 
@@ -168,28 +169,22 @@ defmodule ReactiveDag.Node.Changes.MarkDirty do
     )
   end
 
-  # The id of the version recording this change, from the host's own resolver.
-  # Nil when the node declares none — the mark then carries the diff only, which
-  # is all propagation needs; what is missing is the durable record.
+  # WHEN this change was recorded, off the row the write just produced.
   #
-  # A raise here would fail the host's WRITE over a bookkeeping lookup, so a
-  # resolver that blows up costs the record and nothing else. Logged, because a
-  # silently absent version is exactly the thing an audit trail cannot afford.
-  defp version_id(nil, _record, _changeset), do: nil
-
-  defp version_id(resolver, record, changeset) do
-    case resolver do
-      {m, f, a} -> apply(m, f, [record, changeset | a])
-      fun when is_function(fun, 2) -> fun.(record, changeset)
+  # Nil for a non-temporal resource, and the mark then carries its diff only —
+  # which is all propagation needs. What is missing is the ability to narrow a
+  # LATER claim, because there is no period to read back.
+  #
+  # No resolver, no host MFA, nothing to raise: the value is already on the
+  # record. That removes the failure the old `version_id` resolver had, where a
+  # blown-up lookup cost the durable record and said so only in a log line.
+  defp recorded_at(record) do
+    case Ash.Resource.Info.temporal_recorded_at(record.__struct__) do
+      nil -> nil
+      attr -> Map.get(record, attr)
     end
   rescue
-    e ->
-      Logger.warning(
-        "reactive_dag: version_id resolver failed (#{Exception.message(e)}); " <>
-          "the mark carries its diff but no durable record"
-      )
-
-      nil
+    _ -> nil
   end
 
   # Does this change need a human, given who made it?

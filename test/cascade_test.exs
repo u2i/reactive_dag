@@ -45,7 +45,7 @@ defmodule ReactiveDag.CascadeTest do
 
     def query!(
           "INSERT INTO " <> _,
-          [id, tenant, waiting, resource, row_uuid, version_id, reason, lap]
+          [id, tenant, waiting, resource, row_uuid, recorded_at, reason, lap]
         ) do
       Agent.update(__MODULE__, &[
         %{
@@ -54,7 +54,7 @@ defmodule ReactiveDag.CascadeTest do
           waiting: waiting,
           resource: resource,
           row_uuid: row_uuid,
-          version_id: version_id,
+          recorded_at: recorded_at,
           reason: reason,
           lap: lap
         }
@@ -337,7 +337,7 @@ defmodule ReactiveDag.CascadeTest do
 
       {:ok, _} = Cascade.run(plan, [%{cell: "leaf", keys: ["*"]}])
 
-      assert [%{row_uuid: "*", version_id: "*"}] = FakeRepo.recorded(),
+      assert [%{row_uuid: "*", recorded_at: nil}] = FakeRepo.recorded(),
              "not `something happened somewhere`, but `this could not be narrowed`"
     end
 
