@@ -27,482 +27,54 @@ defmodule ReactiveDag.LapseTest do
   "a spelling fix leaves the approval standing" below is that case, and it is
   the one an implementation is most likely to get wrong.
   """
-  use ExUnit.Case, async: false
+  use ReactiveDag.PostgresCase
+
+  alias ReactiveDag.Fixtures.LapseGraph
+
+  alias ReactiveDag.Fixtures.LapseGraph.{
+    Correction,
+    FundLines,
+    FundRollups,
+    FySignOff,
+    LapsesAny,
+    LapsesChildren,
+    LapsesNarrow,
+    Lines,
+    Survives
+  }
 
   alias ReactiveDag.{Cascade}
 
-  defmodule Domain do
-    use Ash.Domain, validate_config_inclusion?: false
-
-    resources do
-      allow_unregistered?(true)
-    end
-  end
-
   # ── the input ───────────────────────────────────────────────────────────────
-
-  defmodule Lines do
-    use Ash.Resource,
-      domain: Domain,
-      data_layer: Ash.DataLayer.Ets,
-      extensions: [ReactiveDag.Node]
-
-    ets do
-    end
-
-    attributes do
-      attribute :key, :string, primary_key?: true, allow_nil?: false, public?: true
-      attribute :fy, :string, public?: true
-      attribute :amount, :float, public?: true
-      attribute :label, :string, public?: true
-    end
-
-    actions do
-      defaults [:read, :destroy]
-
-      create :create do
-        accept([:key, :fy, :amount, :label])
-      end
-
-      update :revise do
-        accept([:amount])
-      end
-
-      update :relabel do
-        accept([:label])
-      end
-    end
-
-    reactive do
-      id(:lines)
-      op(:source)
-      leaf?(true)
-      dirties_on([:create, :update, :destroy])
-    end
-  end
 
   # ── SURVIVAL: no `lapse` declared ───────────────────────────────────────────
 
-  # The default. `:approved_at` is absent from `:upsert`'s accept list, so the
-  # payload write cannot touch it — and no declaration protects it.
-  defmodule Survives do
-    use Ash.Resource,
-      domain: Domain,
-      data_layer: Ash.DataLayer.Ets,
-      extensions: [ReactiveDag.Node]
-
-    ets do
-    end
-
-    attributes do
-      attribute :key, :string, primary_key?: true, allow_nil?: false, public?: true
-      attribute :fy, :string, public?: true
-      attribute :total, :float, public?: true
-      attribute :approved_at, :string, public?: true
-    end
-
-    identities do
-      identity :by_key, [:key], pre_check_with: ReactiveDag.LapseTest.Domain
-    end
-
-    actions do
-      defaults [:read, :destroy]
-
-      create :upsert do
-        upsert?(true)
-        upsert_identity(:by_key)
-        accept([:key, :fy, :total])
-      end
-
-      update :approve do
-        require_atomic? false
-        accept([:approved_at])
-      end
-    end
-
-    reactive do
-      id(:survives)
-      recompute_by(:fy, to: :lines, from: :fy)
-      reduce(into: [sum: [amount: :total]])
-    end
-  end
-
   # ── `when_changed: :any` ────────────────────────────────────────────────────
-
-  defmodule LapsesAny do
-    use Ash.Resource,
-      domain: Domain,
-      data_layer: Ash.DataLayer.Ets,
-      extensions: [ReactiveDag.Node]
-
-    ets do
-    end
-
-    attributes do
-      attribute :key, :string, primary_key?: true, allow_nil?: false, public?: true
-      attribute :fy, :string, public?: true
-      attribute :total, :float, public?: true
-      attribute :approved_at, :string, public?: true
-    end
-
-    identities do
-      identity :by_key, [:key], pre_check_with: ReactiveDag.LapseTest.Domain
-    end
-
-    actions do
-      defaults [:read, :destroy]
-
-      create :upsert do
-        upsert?(true)
-        upsert_identity(:by_key)
-        accept([:key, :fy, :total])
-      end
-
-      update :approve do
-        require_atomic? false
-        accept([:approved_at])
-      end
-
-      # the lapse's own write — deliberately NOT the payload action
-      update :lapse do
-        require_atomic? false
-        accept([:approved_at])
-      end
-    end
-
-    reactive do
-      id(:lapses_any)
-      recompute_by(:fy, to: :lines, from: :fy)
-      reduce(into: [sum: [amount: :total]])
-
-      lapse(:approved_at, when_changed: :any)
-    end
-  end
 
   # ── `when_changed: [fields]` — the narrow form ──────────────────────────────
 
-  # `:total` is watched, `:label` is not. A relabel moves `:label` (so the
-  # recompute is `:changed` and propagates) while `:total` sits still — and the
-  # sign-off must survive that.
-  defmodule LapsesNarrow do
-    use Ash.Resource,
-      domain: Domain,
-      data_layer: Ash.DataLayer.Ets,
-      extensions: [ReactiveDag.Node]
-
-    ets do
-    end
-
-    attributes do
-      attribute :key, :string, primary_key?: true, allow_nil?: false, public?: true
-      attribute :fy, :string, public?: true
-      attribute :total, :float, public?: true
-      attribute :label, :string, public?: true
-      attribute :signed_off_by, :string, public?: true
-    end
-
-    identities do
-      identity :by_key, [:key], pre_check_with: ReactiveDag.LapseTest.Domain
-    end
-
-    actions do
-      defaults [:read, :destroy]
-
-      create :upsert do
-        upsert?(true)
-        upsert_identity(:by_key)
-        accept([:key, :fy, :total, :label])
-      end
-
-      update :sign_off do
-        require_atomic? false
-        accept([:signed_off_by])
-      end
-
-      update :lapse do
-        require_atomic? false
-        accept([:signed_off_by])
-      end
-    end
-
-    reactive do
-      id(:lapses_narrow)
-      recompute_by(:fy, to: :lines, from: :fy)
-
-      reduce(
-        group_by: [fy: :fy],
-        into: fn {fy}, items ->
-          %{
-            fy: fy,
-            total: items |> Enum.map(& &1.amount) |> Enum.sum(),
-            # the cosmetic column: moves on a relabel, and is NOT watched
-            label: items |> Enum.map(& &1.label) |> Enum.sort() |> Enum.join(",")
-          }
-        end
-      )
-
-      lapse(:signed_off_by, when_changed: [:total])
-    end
-  end
-
   # ── child rows ──────────────────────────────────────────────────────────────
-
-  defmodule Correction do
-    use Ash.Resource, domain: Domain, data_layer: Ash.DataLayer.Ets
-
-    ets do
-    end
-
-    attributes do
-      uuid_primary_key :id
-      attribute :fy, :string, public?: true
-      attribute :note, :string, public?: true
-    end
-
-    actions do
-      defaults [:read, :destroy]
-
-      create :create do
-        accept([:fy, :note])
-      end
-    end
-  end
-
-  defmodule LapsesChildren do
-    use Ash.Resource,
-      domain: Domain,
-      data_layer: Ash.DataLayer.Ets,
-      extensions: [ReactiveDag.Node]
-
-    ets do
-    end
-
-    attributes do
-      attribute :key, :string, primary_key?: true, allow_nil?: false, public?: true
-      attribute :fy, :string, public?: true
-      attribute :total, :float, public?: true
-    end
-
-    identities do
-      identity :by_key, [:key], pre_check_with: ReactiveDag.LapseTest.Domain
-    end
-
-    actions do
-      defaults [:read, :destroy]
-
-      create :upsert do
-        upsert?(true)
-        upsert_identity(:by_key)
-        accept([:key, :fy, :total])
-      end
-    end
-
-    reactive do
-      id(:lapses_children)
-      recompute_by(:fy, to: :lines, from: :fy)
-      reduce(into: [sum: [amount: :total]])
-
-      lapse(ReactiveDag.LapseTest.Correction, key: :fy, when_changed: [:total])
-    end
-  end
 
   # ── composite primary key (identity-keyed) ──────────────────────────────────
 
-  defmodule FundLines do
-    use Ash.Resource,
-      domain: Domain,
-      data_layer: Ash.DataLayer.Ets,
-      extensions: [ReactiveDag.Node]
-
-    ets do
-    end
-
-    attributes do
-      attribute :key, :string, primary_key?: true, allow_nil?: false, public?: true
-      attribute :fund_code, :string, public?: true
-      attribute :fy, :string, public?: true
-      attribute :amount, :float, public?: true
-    end
-
-    actions do
-      defaults [:read, :destroy]
-
-      create :create do
-        accept([:key, :fund_code, :fy, :amount])
-      end
-
-      update :revise do
-        accept([:amount])
-      end
-    end
-
-    reactive do
-      id(:fund_lines)
-      op(:source)
-      leaf?(true)
-      dirties_on([:create, :update, :destroy])
-    end
-  end
-
-  # composite PK: the cell key is the identity serialization ("gf|2026")
-  defmodule FundRollups do
-    use Ash.Resource,
-      domain: Domain,
-      data_layer: Ash.DataLayer.Ets,
-      extensions: [ReactiveDag.Node]
-
-    ets do
-    end
-
-    attributes do
-      attribute :fund, :string, primary_key?: true, allow_nil?: false, public?: true
-      attribute :fy, :string, primary_key?: true, allow_nil?: false, public?: true
-      attribute :total, :float, public?: true
-      attribute :approved_at, :string, public?: true
-    end
-
-    actions do
-      defaults [:read, :destroy]
-
-      create :upsert do
-        upsert?(true)
-        accept([:fund, :fy, :total])
-      end
-
-      update :approve do
-        require_atomic? false
-        accept([:approved_at])
-      end
-
-      update :lapse do
-        require_atomic? false
-        accept([:approved_at])
-      end
-    end
-
-    reactive do
-      id(:fund_rollups)
-      recompute_by([fund: :fund_code, fy: :fy], to: :fund_lines)
-      reduce(into: [sum: [amount: :total]])
-
-      lapse(:approved_at, when_changed: [:total])
-    end
-  end
-
   # ── set-grain: one mark over a whole unit ───────────────────────────────────
 
-  # `expand:` fans one unit out to many rows, so the sign-off lives on each of
-  # them and every one must be cleared when any member moves.
-  defmodule FySignOff do
-    use Ash.Resource,
-      domain: Domain,
-      data_layer: Ash.DataLayer.Ets,
-      extensions: [ReactiveDag.Node]
-
-    ets do
-    end
-
-    attributes do
-      attribute :key, :string, primary_key?: true, allow_nil?: false, public?: true
-      attribute :fy, :string, public?: true
-      attribute :bucket, :string, public?: true
-      attribute :total, :float, public?: true
-      attribute :fy_approved_at, :string, public?: true
-    end
-
-    identities do
-      identity :by_key, [:key], pre_check_with: ReactiveDag.LapseTest.Domain
-    end
-
-    actions do
-      defaults [:read, :destroy]
-
-      create :upsert do
-        upsert?(true)
-        upsert_identity(:by_key)
-        accept([:key, :fy, :bucket, :total])
-      end
-
-      update :approve do
-        require_atomic? false
-        accept([:fy_approved_at])
-      end
-
-      update :lapse do
-        require_atomic? false
-        accept([:fy_approved_at])
-      end
-    end
-
-    reactive do
-      id(:fy_sign_off)
-      recompute_by(:fy, to: :lines, from: :fy)
-
-      # one unit -> many rows, each self-keyed "<fy>|<bucket>"
-      reduce(
-        group_by: [fy: :fy],
-        expand: fn {fy}, items ->
-          items
-          |> Enum.group_by(& &1.label)
-          |> Enum.map(fn {bucket, rows} ->
-            %{
-              key: "#{fy}|#{bucket}",
-              fy: fy,
-              bucket: bucket,
-              total: rows |> Enum.map(& &1.amount) |> Enum.sum()
-            }
-          end)
-        end
-      )
-
-      lapse(:fy_approved_at, when_changed: :any, over: :fy)
-    end
-  end
-
   # ── the fake frontier repo (same shape as dirties_on_test) ──────────────────
-
-  defmodule FakeRepo do
-    def start_link, do: Agent.start_link(fn -> %{} end, name: __MODULE__)
-
-    def query!("INSERT INTO " <> _, params) do
-      params
-      |> Enum.chunk_every(7)
-      |> Enum.each(fn [cell, _tenant, key, _r, _t, _held, vid] ->
-        Agent.update(__MODULE__, fn m -> Map.put_new(m, {cell, key}, vid) end)
-      end)
-
-      %{rows: []}
-    end
-
-    def query!("SELECT DISTINCT cell_id" <> _, _params) do
-      ids = Agent.get(__MODULE__, & &1) |> Map.keys() |> Enum.map(&elem(&1, 0)) |> Enum.uniq()
-      %{rows: Enum.map(ids, &[&1])}
-    end
-
-    def query!("DELETE FROM " <> _, [cell | _tenant]) do
-      rows =
-        Agent.get_and_update(__MODULE__, fn m ->
-          {mine, rest} = Enum.split_with(m, fn {{c, _}, _} -> c == cell end)
-          {Enum.map(mine, fn {{_c, k}, vid} -> [k, vid] end), Map.new(rest)}
-        end)
-
-      %{rows: rows}
-    end
-
-    def query!("SELECT COUNT" <> _, _params), do: %{rows: [[Agent.get(__MODULE__, &map_size/1)]]}
-    def query!("SELECT pg_try_advisory_lock" <> _, _params), do: %{rows: [[true]]}
-    def query!("SELECT pg_advisory_unlock" <> _, _params), do: %{rows: [[true]]}
-  end
 
   @cells ~w(lines survives lapses_any lapses_narrow lapses_children fund_lines
             fund_rollups fy_sign_off)
 
-  setup do
-    start_supervised!(%{id: FakeRepo, start: {FakeRepo, :start_link, []}})
-    prev_repo = Application.get_env(:reactive_dag, :repo)
-    Application.put_env(:reactive_dag, :repo, FakeRepo)
+  setup_all do
+    migrate!(LapseGraph.Domain)
+    :ok
+  end
 
-    on_exit(fn -> Application.put_env(:reactive_dag, :repo, prev_repo) end)
+  setup do
+    pid = Ecto.Adapters.SQL.Sandbox.start_owner!(ReactiveDag.TestRepo, shared: true)
+    on_exit(fn -> Ecto.Adapters.SQL.Sandbox.stop_owner(pid) end)
+
+    migrate_library_tables!()
+    truncate(LapseGraph.tables())
 
     # Every `Ash.create!`/`destroy!` below goes through a `dirties_on` resource,
     # and originating is now ENQUEUING — so without a capture seam each write
@@ -973,7 +545,7 @@ defmodule ReactiveDag.LapseTest do
     test "`over:` naming a unit `recompute_by` does not declare is refused at compile time" do
       defmodule BadOver do
         use Ash.Resource,
-          domain: ReactiveDag.LapseTest.Domain,
+          domain: ReactiveDag.Fixtures.LapseGraph.Domain,
           data_layer: Ash.DataLayer.Ets,
           extensions: [ReactiveDag.Node]
 
@@ -1022,7 +594,7 @@ defmodule ReactiveDag.LapseTest do
 
     test "a child resource with no destroy action raises at assembly" do
       defmodule Undestroyable do
-        use Ash.Resource, domain: ReactiveDag.LapseTest.Domain, data_layer: Ash.DataLayer.Ets
+        use Ash.Resource, domain: ReactiveDag.Fixtures.LapseGraph.Domain, data_layer: Ash.DataLayer.Ets
 
         ets do
         end
@@ -1043,7 +615,7 @@ defmodule ReactiveDag.LapseTest do
 
       defmodule BadChild do
         use Ash.Resource,
-          domain: ReactiveDag.LapseTest.Domain,
+          domain: ReactiveDag.Fixtures.LapseGraph.Domain,
           data_layer: Ash.DataLayer.Ets,
           extensions: [ReactiveDag.Node]
 
@@ -1070,7 +642,7 @@ defmodule ReactiveDag.LapseTest do
           recompute_by(:fy, to: :lines, from: :fy)
           reduce(into: [sum: [amount: :total]])
 
-          lapse(ReactiveDag.LapseTest.Undestroyable, key: :fy, when_changed: :any)
+          lapse(Undestroyable, key: :fy, when_changed: :any)
         end
       end
 
@@ -1085,7 +657,7 @@ defmodule ReactiveDag.LapseTest do
     test "`lapse` on an attribute that doesn't exist raises at assembly" do
       defmodule BadAttr do
         use Ash.Resource,
-          domain: ReactiveDag.LapseTest.Domain,
+          domain: ReactiveDag.Fixtures.LapseGraph.Domain,
           data_layer: Ash.DataLayer.Ets,
           extensions: [ReactiveDag.Node]
 
@@ -1128,7 +700,7 @@ defmodule ReactiveDag.LapseTest do
     test "a lapse action that does not accept the column raises at assembly" do
       defmodule UnacceptingLapse do
         use Ash.Resource,
-          domain: ReactiveDag.LapseTest.Domain,
+          domain: ReactiveDag.Fixtures.LapseGraph.Domain,
           data_layer: Ash.DataLayer.Ets,
           extensions: [ReactiveDag.Node]
 
@@ -1177,7 +749,7 @@ defmodule ReactiveDag.LapseTest do
     test "`when_changed:` naming a field the payload never carries raises at assembly" do
       defmodule BadWatch do
         use Ash.Resource,
-          domain: ReactiveDag.LapseTest.Domain,
+          domain: ReactiveDag.Fixtures.LapseGraph.Domain,
           data_layer: Ash.DataLayer.Ets,
           extensions: [ReactiveDag.Node]
 

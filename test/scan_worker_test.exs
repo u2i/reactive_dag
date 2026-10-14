@@ -11,179 +11,32 @@ defmodule ReactiveDag.ScanWorkerTest do
   thin, so a host that needs its own audit or run-id bookkeeping wraps it by
   calling the same two functions rather than extending a framework.
   """
-  use ExUnit.Case, async: false
+  use ReactiveDag.PostgresCase
+
+  alias ReactiveDag.Fixtures.ScanWorkerGraph
+  alias ReactiveDag.Fixtures.ScanWorkerGraph.{Crawler, Docs, Notices, Totals}
 
   alias ReactiveDag.{Cascade, Source}
 
-  defmodule Domain do
-    use Ash.Domain, validate_config_inclusion?: false
-
-    resources do
-      allow_unregistered?(true)
-    end
-  end
-
-  defmodule Crawler do
-    @behaviour Source
-
-    def start_link, do: Agent.start_link(fn -> %{polls: [], result: nil} end, name: __MODULE__)
-    def polls, do: Agent.get(__MODULE__, & &1.polls) |> Enum.reverse()
-    def returns(result), do: Agent.update(__MODULE__, &%{&1 | result: result})
-
-    def raises, do: Agent.update(__MODULE__, &%{&1 | result: :raise})
-
-    @impl true
-    def id, do: :crawler
-    @impl true
-    def leaf_cells(_g), do: ["docs", "notices"]
-    @impl true
-    def poll(opts) do
-      Agent.update(__MODULE__, &%{&1 | polls: [opts | &1.polls]})
-
-      case Agent.get(__MODULE__, & &1.result) do
-        :raise -> raise "upstream is down"
-        # a scanner reporting it CANNOT scan, rather than a poll that found
-        # nothing — the distinction #122 is about
-        {:error, _} = error -> error
-        result -> {:ok, result || %{changed: []}}
-      end
-    end
-  end
-
-  defmodule Docs do
-    use Ash.Resource,
-      domain: Domain,
-      data_layer: Ash.DataLayer.Ets,
-      extensions: [ReactiveDag.Node]
-
-    ets do
-    end
-
-    attributes do
-      attribute(:key, :string, primary_key?: true, allow_nil?: false, public?: true)
-      attribute(:category, :string, public?: true)
-    end
-
-    actions do
-      defaults([:read, :destroy])
-      create(:upsert, upsert?: true, accept: [:key, :category])
-    end
-
-    reactive do
-      id(:docs)
-      leaf?(true)
-      poll(ReactiveDag.ScanWorkerTest.Crawler, args: [recent: true], every: "0 * * * *")
-    end
-  end
-
-  # A SECOND leaf fed by the same scanner — one crawl of one upstream that lands
-  # rows in two places. This is the shape a host means by "one poll is one unit
-  # of work": the source is the unit, and the cells are where its output goes.
-  defmodule Notices do
-    use Ash.Resource,
-      domain: Domain,
-      data_layer: Ash.DataLayer.Ets,
-      extensions: [ReactiveDag.Node]
-
-    ets do
-    end
-
-    attributes do
-      attribute(:key, :string, primary_key?: true, allow_nil?: false, public?: true)
-      attribute(:category, :string, public?: true)
-    end
-
-    actions do
-      defaults([:read, :destroy])
-      create(:upsert, upsert?: true, accept: [:key, :category])
-    end
-
-    reactive do
-      id(:notices)
-
-      # a CONSUMER of the crawl, not a second declaration of it. One scanner is
-      # one node now; two nodes naming the same module means the upstream is
-      # polled twice, and `verify_one_node_per_source!/1` rejects it.
-      reduce(
-        over: :docs,
-        group_by: :key,
-        expand: fn key, rows ->
-          for r <- rows, r.category == "notice", do: %{key: key, category: r.category}
-        end
-      )
-    end
-  end
-
-  defmodule Totals do
-    use Ash.Resource,
-      domain: Domain,
-      data_layer: Ash.DataLayer.Ets,
-      extensions: [ReactiveDag.Node]
-
-    ets do
-    end
-
-    attributes do
-      attribute(:key, :string, primary_key?: true, allow_nil?: false, public?: true)
-      attribute(:category, :string, public?: true)
-      attribute(:n, :integer, public?: true)
-    end
-
-    actions do
-      defaults([:read, :destroy])
-      create(:upsert, upsert?: true, accept: [:key, :category, :n])
-    end
-
-    reactive do
-      id(:totals)
-      recompute_by(:category, to: :docs, from: :category)
-      reduce(group_by: :category, into: [count: :n])
-    end
-  end
-
-  defmodule FakeRepo do
-    def start_link, do: Agent.start_link(fn -> MapSet.new() end, name: __MODULE__)
-    def marks, do: Agent.get(__MODULE__, &MapSet.to_list/1) |> Enum.sort()
-
-    def query!("INSERT INTO " <> _, p) do
-      p
-      |> Enum.chunk_every(7)
-      |> Enum.each(fn [c, _tenant, k, r, _, _held, _vid] -> Agent.update(__MODULE__, &MapSet.put(&1, {c, k, r})) end)
-
-      %{rows: []}
-    end
-
-    def query!("SELECT DISTINCT cell_id" <> _, _),
-      do: %{rows: Agent.get(__MODULE__, & &1) |> Enum.map(&[elem(&1, 0)]) |> Enum.uniq()}
-
-    def query!("DELETE FROM " <> _, [cell | _tenant]) do
-      c =
-        Agent.get_and_update(__MODULE__, fn s ->
-          {m, r} = Enum.split_with(s, fn {x, _, _} -> x == cell end)
-          {m, MapSet.new(r)}
-        end)
-
-      %{rows: Enum.map(c, fn {_, k, _} -> [k, nil] end)}
-    end
-
-    def query!("SELECT COUNT" <> _, _), do: %{rows: [[Agent.get(__MODULE__, &MapSet.size/1)]]}
-
-    # the sweep takes a cluster-wide advisory lock; granted in tests
-    def query!("SELECT pg_try_advisory_lock" <> _, _), do: %{rows: [[true]]}
-    def query!("SELECT pg_advisory_unlock" <> _, _), do: %{rows: [[true]]}
+  setup_all do
+    migrate!(ScanWorkerGraph.Domain)
+    :ok
   end
 
   setup do
+    pid = Ecto.Adapters.SQL.Sandbox.start_owner!(ReactiveDag.TestRepo, shared: true)
+    on_exit(fn -> Ecto.Adapters.SQL.Sandbox.stop_owner(pid) end)
+
+    migrate_library_tables!()
+    truncate(ScanWorkerGraph.tables())
     # A poll or a write now ENQUEUES a cascade rather than leaving a mark,
     # so without this the library reaches for Oban and these tests fail on
     # a missing instance rather than on anything they are about.
     ReactiveDag.Test.Pending.capture_enqueues()
 
     start_supervised!(%{id: Crawler, start: {Crawler, :start_link, []}})
-    start_supervised!(%{id: FakeRepo, start: {FakeRepo, :start_link, []}})
 
     prev = Application.get_env(:reactive_dag, :repo)
-    Application.put_env(:reactive_dag, :repo, FakeRepo)
     on_exit(fn -> Application.put_env(:reactive_dag, :repo, prev) end)
 
     for r <- [Docs, Notices, Totals], row <- Ash.read!(r), do: Ash.destroy!(row)
@@ -291,7 +144,10 @@ defmodule ReactiveDag.ScanWorkerTest do
 
       assert result.changed == []
       assert result.marked == %{}
-      assert FakeRepo.marks() == []
+
+      # A poll ENQUEUES rather than marking a table, so "marked nothing" is
+      # "enqueued nothing" — the same claim against the mechanism that exists.
+      assert ReactiveDag.Test.Pending.enqueued() == []
     end
 
     test "the leaf's declared args still apply, and the caller still wins" do
