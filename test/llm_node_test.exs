@@ -15,7 +15,10 @@ defmodule ReactiveDag.LlmNodeTest do
   Whatever friction shows up here is the requirements list for a first-class
   `llm` rung; see the guide section this test backs.
   """
-  use ExUnit.Case, async: false
+  use ReactiveDag.PostgresCase
+
+  alias ReactiveDag.Fixtures.LlmGraph
+  alias ReactiveDag.Fixtures.LlmGraph.{Events, People, Sentiment, Transcripts}
 
   alias ReactiveDag.{Cascade}
 
@@ -39,188 +42,23 @@ defmodule ReactiveDag.LlmNodeTest do
     end
   end
 
-  defmodule Domain do
-    use Ash.Domain, validate_config_inclusion?: false
-
-    resources do
-      allow_unregistered?(true)
-    end
+  setup_all do
+    migrate!(LlmGraph.Domain)
+    :ok
   end
-
-  # the raw input the LLM reads
-  defmodule Transcripts do
-    use Ash.Resource,
-      domain: Domain,
-      data_layer: Ash.DataLayer.Ets,
-      extensions: [ReactiveDag.Node]
-
-    ets do
-      private?(true)
-    end
-
-    attributes do
-      attribute :key, :string, primary_key?: true, allow_nil?: false, public?: true
-      attribute :body, :string, public?: true
-    end
-
-    actions do
-      defaults [:read, :destroy]
-
-      create :create do
-        accept([:key, :body])
-      end
-    end
-
-    reactive do
-      id(:transcripts)
-      op(:source)
-      leaf?(true)
-    end
-  end
-
-  # settled context the prompt consults but is NOT re-triggered by
-  defmodule People do
-    use Ash.Resource,
-      domain: Domain,
-      data_layer: Ash.DataLayer.Ets,
-      extensions: [ReactiveDag.Node]
-
-    ets do
-      private?(true)
-    end
-
-    attributes do
-      attribute :key, :string, primary_key?: true, allow_nil?: false, public?: true
-      attribute :name, :string, public?: true
-    end
-
-    actions do
-      defaults [:read]
-
-      create :create do
-        accept([:key, :name])
-      end
-    end
-
-    reactive do
-      id(:people)
-      op(:source)
-      leaf?(true)
-    end
-  end
-
-  defmodule Events do
-    use Ash.Resource,
-      domain: Domain,
-      data_layer: Ash.DataLayer.Ets,
-      extensions: [ReactiveDag.Node]
-
-    ets do
-      private?(true)
-    end
-
-    attributes do
-      attribute :key, :string, primary_key?: true, allow_nil?: false, public?: true
-      attribute :summary, :string, public?: true
-    end
-
-    identities do
-      identity :by_key, [:key], pre_check_with: ReactiveDag.LlmNodeTest.Domain
-    end
-
-    actions do
-      defaults [:read, :destroy]
-
-      create :upsert do
-        upsert?(true)
-        upsert_identity(:by_key)
-        accept([:key, :summary])
-      end
-
-      # THE LLM ACTION: an ordinary ash_ai prompt-backed generic action. It
-      # returns the changed keys, which is `run`'s existing contract.
-      action :extract_events, {:array, :string} do
-        argument :keys, {:array, :string}, allow_nil?: true
-
-        run fn input, _ctx ->
-          keys =
-            input.arguments[:keys] ||
-              ReactiveDag.LlmNodeTest.Transcripts |> Ash.read!() |> Enum.map(& &1.key)
-
-          # the `context` edge's data: read as settled context, exactly as a
-          # host would when assembling prompt context
-          people =
-            ReactiveDag.LlmNodeTest.People
-            |> Ash.read!()
-            |> Enum.map_join(", ", & &1.name)
-
-          changed =
-            for key <- keys do
-              transcript = ReactiveDag.LlmNodeTest.Transcripts |> Ash.get!(key)
-
-              {:ok, %{object: object}} =
-                ReactiveDag.LlmNodeTest.FakeLLM.generate_object(
-                  "openai:gpt-4o",
-                  {"You summarise transcripts. Known people: #{people}", transcript.body},
-                  %{},
-                  []
-                )
-
-              ReactiveDag.LlmNodeTest.Events
-              |> Ash.Changeset.for_create(:upsert, %{key: key, summary: object["summary"]})
-              |> Ash.create!()
-
-              key
-            end
-
-          {:ok, changed}
-        end
-      end
-    end
-
-    reactive do
-      id(:events)
-      op(:extract)
-
-      # THE LLM RUNG, today: a generic action + the edges that feed it.
-      run(:extract_events)
-      ref(:transcripts)
-      context(:people)
-    end
-  end
-
-  defmodule FakeRepo do
-    def start_link, do: Agent.start_link(fn -> MapSet.new() end, name: __MODULE__)
-
-    def query!("INSERT INTO " <> _, params) do
-      params
-      |> Enum.chunk_every(7)
-      |> Enum.each(fn [cell, _tenant, key, _r, _t, _held, vid] -> Agent.update(__MODULE__, &MapSet.put(&1, {cell, key})) end)
-
-      %{rows: []}
-    end
-
-    def query!("SELECT DISTINCT cell_id" <> _, _params) do
-      ids = Agent.get(__MODULE__, & &1) |> Enum.map(&elem(&1, 0)) |> Enum.uniq()
-      %{rows: Enum.map(ids, &[&1])}
-    end
-
-    def query!("DELETE FROM " <> _, [cell | _tenant]) do
-      keys =
-        Agent.get_and_update(__MODULE__, fn set ->
-          {mine, rest} = Enum.split_with(set, fn {c, _} -> c == cell end)
-          {Enum.map(mine, &elem(&1, 1)), MapSet.new(rest)}
-        end)
-
-      %{rows: Enum.map(keys, &[&1, nil])}
-    end
-
-    def query!("SELECT COUNT" <> _, _params), do: %{rows: [[Agent.get(__MODULE__, &MapSet.size/1)]]}
-  end
-
 
   setup do
-    start_supervised!(%{id: FakeRepo, start: {FakeRepo, :start_link, []}})
+    pid = Ecto.Adapters.SQL.Sandbox.start_owner!(ReactiveDag.TestRepo, shared: true)
+    on_exit(fn -> Ecto.Adapters.SQL.Sandbox.stop_owner(pid) end)
+
+    migrate_library_tables!()
+    truncate(LlmGraph.tables())
+
+    # The fixture asks for its LLM rather than naming one, so point it here.
+    Application.put_env(:reactive_dag, :fixture_llm, FakeLLM)
+
+    on_exit(fn -> Application.delete_env(:reactive_dag, :fixture_llm) end)
+
     start_supervised!(%{id: FakeLLM, start: {FakeLLM, :start_link, []}})
     prev_repo = Application.get_env(:reactive_dag, :repo)
     Application.put_env(:reactive_dag, :repo, FakeRepo)
@@ -238,7 +76,7 @@ defmodule ReactiveDag.LlmNodeTest do
     :ok
   end
 
-  defp plan, do: ReactiveDag.Node.graph([Transcripts, People, Events])
+  defp plan, do: LlmGraph.plan()
 
   defp drain(plan),
     do: ReactiveDag.Test.Pending.cascade(plan)
@@ -307,66 +145,12 @@ defmodule ReactiveDag.LlmNodeTest do
     refute Map.has_key?(Map.new(report.steps, &{&1.cell, &1}), "events")
     assert length(FakeLLM.calls()) == before
   end
+
   # ── the REAL thing: an actual ash_ai prompt/2 action ────────────────────────
   #
   # The tests above prove the `run` rung invokes a generic action. This proves
   # the specific claim in #30: an ash_ai PROMPT-BACKED action is such an action,
   # so it drops straight in. The model is swapped via `:req_llm`.
-
-  defmodule StubReqLLM do
-    def start_link, do: Agent.start_link(fn -> [] end, name: __MODULE__)
-    def contexts, do: Agent.get(__MODULE__, &Enum.reverse/1)
-
-    def generate_object(_model, context, _schema, _opts) do
-      Agent.update(__MODULE__, &[inspect(context, limit: :infinity), &1] |> then(fn [h, t] -> [h | t] end))
-      {:ok, %{object: %{"sentiment" => "positive"}}}
-    end
-  end
-
-  defmodule Sentiment do
-    use Ash.Resource,
-      domain: ReactiveDag.LlmNodeTest.Domain,
-      data_layer: Ash.DataLayer.Ets,
-      extensions: [ReactiveDag.Node]
-
-    require AshAi.Actions
-    import AshAi.Actions, only: [prompt: 2]
-
-    ets do
-      private?(true)
-    end
-
-    attributes do
-      attribute :key, :string, primary_key?: true, allow_nil?: false, public?: true
-      attribute :sentiment, :string, public?: true
-    end
-
-    actions do
-      defaults [:read]
-
-      create :upsert do
-        upsert?(true)
-        accept([:key, :sentiment])
-      end
-
-      # AN ORDINARY ash_ai PROMPT ACTION — nothing reactive_dag-specific
-      action :analyse, :map do
-        argument :text, :string, allow_nil?: false
-
-        run prompt("openai:gpt-4o",
-              prompt: {"You are a sentiment analyser", "Analyse: <%= @input.arguments.text %>"},
-              req_llm: ReactiveDag.LlmNodeTest.StubReqLLM
-            )
-      end
-    end
-
-    reactive do
-      id(:sentiment)
-      op(:analyse)
-      compute(ReactiveDag.LlmNodeTest.SentimentOp)
-      ref(:transcripts)
-    end
-  end
 
   # a thin Op that calls the prompt action per claimed key — the shape a
   # first-class `llm` rung would generate (see #30's "per-entry map").
@@ -377,19 +161,19 @@ defmodule ReactiveDag.LlmNodeTest do
     def recompute(_cell, keys) do
       keys =
         if keys == ["*"],
-          do: ReactiveDag.LlmNodeTest.Transcripts |> Ash.read!() |> Enum.map(& &1.key),
+          do: ReactiveDag.Fixtures.LlmGraph.Transcripts |> Ash.read!() |> Enum.map(& &1.key),
           else: keys
 
       changed =
         for key <- keys do
-          t = ReactiveDag.LlmNodeTest.Transcripts |> Ash.get!(key)
+          t = ReactiveDag.Fixtures.LlmGraph.Transcripts |> Ash.get!(key)
 
           {:ok, result} =
-            ReactiveDag.LlmNodeTest.Sentiment
+            ReactiveDag.Fixtures.LlmGraph.Sentiment
             |> Ash.ActionInput.for_action(:analyse, %{text: t.body})
             |> Ash.run_action()
 
-          ReactiveDag.LlmNodeTest.Sentiment
+          ReactiveDag.Fixtures.LlmGraph.Sentiment
           |> Ash.Changeset.for_create(:upsert, %{key: key, sentiment: result["sentiment"]})
           |> Ash.create!()
 
@@ -401,7 +185,7 @@ defmodule ReactiveDag.LlmNodeTest do
   end
 
   test "an ash_ai prompt/2 action drops straight in — the Step 0 claim, verified" do
-    start_supervised!(%{id: StubReqLLM, start: {StubReqLLM, :start_link, []}})
+    start_supervised!(%{id: ReactiveDag.Fixtures.StubReqLLM, start: {ReactiveDag.Fixtures.StubReqLLM, :start_link, []}})
 
     p = ReactiveDag.Node.graph([Transcripts, People, Sentiment])
     {:ok, changed} = ReactiveDag.Node.Recompute.recompute(p.cells["sentiment"], ["*"])
@@ -412,7 +196,7 @@ defmodule ReactiveDag.LlmNodeTest do
     assert rows == %{"t1" => "positive", "t2" => "positive"}
 
     # the prompt really was rendered by ash_ai (our EEx template reached the model)
-    assert Enum.any?(StubReqLLM.contexts(), &(&1 =~ "sentiment analyser"))
-    assert Enum.any?(StubReqLLM.contexts(), &(&1 =~ "first call"))
+    assert Enum.any?(ReactiveDag.Fixtures.StubReqLLM.contexts(), &(&1 =~ "sentiment analyser"))
+    assert Enum.any?(ReactiveDag.Fixtures.StubReqLLM.contexts(), &(&1 =~ "first call"))
   end
 end
