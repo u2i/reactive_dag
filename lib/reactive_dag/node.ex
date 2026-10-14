@@ -1346,43 +1346,6 @@ defmodule ReactiveDag.Node do
             "following from the answer rather than being a separate switch. Leave it false " <>
             "on a DERIVED node, where a row whose inputs are gone is stale, not archival."
       ],
-      version_diff: [
-        type: {:or, [:mfa, {:fun, 1}]},
-        required: false,
-        doc:
-          "how to read a version back — an MFA or `fn version_id -> changes end`, " <>
-            "returning the `:full_diff`-shaped map of what that change did " <>
-            "(`ReactiveDag.Node.Diff`).\n\n" <>
-            "A queue row references a version rather than copying it, so a CONSUMER " <>
-            "resolves it at claim time to learn which of its units the change touched. " <>
-            "Declared on the node whose rows are versioned — the same node as " <>
-            "`version_id`, which writes the reference this reads.\n\n" <>
-            "`ash_paper_trail`'s version resource holds it in `changes`, so " <>
-            "`version_diff {MyApp.Versions, :changes_for, []}` is the usual wiring. " <>
-            "Without it a claim cannot be narrowed from the change, and propagation " <>
-            "falls back to a whole-cell claim."
-      ],
-      version_id: [
-        type: {:or, [:mfa, {:fun, 2}]},
-        required: false,
-        doc:
-          "how to find the VERSION recording a change to this node's rows — an MFA " <>
-            "or `fn record, changeset -> id end`, called after the write and stored on " <>
-            "the mark.\n\n" <>
-            "A queue row says which entity changed; the version says what the change " <>
-            "WAS. The queue is consumed (`DELETE … RETURNING`), so an approved or " <>
-            "rejected change is only explicable afterwards if something durable holds " <>
-            "it — which is what the version is for.\n\n" <>
-            "The library cannot find it on its own: a version resource belongs to the " <>
-            "HOST, one per versioned resource, with whatever name and key type the host " <>
-            "chose. `ash_paper_trail` with `change_tracking_mode :full_diff` writes " <>
-            "exactly the shape `ReactiveDag.Node.Diff` reads, and " <>
-            "`primary_key_type :uuid_v7` makes its ids sortable — so " <>
-            "`version_id {MyApp.Versions, :latest_for, []}` is the usual wiring.\n\n" <>
-            "Omit it and the mark carries the diff only: propagation is unaffected " <>
-            "(the diff is what a claim is derived from), and there is simply no durable " <>
-            "record to look back at."
-      ],
       suspends: [
         type: {:or, [:boolean, :keyword_list]},
         required: false,
@@ -1397,7 +1360,8 @@ defmodule ReactiveDag.Node do
             "declared slow always suspends, even when its `fingerprint` would have " <>
             "made this particular recompute a cache hit: one code path, no " <>
             "timing-dependent behaviour, at the cost of an enqueue on the cheap case.\n\n" <>
-            "Requires `version_diff` here and `version_id` on every input, checked at " <>
+            "Requires every input to be TEMPORAL — a suspension records WHEN the " <>
+            "change happened, and resuming reads the row as of that instant. Checked at " <>
             "graph assembly. Without them a resumption cannot be narrowed to the rows " <>
             "that moved and recomputes the whole cell — expensive work over a whole " <>
             "table instead of a handful of rows, and silent.\n\n" <>
@@ -1508,12 +1472,13 @@ defmodule ReactiveDag.Node do
             "`approved_by via: :approval_id, resource: MyApp.Approval`.\n\n" <>
             "`via:` names the column on THIS node holding a reference; " <>
             "`resource:` names what it points at. That resource must carry a " <>
-            "`version_id` — the version its approval covered. The library reads those " <>
+            "`recorded_at` — when the content its approval covered was recorded. " <>
+            "The library reads those " <>
             "two columns and compares them, and reads nothing else: a scheme with two " <>
             "reviewers, a recorded reason, or an expiry is a different HOST resource, " <>
             "not a different option here.\n\n" <>
             "Whether a row is approved is DERIVED, never stored: " <>
-            "`approval.version_id == row.version_id`. A stored flag needs something to " <>
+            "`approval.recorded_at == row.recorded_at`. A stored flag needs something to " <>
             "clear it on every path that writes the row, and a path that forgets leaves " <>
             "a row reading as reviewed when nobody reviewed that content. An equality " <>
             "that stops holding cannot be forgotten.\n\n" <>
@@ -1774,13 +1739,13 @@ defmodule ReactiveDag.Node do
 
   # A node that suspends must be able to RESUME from the change that stopped it.
   #
-  # A suspension records `(resource, row_uuid, version_id)` — which row of what
+  # A suspension records `(resource, row_uuid, recorded_at)` — which row of what
   # moved. Resuming means reading that version, deriving the units it touched,
   # and recomputing only those. Two declarations make that possible, on
   # different nodes:
   #
-  #   * the SUSPENDING node needs `version_diff` — how to read a version back;
-  #   * each of its INPUTS needs `version_id` — how to record one when it writes.
+  #   * each of its INPUTS must be temporal — the period is what lets a
+  #     resumption read the row back as of the instant that stopped it.
   #
   # Neither is checkable by a Spark verifier, which sees one resource and cannot
   # know what feeds it. So it is checked here, at assembly, like the tenancy rule
@@ -1804,44 +1769,41 @@ defmodule ReactiveDag.Node do
   # is read but never propagates, so it can never be the change a suspension
   # names.
   defp verify_suspension_versions!(%ReactiveDag.Plan{} = plan) do
-    # A suspendable LEAF is exempt from the reader half, and only that half.
-    #
-    # `version_diff` says how to read back a version a suspension references,
-    # so a resumption can narrow to the rows that moved. A leaf has no inputs,
-    # so there is no upstream change to read: the thing that stopped IS the
-    # thing that changed, and its own key already names it exactly. Demanding a
-    # reader here asks for something with nothing to read.
+    # A suspendable LEAF is exempt, and for the same reason it always was: it
+    # has no inputs, so there is no upstream change to read back. The thing
+    # that stopped IS the thing that changed, and its own key names it exactly.
     #
     # This is the shape a gated source-fed leaf takes — a crawler's rows held
     # for review before anything downstream sees them — so it is a real case,
     # not a loophole.
     for {id, cell} <- plan.cells, suspends?(cell), not cell.leaf? do
-      unless cell.meta[:version_diff] do
-        raise ArgumentError,
-              "reactive_dag: cell #{inspect(id)} suspends, but declares no " <>
-                "`version_diff` — so a resumption has no way to read the change that " <>
-                "stopped it, and would recompute the whole cell every time. Declare " <>
-                "`version_diff {MyApp.Versions, :changes_for, []}` on #{inspect(id)}."
-      end
-
       context = cell.meta[:context_inputs] || []
 
       for input_id <- cell.inputs,
           to_string(input_id) not in context,
           input = plan.cells[input_id],
           input != nil,
-          is_nil(input.meta[:version_id]) do
+          resource = input.meta[:resource],
+          not is_nil(resource),
+          not temporal?(resource) do
         raise ArgumentError,
               "reactive_dag: cell #{inspect(id)} suspends, so its input " <>
-                "#{inspect(input_id)} must declare `version_id` — it is what records " <>
-                "WHICH ROW changed. Without it every suspension at #{inspect(id)} " <>
-                "carries no version and resumption recomputes the whole cell: the " <>
-                "expensive work you declared runs over the whole table instead of the " <>
-                "rows that moved, with no error to tell you."
+                "#{inspect(input_id)} must be TEMPORAL — a suspension records WHEN " <>
+                "the change happened, and resuming reads the row as of that instant " <>
+                "to learn which rows moved. Without a period there is nothing to read " <>
+                "back, and resumption recomputes the whole cell: the expensive work " <>
+                "you declared runs over the whole table instead of the rows that " <>
+                "moved, with no error to tell you.\n\n" <>
+                "Add a `temporal do ... end` block to #{inspect(resource)}."
       end
     end
 
     :ok
+  end
+
+  defp temporal?(resource) do
+    function_exported?(Ash.Resource.Info, :temporal?, 1) and
+      Ash.Resource.Info.temporal?(resource)
   end
 
   # A suspension names what stopped by RESOURCE, not by cell id — so a host
@@ -2879,12 +2841,10 @@ defmodule ReactiveDag.Node do
         # How a CONSUMER reads back the version a mark on this cell references.
         # On the cell whose rows are versioned, because the version table is its
         # resource's — the drain looks it up on the cell it propagates FROM.
-        version_diff: Ext.get_opt(resource, [:reactive], :version_diff, nil),
         # How this cell's OWN write records a version. Needed on the payload path
         # as well as `dirties_on`: a GRAPH-written row propagates to its parents,
         # and a propagated mark can only reference a change if the write that
         # caused it recorded one.
-        version_id: Ext.get_opt(resource, [:reactive], :version_id, nil),
         payload_update: Ext.get_opt(resource, [:reactive], :payload_update, nil),
         payload_key: payload_key(resource),
         # `false` when the node declared it has no key column. Distinct from nil,

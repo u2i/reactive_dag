@@ -57,7 +57,6 @@ defmodule ReactiveDag.SuspendsTest do
     reactive do
       id :versioned_leaf
       leaf? true
-      version_id {ReactiveDag.SuspendsTest, :version_for, []}
     end
   end
 
@@ -117,7 +116,6 @@ defmodule ReactiveDag.SuspendsTest do
       depends_on [:versioned_leaf]
       run :extract
       suspends true
-      version_diff {ReactiveDag.SuspendsTest, :changes_for, []}
     end
   end
 
@@ -182,7 +180,6 @@ defmodule ReactiveDag.SuspendsTest do
       depends_on [:bare_leaf]
       run :extract
       suspends true
-      version_diff {ReactiveDag.SuspendsTest, :changes_for, []}
     end
   end
 
@@ -215,7 +212,6 @@ defmodule ReactiveDag.SuspendsTest do
       depends_on [:versioned_leaf]
       run :summarise
       gated true
-      version_diff {ReactiveDag.SuspendsTest, :changes_for, []}
     end
   end
 

@@ -135,8 +135,6 @@ defmodule ReactiveDag.DirtiesOnTest do
       # A queue row references the version recording the change; the consumer
       # reads it back to learn WHAT moved. Both halves are the host's, because a
       # version resource is — `ash_paper_trail` is the usual supplier.
-      version_id({ReactiveDag.DirtiesOnTest.Versions, :record, []})
-      version_diff({ReactiveDag.DirtiesOnTest.Versions, :changes, []})
     end
   end
 

@@ -95,8 +95,6 @@ defmodule ReactiveDag.KeylessFoldTest do
       payload_key(:key)
       depends_on([:lines])
       compute(ReactiveDag.KeylessFoldTest.Project)
-      version_id({ReactiveDag.KeylessFoldTest.Versions, :record, []})
-      version_diff({ReactiveDag.KeylessFoldTest.Versions, :changes, []})
     end
   end
 
