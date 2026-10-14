@@ -7,97 +7,24 @@ defmodule ReactiveDag.IdentityKeysTest do
   relational-join spelling of the DAG edge. Nothing here invents key plumbing:
   the resource's identity IS the key.
   """
-  use ExUnit.Case, async: false
+  use ReactiveDag.PostgresCase
+
+  alias ReactiveDag.Fixtures.IdentityKeysGraph
+  alias ReactiveDag.Fixtures.IdentityKeysGraph.{Lines, Rollups}
 
   alias ReactiveDag.Node.Recompute
 
-  defmodule Domain do
-    use Ash.Domain, validate_config_inclusion?: false
-
-    resources do
-      allow_unregistered?(true)
-    end
-  end
-
-  defmodule Lines do
-    use Ash.Resource,
-      domain: Domain,
-      data_layer: Ash.DataLayer.Ets,
-      extensions: [ReactiveDag.Node]
-
-    ets do
-      private?(true)
-    end
-
-    attributes do
-      attribute :key, :string, primary_key?: true, allow_nil?: false, public?: true
-      # deliberately NOT named like the rollup's column — the pair maps it
-      attribute :fund_code, :string, public?: true
-      attribute :fy, :string, public?: true
-      attribute :amount, :float, public?: true
-    end
-
-    actions do
-      defaults [:read, :destroy]
-
-      create :create do
-        accept([:key, :fund_code, :fy, :amount])
-      end
-
-      update :revise do
-        accept([:amount])
-      end
-    end
-
-    reactive do
-      id(:lines)
-      op(:source)
-      leaf?(true)
-    end
-  end
-
-  # IDENTITY-KEYED: composite PK, no :key column, no payload_key — the row IS
-  # its identity; cell keys are "fund|fy".
-  defmodule Rollups do
-    use Ash.Resource,
-      domain: Domain,
-      data_layer: Ash.DataLayer.Ets,
-      extensions: [ReactiveDag.Node]
-
-    ets do
-      private?(true)
-    end
-
-    attributes do
-      attribute :fund, :string, primary_key?: true, allow_nil?: false, public?: true
-      attribute :fy, :string, primary_key?: true, allow_nil?: false, public?: true
-      attribute :total, :float, public?: true
-      attribute :n, :integer, public?: true
-    end
-
-    actions do
-      defaults [:read, :destroy]
-
-      create :upsert do
-        upsert?(true)
-        accept([:fund, :fy, :total, :n])
-      end
-    end
-
-    reactive do
-      id(:rollups)
-      op(:fold)
-
-      # THE COMPOSITE UNIT, stated once: the grain IS the grouping, so there
-      # is no `group_by:` to restate. Reads as
-      # "rollups.fund = lines.fund_code AND rollups.fy = lines.fy".
-      recompute_by([fund: :fund_code, fy: :fy], to: :lines)
-
-      reduce(into: [sum: [amount: :total], count: :n])
-    end
+  setup_all do
+    migrate!(IdentityKeysGraph.Domain)
+    :ok
   end
 
   setup do
+    pid = Ecto.Adapters.SQL.Sandbox.start_owner!(ReactiveDag.TestRepo, shared: true)
+    on_exit(fn -> Ecto.Adapters.SQL.Sandbox.stop_owner(pid) end)
+
+    truncate(IdentityKeysGraph.tables())
+
     for {k, fund, fy, amount} <- [
           {"l1", "gf", "2025", 10.0},
           {"l2", "gf", "2025", 5.0},
@@ -158,7 +85,7 @@ defmodule ReactiveDag.IdentityKeysTest do
 
     defmodule Uncovered do
       use Ash.Resource,
-        domain: ReactiveDag.IdentityKeysTest.Domain,
+        domain: ReactiveDag.Fixtures.IdentityKeysGraph.Domain,
         data_layer: Ash.DataLayer.Ets,
         extensions: [ReactiveDag.Node]
 

@@ -115,6 +115,25 @@ defmodule ReactiveDag.DeclarativeReduceTest do
 
   describe "assembly errors (graph/2 is where the over resource is known)" do
     test "a declarative read over a VERDICT node raises with guidance" do
+      defmodule SomeVerdict do
+        use Ash.Resource,
+          domain: ReactiveDag.Fixtures.DeclarativeReduceGraph.Domain,
+          data_layer: Ash.DataLayer.Simple,
+          extensions: [ReactiveDag.Node]
+
+        reactive do
+          id(:some_verdict)
+          op(:reconcile)
+          key_rule(:all)
+
+          reduce(
+            over: :fiscal_lines,
+            group_by: :key,
+            into: fn _k, _ -> %{status: "present"} end
+          )
+        end
+      end
+
       # INTENTIONALLY TABLELESS. `SomeVerdict` is the node under test: assembly
       # must refuse to read over a resource with no attributes, and the only way
       # to reach that check is a node that has none. It therefore also trips

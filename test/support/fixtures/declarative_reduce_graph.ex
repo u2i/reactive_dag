@@ -15,7 +15,6 @@ defmodule ReactiveDag.Fixtures.DeclarativeReduceGraph do
       resource ReactiveDag.Fixtures.DeclarativeReduceGraph.GfTotals
       resource ReactiveDag.Fixtures.DeclarativeReduceGraph.LineMarks
       resource ReactiveDag.Fixtures.DeclarativeReduceGraph.MixedRollup
-      resource ReactiveDag.Fixtures.DeclarativeReduceGraph.SomeVerdict
       resource ReactiveDag.Fixtures.DeclarativeReduceGraph.OverVerdict
     end
   end
@@ -234,25 +233,6 @@ defmodule ReactiveDag.Fixtures.DeclarativeReduceGraph do
         into: fn {_fund, _fy}, lines ->
           %{status: if(length(lines) > 1, do: "present", else: "thin")}
         end
-      )
-    end
-  end
-
-  defmodule SomeVerdict do
-    use Ash.Resource,
-      domain: ReactiveDag.Fixtures.DeclarativeReduceGraph.Domain,
-      data_layer: Ash.DataLayer.Simple,
-      extensions: [ReactiveDag.Node]
-
-    reactive do
-      id(:some_verdict)
-      op(:reconcile)
-      key_rule(:all)
-
-      reduce(
-        over: :fiscal_lines,
-        group_by: :key,
-        into: fn _k, _ -> %{status: "present"} end
       )
     end
   end

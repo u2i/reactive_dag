@@ -19,106 +19,23 @@ defmodule ReactiveDag.RowsAggregateTest do
   functions cost slightly MORE. The tests pin the contract; the win lives where
   the rows do.
   """
-  use ExUnit.Case, async: false
+  use ReactiveDag.PostgresCase
+
+  alias ReactiveDag.Fixtures.RowsAggregateGraph
+  alias ReactiveDag.Fixtures.RowsAggregateGraph.{Docs, Elsewhere, Rollup, Totals}
 
   alias ReactiveDag.Node.Rows
 
-  defmodule Domain do
-    use Ash.Domain, validate_config_inclusion?: false
-
-    resources do
-      allow_unregistered?(true)
-    end
-  end
-
-  defmodule Docs do
-    use Ash.Resource, domain: Domain, data_layer: Ash.DataLayer.Ets, extensions: [ReactiveDag.Node]
-
-    ets do
-    end
-
-    attributes do
-      attribute :key, :string, primary_key?: true, allow_nil?: false, public?: true
-      attribute :status, :string, public?: true
-      attribute :payload, :map, public?: true
-    end
-
-    actions do
-      defaults [:read, :destroy]
-
-      create :upsert do
-        upsert?(true)
-        accept([:key, :status, :payload])
-      end
-    end
-
-    reactive do
-      id(:docs)
-      leaf?(true)
-    end
-  end
-
-  # a rollup: no status column at all
-  defmodule Totals do
-    use Ash.Resource, domain: Domain, data_layer: Ash.DataLayer.Ets, extensions: [ReactiveDag.Node]
-
-    ets do
-    end
-
-    attributes do
-      attribute :key, :string, primary_key?: true, allow_nil?: false, public?: true
-      attribute :total, :float, public?: true
-    end
-
-    actions do
-      defaults [:read, :destroy]
-      create :upsert, upsert?: true, accept: [:key, :total]
-    end
-
-    reactive do
-      id(:totals)
-      leaf?(true)
-    end
-  end
-
-  # composite PK — its cell key is a "|"-join built in the BEAM, which is the
-  # one thing that cannot be pushed down
-  defmodule Rollup do
-    use Ash.Resource, domain: Domain, data_layer: Ash.DataLayer.Ets, extensions: [ReactiveDag.Node]
-
-    ets do
-    end
-
-    attributes do
-      attribute :fund, :string, primary_key?: true, allow_nil?: false, public?: true
-      attribute :fy, :string, primary_key?: true, allow_nil?: false, public?: true
-      attribute :status, :string, public?: true
-    end
-
-    actions do
-      defaults [:read, :destroy]
-      create :upsert, upsert?: true, accept: [:fund, :fy, :status]
-    end
-
-    reactive do
-      id(:rollup)
-      leaf?(true)
-    end
-  end
-
-  defmodule Elsewhere do
-    use Ash.Resource,
-      domain: Domain,
-      data_layer: Ash.DataLayer.Simple,
-      extensions: [ReactiveDag.Node]
-
-    reactive do
-      id(:elsewhere)
-      leaf?(true)
-    end
+  setup_all do
+    migrate!(RowsAggregateGraph.Domain)
+    :ok
   end
 
   setup do
+    pid = Ecto.Adapters.SQL.Sandbox.start_owner!(ReactiveDag.TestRepo, shared: true)
+    on_exit(fn -> Ecto.Adapters.SQL.Sandbox.stop_owner(pid) end)
+
+    truncate(RowsAggregateGraph.tables())
     for r <- [Docs, Totals, Rollup], row <- Ash.read!(r), do: Ash.destroy!(row)
 
     for {k, st} <- [

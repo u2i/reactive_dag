@@ -18,97 +18,28 @@ defmodule ReactiveDag.ApprovalTest do
   a different option — so these tests use two deliberately different shapes and
   assert the library cannot tell them apart.
   """
-  use ExUnit.Case, async: false
+  use ReactiveDag.PostgresCase
+
+  alias ReactiveDag.Fixtures.ApprovalGraph
+  alias ReactiveDag.Fixtures.ApprovalGraph.{DualControlApproval, Events, SimpleApproval}
 
   alias ReactiveDag.Approval
 
-  defmodule Domain do
-    use Ash.Domain, validate_config_inclusion?: false
-
-    resources do
-      allow_unregistered?(true)
-    end
-  end
-
-  # A one-signature scheme.
-  defmodule SimpleApproval do
-    use Ash.Resource,
-      domain: ReactiveDag.ApprovalTest.Domain,
-      data_layer: Ash.DataLayer.Ets,
-      extensions: []
-
-    ets do
-      private?(true)
-    end
-
-    attributes do
-      attribute :id, :string, primary_key?: true, allow_nil?: false, public?: true
-      attribute :recorded_at, :utc_datetime_usec, public?: true
-      attribute :approved_by, :string, public?: true
-    end
-
-    actions do
-      defaults [:read, :destroy]
-      create :upsert, upsert?: true, accept: [:id, :recorded_at, :approved_by]
-    end
-  end
-
-  # A two-reviewer scheme with a decision and an expiry — a DIFFERENT shape,
-  # sharing only `recorded_at`. If the library could tell these apart, it would
-  # be constraining a host's rules about who may approve what.
-  defmodule DualControlApproval do
-    use Ash.Resource,
-      domain: ReactiveDag.ApprovalTest.Domain,
-      data_layer: Ash.DataLayer.Ets,
-      extensions: []
-
-    ets do
-      private?(true)
-    end
-
-    attributes do
-      attribute :id, :string, primary_key?: true, allow_nil?: false, public?: true
-      attribute :recorded_at, :utc_datetime_usec, public?: true
-      attribute :first_reviewer, :string, public?: true
-      attribute :second_reviewer, :string, public?: true
-      attribute :decision, :atom, public?: true
-      attribute :expires_at, :utc_datetime, public?: true
-    end
-
-    actions do
-      defaults [:read, :destroy]
-
-      create :upsert,
-        upsert?: true,
-        accept: [:id, :recorded_at, :first_reviewer, :second_reviewer, :decision, :expires_at]
-    end
-  end
-
-  defmodule Events do
-    use Ash.Resource,
-      domain: ReactiveDag.ApprovalTest.Domain,
-      data_layer: Ash.DataLayer.Ets,
-      extensions: []
-
-    ets do
-      private?(true)
-    end
-
-    attributes do
-      attribute :key, :string, primary_key?: true, allow_nil?: false, public?: true
-      attribute :outcome, :string, public?: true
-      attribute :recorded_at, :utc_datetime_usec, public?: true
-      attribute :approval_id, :string, public?: true
-    end
-
-    actions do
-      defaults [:read, :destroy]
-      create :upsert, upsert?: true, accept: [:key, :outcome, :recorded_at, :approval_id]
-    end
-  end
-
   @simple [via: :approval_id, resource: SimpleApproval]
   @dual [via: :approval_id, resource: DualControlApproval]
+
+  setup_all do
+    migrate!(ApprovalGraph.Domain)
+    :ok
+  end
+
+  setup do
+    pid = Ecto.Adapters.SQL.Sandbox.start_owner!(ReactiveDag.TestRepo, shared: true)
+    on_exit(fn -> Ecto.Adapters.SQL.Sandbox.stop_owner(pid) end)
+
+    truncate(ApprovalGraph.tables())
+    :ok
+  end
 
   defp row(attrs) do
     Events
