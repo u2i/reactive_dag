@@ -144,9 +144,41 @@ reinsertion copies the old row's value rather than restamping, so an earlier
 period still records when WE first wrote it. That is what makes it a genuine
 transaction-time axis rather than a touch counter.
 
+## A write CAN update in place — which changes the design
+
+`spike/temporal_in_place.exs`. Pinning `as_of` to the current period's
+`lower(valid_at)` updates that period rather than splitting it:
+
+    bookkeeping, as_of = period's lower bound   -> 1 period  (in place)
+    real change,  as_of = now()                 -> 2 periods (split)
+    bookkeeping,  as_of = new period's lower    -> 2 periods (no new split)
+
+The mechanism: the update's portion is `[lower, inf) * [lower, inf)`, the whole
+existing period, so `__leftovers` has nothing to reinsert.
+
+`recorded_at` still moves on every write, so "when did we last touch this"
+survives even when `valid_at` does not change. Both clocks behave correctly and
+independently.
+
+### So the leaf split is NOT needed
+
+Result and observation fields can share a resource. The distinction moves from
+schema to write-time `as_of` selection:
+
+    as_of = if verdict == :changed, do: DateTime.utc_now(),
+                                    else: current_period_start(prior)
+
+And that is the gate `Payload` already computes. `moved?/3` decides `:changed`
+vs `:unchanged`; it now also decides whether the write splits a period or
+updates one in place. The four tests that failed the naive "skip the write"
+gate keep passing, because the write still happens — it just lands in the
+period that is already open.
+
 ## Still open
 
-  * Can a temporal write update WITHOUT splitting, for bookkeeping fields? If
-    so the leaf split is unnecessary even where observation columns are live.
-  * What does `as_of` return for an instant inside a closed period — the
+  * What does `as_of` return for an instant inside a closed period? The
     staleness query needs the prior boundary, not just point-in-time.
+  * Does the in-place write need the prior row in hand (to read its lower
+    bound), and is that read already on the write path? `Payload` fetches
+    `prior` for `moved?/3`, so probably yes — but the period column has to be
+    selected, which it is not today.
