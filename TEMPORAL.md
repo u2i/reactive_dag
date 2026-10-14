@@ -282,3 +282,41 @@ value leaves `recorded_at` at its CREATE value unless the attribute is named in
 
 That silently breaks staleness — the stamps compare equal and nothing is ever
 reported stale. It is a constraint on every temporal node, not a test detail.
+
+## The grain join: what `range_overlaps` can and cannot do
+
+MEASURED, `spike/temporal_overlap_limits.exs`.
+
+`Ash.Query.range_overlaps/2` exists and its own docs name this use case —
+"relating two temporal resources". It works. But it filters WITHIN a read, and
+a read is pinned to ONE instant:
+
+    plain read:     [{"FY25", t2}]     <- pinned to now
+    as_of(create):  [{"FY24", t1}]     <- pinned to then
+    overlap only:   [{"FY25", t2}]     <- still only the pinned period
+
+`Ash.Temporal.resolve_read_as_of/1` raises `AsOfNotAnInstant` on anything that
+is not a `DateTime`. This is the blog's stated limitation — "no read across a
+range of times" — and it is load-bearing here.
+
+So the shape I sketched for the MOVE case does not work:
+
+    -- cannot express: rows EVER in this group since T
+    JOIN line l ON l.fy = t.fy AND l.valid_at && tstzrange(t.recorded_at, NULL)
+
+### What works instead
+
+TWO pinned reads, which is what `resolve_versions/3` already does for a single
+row. For a grain join:
+
+    before = read as_of (t - 1us), grouped by the grain columns
+    now    = read as_of now,       grouped by the grain columns
+    stale  = units present in EITHER whose membership or values moved
+
+That finds both sides of a move — the unit a row joined AND the one it left —
+because the `before` read sees the old membership. It is two queries per edge
+rather than one, which for a sweep is acceptable.
+
+Worth stating plainly: this is the same two-reads-and-diff shape the single-row
+path uses. The grain join is not a different mechanism, just the same one
+applied to a projection rather than a key.
