@@ -22,109 +22,24 @@ defmodule ReactiveDag.AshTenancyTest do
   as the two-node join bug, except it deletes rather than nils. That is the first
   test here, and it is the reason this cannot ship half-done.
   """
-  use ExUnit.Case, async: false
+  use ReactiveDag.PostgresCase
+
+  alias ReactiveDag.Fixtures.AshTenancyGraph
+  alias ReactiveDag.Fixtures.AshTenancyGraph.{Meeting, Plant, Reading, Rollup, Shared, Summary}
 
   alias ReactiveDag.Node.{Payload, Rows}
 
-  defmodule Domain do
-    use Ash.Domain, validate_config_inclusion?: false
-
-    resources do
-      allow_unregistered?(true)
-    end
-  end
-
-  # A TENANTED node: `municipality_id` is the tenant attribute, and Ash — not
-  # this library — is what puts a value in it.
-  defmodule Meeting do
-    use Ash.Resource,
-      domain: Domain,
-      data_layer: Ash.DataLayer.Ets,
-      extensions: [ReactiveDag.Node]
-
-    ets do
-      private?(true)
-    end
-
-    multitenancy do
-      strategy :attribute
-      attribute :municipality_id
-    end
-
-    # A UUID PRIMARY KEY, and this is forced rather than chosen. The tenant
-    # attribute cannot be in the primary key: Spark refuses a nullable PK, and
-    # `for_create` validates required attributes BEFORE `Ash.create` applies the
-    # tenant — so a non-nullable tenant attribute fails validation while the
-    # changeset already carries the tenant. With a UUID PK the tenant is an
-    # ordinary column and uniqueness moves to an identity.
-    attributes do
-      uuid_primary_key(:id)
-      attribute :key, :string, allow_nil?: false, public?: true
-      attribute :municipality_id, :string, public?: true
-      attribute :title, :string, public?: true
-    end
-
-    identities do
-      identity :by_tenant_key, [:municipality_id, :key], pre_check_with: Domain
-    end
-
-    actions do
-      defaults [:read, :destroy]
-
-      create :upsert do
-        upsert?(true)
-        # by IDENTITY, not the primary key: the PK is a fresh UUID every time, so
-        # conflicting on it would insert a duplicate per write.
-        upsert_identity(:by_tenant_key)
-        accept([:key, :municipality_id, :title])
-      end
-    end
-
-    reactive do
-      id(:meeting)
-      op(:source)
-      leaf?(true)
-      # REQUIRED: `derived_payload_key/1` returns the single-attribute PK, which
-      # here is `:id` — without this the library writes cell keys into the UUID
-      # column. See ADR-003.
-      payload_key(:key)
-    end
-  end
-
-  # An UNTENANTED node, in the same graph. Declares no multitenancy at all, so
-  # every path must behave exactly as it did before this feature existed.
-  defmodule Shared do
-    use Ash.Resource,
-      domain: Domain,
-      data_layer: Ash.DataLayer.Ets,
-      extensions: [ReactiveDag.Node]
-
-    ets do
-      private?(true)
-    end
-
-    attributes do
-      attribute :key, :string, primary_key?: true, allow_nil?: false, public?: true
-      attribute :title, :string, public?: true
-    end
-
-    actions do
-      defaults [:read, :destroy]
-
-      create :upsert do
-        upsert?(true)
-        accept([:key, :title])
-      end
-    end
-
-    reactive do
-      id(:shared)
-      op(:source)
-      leaf?(true)
-    end
+  setup_all do
+    migrate!(AshTenancyGraph.Domain)
+    :ok
   end
 
   setup do
+    pid = Ecto.Adapters.SQL.Sandbox.start_owner!(ReactiveDag.TestRepo, shared: true)
+    on_exit(fn -> Ecto.Adapters.SQL.Sandbox.stop_owner(pid) end)
+
+    truncate(AshTenancyGraph.tables())
+
     for r <- [Meeting, Shared] do
       r |> Ash.read!(tenant: "a") |> Enum.each(&Ash.destroy!(&1, tenant: "a"))
       r |> Ash.read!(tenant: "b") |> Enum.each(&Ash.destroy!(&1, tenant: "b"))
@@ -204,52 +119,6 @@ defmodule ReactiveDag.AshTenancyTest do
     # The baseline comes from `Rows.all/2`, so an unscoped read there retires
     # every other tenant's keys. Mutation testing found this untested: scoping
     # only the retire LOOKUP passed every test while the BASELINE stayed global.
-    defmodule Rollup do
-      use Ash.Resource,
-        domain: Domain,
-        data_layer: Ash.DataLayer.Ets,
-        extensions: [ReactiveDag.Node]
-
-      ets do
-        private?(true)
-      end
-
-      multitenancy do
-        strategy :attribute
-        attribute :municipality_id
-      end
-
-      attributes do
-        uuid_primary_key(:id)
-        attribute :key, :string, allow_nil?: false, public?: true
-        attribute :municipality_id, :string, public?: true
-        attribute :total, :integer, public?: true
-      end
-
-      identities do
-        identity :by_tenant_key, [:municipality_id, :key], pre_check_with: Domain
-      end
-
-      actions do
-        defaults [:read, :destroy]
-
-        create :upsert do
-          upsert?(true)
-          upsert_identity(:by_tenant_key)
-          accept([:key, :municipality_id, :total])
-        end
-      end
-
-      reactive do
-        id(:rollup)
-        op(:fold)
-        payload_key(:key)
-        # A `reduce` is what RETIRES: `compute Mod` writes its own rows and never
-        # reaches `materialize/4`. The `over` leaf holds nothing, so this pass
-        # produces nothing and every key the cell holds is retired.
-        reduce(over: :meeting, group_by: :key, into: [count: :total])
-      end
-    end
 
     test "a fold WRITES its rows under the plan's tenant" do
       # The write half. `writer_fn/2` merges the tenant into the payload opts, so
@@ -297,155 +166,11 @@ defmodule ReactiveDag.AshTenancyTest do
     # fingerprint read, the action write, and the payload upsert); `Aggregate`
     # has two. A gap in any one writes a row into the wrong tenant or reads
     # another tenant's fingerprints as this tenant's.
-    defmodule Summary do
-      use Ash.Resource,
-        domain: Domain,
-        data_layer: Ash.DataLayer.Ets,
-        extensions: [ReactiveDag.Node]
-
-      ets do
-        private?(true)
-      end
-
-      multitenancy do
-        strategy :attribute
-        attribute :municipality_id
-      end
-
-      attributes do
-        uuid_primary_key(:id)
-        attribute :key, :string, allow_nil?: false, public?: true
-        attribute :municipality_id, :string, public?: true
-        attribute :summary, :string, public?: true
-        attribute :fingerprint, :string, public?: true
-      end
-
-      identities do
-        identity :by_tenant_key, [:municipality_id, :key], pre_check_with: Domain
-      end
-
-      actions do
-        defaults [:read, :destroy]
-
-        create :upsert do
-          upsert?(true)
-          upsert_identity(:by_tenant_key)
-          accept([:key, :municipality_id, :summary, :fingerprint])
-        end
-
-        action :summarise, :map do
-          argument :text, :string
-          run(fn input, _ -> {:ok, %{"summary" => "sum:" <> (input.arguments.text || "")}} end)
-        end
-      end
-
-      reactive do
-        id(:summary)
-        op(:map)
-        payload_key(:key)
-
-        recompute_by(:key, to: :meeting, from: :key)
-
-        per_key(:summarise,
-          args: [text: :title],
-          fingerprint: [:title],
-          into: [summary: :summary]
-        )
-      end
-    end
 
     # An `aggregate` node: the datastore groups over a has_many, and the library
     # writes each parent's aggregate values. Both the read and the write need the
     # tenant — the read so it does not fold another tenant's children in, the
     # write so the row lands in the right tenant.
-    defmodule Reading do
-      use Ash.Resource,
-        domain: Domain,
-        data_layer: Ash.DataLayer.Ets,
-        extensions: [ReactiveDag.Node]
-
-      ets do
-        private?(true)
-      end
-
-      multitenancy do
-        strategy :attribute
-        attribute :municipality_id
-      end
-
-      attributes do
-        uuid_primary_key(:id)
-        attribute :key, :string, allow_nil?: false, public?: true
-        attribute :municipality_id, :string, public?: true
-        attribute :plant_key, :string, public?: true
-        attribute :flow, :integer, public?: true
-      end
-
-      actions do
-        defaults [:read, :destroy]
-
-        create :create do
-          accept([:key, :municipality_id, :plant_key, :flow])
-        end
-      end
-
-      reactive do
-        id(:readings)
-        op(:source)
-        leaf?(true)
-      end
-    end
-
-    defmodule Plant do
-      use Ash.Resource,
-        domain: Domain,
-        data_layer: Ash.DataLayer.Ets,
-        extensions: [ReactiveDag.Node]
-
-      ets do
-        private?(true)
-      end
-
-      multitenancy do
-        strategy :attribute
-        attribute :municipality_id
-      end
-
-      attributes do
-        uuid_primary_key(:id)
-        attribute :key, :string, allow_nil?: false, public?: true
-        attribute :municipality_id, :string, public?: true
-        attribute :total, :integer, public?: true
-      end
-
-      identities do
-        identity :by_tenant_key, [:municipality_id, :key], pre_check_with: Domain
-      end
-
-      relationships do
-        has_many :readings, ReactiveDag.AshTenancyTest.Reading do
-          source_attribute :key
-          destination_attribute :plant_key
-        end
-      end
-
-      actions do
-        defaults [:read, :destroy]
-
-        create :upsert do
-          upsert?(true)
-          upsert_identity(:by_tenant_key)
-          accept([:key, :municipality_id, :total])
-        end
-      end
-
-      reactive do
-        id(:plants)
-        op(:fold)
-        payload_key(:key)
-        aggregate(over: :readings, sum: [flow: :total])
-      end
-    end
 
     test "`aggregate` folds only its own tenant's children" do
       # Same parent key in both tenants, different children. If the read is

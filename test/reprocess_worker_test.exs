@@ -15,130 +15,28 @@ defmodule ReactiveDag.ReprocessWorkerTest do
       input move?" and the input did not. The job reports claimed-vs-changed so
       that no-op is visible rather than mistaken for success.
   """
-  use ExUnit.Case, async: false
+  use ReactiveDag.PostgresCase
 
-  defmodule Domain do
-    use Ash.Domain, validate_config_inclusion?: false
+  alias ReactiveDag.Fixtures.ReprocessGraph
+  alias ReactiveDag.Fixtures.ReprocessGraph.{Lines, Totals}
 
-    resources do
-      allow_unregistered?(true)
-    end
-  end
-
-  defmodule Lines do
-    use Ash.Resource,
-      domain: Domain,
-      data_layer: Ash.DataLayer.Ets,
-      extensions: [ReactiveDag.Node]
-
-    ets do
-    end
-
-    attributes do
-      attribute(:key, :string, primary_key?: true, allow_nil?: false, public?: true)
-      attribute(:fiscal_year, :string, public?: true)
-      attribute(:amount, :float, public?: true)
-    end
-
-    actions do
-      defaults([:read, :destroy])
-      create(:upsert, upsert?: true, accept: [:key, :fiscal_year, :amount])
-    end
-
-    reactive do
-      id(:lines)
-      leaf?(true)
-      slice(:fiscal_year, values: ["FY24", "FY25"])
-    end
-  end
-
-  defmodule Totals do
-    use Ash.Resource,
-      domain: Domain,
-      data_layer: Ash.DataLayer.Ets,
-      extensions: [ReactiveDag.Node]
-
-    ets do
-    end
-
-    attributes do
-      attribute(:key, :string, primary_key?: true, allow_nil?: false, public?: true)
-      attribute(:total, :float, public?: true)
-    end
-
-    actions do
-      defaults([:read, :destroy])
-      create(:upsert, upsert?: true, accept: [:key, :total])
-    end
-
-    reactive do
-      id(:totals)
-      recompute_by(:fiscal_year, to: :lines, from: :fiscal_year)
-
-      reduce(
-        group_by: :fiscal_year,
-        into: fn fy, rows -> %{key: fy, total: rows |> Enum.map(& &1.amount) |> Enum.sum()} end
-      )
-    end
-  end
-
-  defmodule FakeRepo do
-    def start_link do
-      # the claimable set, plus a permanent ledger the claim does not consume
-      {:ok, _} = Agent.start_link(fn -> [] end, name: :reprocess_mark_log)
-      Agent.start_link(fn -> MapSet.new() end, name: __MODULE__)
-    end
-
-    def marks,
-      do: Agent.get(__MODULE__, &MapSet.to_list/1) |> Enum.map(&{elem(&1, 1), elem(&1, 2), elem(&1, 3)}) |> Enum.sort()
-
-    @doc "Marks as `{tenant, cell, key, reason}` — the tenant is the point."
-    def tenanted_marks, do: Agent.get(__MODULE__, &MapSet.to_list/1) |> Enum.sort()
-
-    @doc "Every mark made, including ones the drain has since claimed."
-    def mark_log, do: Agent.get(:reprocess_mark_log, & &1) |> Enum.sort()
-
-    def query!("INSERT INTO " <> _, p) do
-      p
-      |> Enum.chunk_every(7)
-      |> Enum.each(fn [c, tenant, k, r, _, _held, _vid] ->
-        Agent.update(__MODULE__, &MapSet.put(&1, {tenant, c, k, r}))
-        # A LEDGER of every mark ever made, which the claim does not consume.
-        # Asserting on the claimable set cannot see a mark the drain has already
-        # taken — and the drain runs inside the worker.
-        Agent.update(:reprocess_mark_log, &[{tenant, c, k, r} | &1])
-      end)
-
-      %{rows: []}
-    end
-
-    def query!("SELECT DISTINCT cell_id" <> _, _),
-      do: %{rows: Agent.get(__MODULE__, & &1) |> Enum.map(&[elem(&1, 1)]) |> Enum.uniq()}
-
-    # Rows are `{tenant, cell, key, reason}`, and the claim is scoped to BOTH —
-    # a fake that ignored the tenant would let a tenant-scoping bug pass.
-    def query!("DELETE FROM " <> _, [cell, tenant]) do
-      c =
-        Agent.get_and_update(__MODULE__, fn s ->
-          {m, r} = Enum.split_with(s, fn {t, x, _, _} -> t == tenant and x == cell end)
-          {m, MapSet.new(r)}
-        end)
-
-      %{rows: Enum.map(c, fn {_, _, k, _} -> [k, nil] end)}
-    end
-
-    def query!("SELECT COUNT" <> _, _), do: %{rows: [[Agent.get(__MODULE__, &MapSet.size/1)]]}
+  setup_all do
+    migrate!(ReprocessGraph.Domain)
+    :ok
   end
 
   setup do
+    pid = Ecto.Adapters.SQL.Sandbox.start_owner!(ReactiveDag.TestRepo, shared: true)
+    on_exit(fn -> Ecto.Adapters.SQL.Sandbox.stop_owner(pid) end)
+
+    migrate_library_tables!()
+    truncate(ReprocessGraph.tables())
     # A poll or a write now ENQUEUES a cascade rather than leaving a mark,
     # so without this the library reaches for Oban and these tests fail on
     # a missing instance rather than on anything they are about.
     ReactiveDag.Test.Pending.capture_enqueues()
 
-    start_supervised!(%{id: FakeRepo, start: {FakeRepo, :start_link, []}})
     prev = Application.get_env(:reactive_dag, :repo)
-    Application.put_env(:reactive_dag, :repo, FakeRepo)
     on_exit(fn -> Application.put_env(:reactive_dag, :repo, prev) end)
 
     for r <- [Lines, Totals], row <- Ash.read!(r), do: Ash.destroy!(row)

@@ -14,103 +14,14 @@ defmodule ReactiveDag.SliceTest do
   Deliberately not time-shaped: the dimension in the motivating case is a
   `"FY22"` STRING, and a processing version is not temporal at all.
   """
-  use ExUnit.Case, async: false
+  use ReactiveDag.PostgresCase
+
+  alias ReactiveDag.Fixtures.SliceGraph
+  alias ReactiveDag.Fixtures.SliceGraph.{Standing, Docs, Lines, NotASource, Plain, Tableless, TenantedLines}
 
   alias ReactiveDag.Node.Rows
 
-  defmodule Domain do
-    use Ash.Domain, validate_config_inclusion?: false
-
-    resources do
-      allow_unregistered?(true)
-    end
-  end
-
   def available_years, do: ["FY24", "FY25"]
-
-  defmodule Lines do
-    use Ash.Resource, domain: Domain, data_layer: Ash.DataLayer.Ets, extensions: [ReactiveDag.Node]
-
-    ets do
-    end
-
-    attributes do
-      attribute :fund, :string, primary_key?: true, allow_nil?: false, public?: true
-      attribute :fiscal_year, :string, primary_key?: true, allow_nil?: false, public?: true
-      attribute :total, :float, public?: true
-      attribute :version, :integer, public?: true
-    end
-
-    actions do
-      defaults [:read, :destroy]
-      create :upsert, upsert?: true, accept: [:fund, :fiscal_year, :total, :version]
-    end
-
-    reactive do
-      id(:lines)
-      leaf?(true)
-
-      # the year is not the recompute unit and not the whole key — it is what a
-      # person asks about
-      slice(:fiscal_year, values: {ReactiveDag.SliceTest, :available_years, []})
-      slice(:version, label: "processed by version")
-    end
-  end
-
-  # A tenanted node, because that is what a real host has and the untenanted
-  # `Lines` above cannot show: `keys_where/3` has to be scopeable, or a menu
-  # counting "how many keys would this reprocess claim?" gets a raise.
-  defmodule TenantedLines do
-    use Ash.Resource, domain: Domain, data_layer: Ash.DataLayer.Ets, extensions: [ReactiveDag.Node]
-
-    ets do
-    end
-
-    multitenancy do
-      strategy :attribute
-      attribute :org_id
-    end
-
-    attributes do
-      uuid_primary_key(:id)
-      attribute :org_id, :string, public?: true
-      attribute :fund, :string, allow_nil?: false, public?: true
-      attribute :fiscal_year, :string, allow_nil?: false, public?: true
-    end
-
-    actions do
-      defaults [:read, :destroy]
-      create :upsert, upsert?: true, accept: [:org_id, :fund, :fiscal_year]
-    end
-
-    reactive do
-      id(:tenanted_lines)
-      leaf?(true)
-      row_key([:org_id, :fund, :fiscal_year])
-      slice(:fiscal_year)
-    end
-  end
-
-  defmodule Plain do
-    use Ash.Resource, domain: Domain, data_layer: Ash.DataLayer.Ets, extensions: [ReactiveDag.Node]
-
-    ets do
-    end
-
-    attributes do
-      attribute :key, :string, primary_key?: true, allow_nil?: false, public?: true
-    end
-
-    actions do
-      defaults [:read, :destroy]
-      create :upsert, upsert?: true, accept: [:key]
-    end
-
-    reactive do
-      id(:plain)
-      leaf?(true)
-    end
-  end
 
   defmodule Crawler do
     @behaviour ReactiveDag.Source
@@ -119,37 +30,17 @@ defmodule ReactiveDag.SliceTest do
     def poll(opts), do: %{changed: [], polled_with: opts}
   end
 
-  # a SOURCE whose upstream is addressable by the same dimension its rows are
-  # sliced by — and which spells it differently, which is the case `poll_as:`
-  # exists for. The crawler takes `fiscal:`; the column is `fiscal_year`.
-  defmodule Docs do
-    use Ash.Resource, domain: Domain, data_layer: Ash.DataLayer.Ets, extensions: [ReactiveDag.Node]
-
-    ets do
-    end
-
-    attributes do
-      attribute :key, :string, primary_key?: true, allow_nil?: false, public?: true
-      attribute :fiscal_year, :string, public?: true
-      attribute :board, :string, public?: true
-    end
-
-    actions do
-      defaults [:read, :destroy]
-      create :upsert, upsert?: true, accept: [:key, :fiscal_year, :board]
-    end
-
-    reactive do
-      id(:docs)
-      poll(ReactiveDag.SliceTest.Crawler)
-
-      slice(:fiscal_year, values: ["FY24/25", "FY25/26"], poll_as: :fiscal)
-      # no `poll_as:` — the scanner spells this one the same as the column
-      slice(:board)
-    end
+  setup_all do
+    migrate!(SliceGraph.Domain)
+    :ok
   end
 
   setup do
+    pid = Ecto.Adapters.SQL.Sandbox.start_owner!(ReactiveDag.TestRepo, shared: true)
+    on_exit(fn -> Ecto.Adapters.SQL.Sandbox.stop_owner(pid) end)
+
+    migrate_library_tables!()
+    truncate(SliceGraph.tables())
     for r <- [Lines, Plain], row <- Ash.read!(r), do: Ash.destroy!(row)
 
     for {f, y, v} <- [
@@ -260,7 +151,7 @@ defmodule ReactiveDag.SliceTest do
         assert_raise ArgumentError, fn ->
           defmodule BadSlice do
             use Ash.Resource,
-              domain: ReactiveDag.SliceTest.Domain,
+              domain: ReactiveDag.Fixtures.SliceGraph.Domain,
               data_layer: Ash.DataLayer.Ets,
               extensions: [ReactiveDag.Node]
 
@@ -303,19 +194,6 @@ defmodule ReactiveDag.SliceTest do
     # distinction — it guards the wording only.
     err =
       assert_raise ArgumentError, fn ->
-        defmodule Tableless do
-          use Ash.Resource,
-            domain: ReactiveDag.SliceTest.Domain,
-            data_layer: Ash.DataLayer.Simple,
-            extensions: [ReactiveDag.Node]
-
-          reactive do
-            id(:tableless)
-            leaf?(true)
-            slice(:fiscal_year)
-          end
-        end
-
         ReactiveDag.Node.cells(Tableless)
       end
 
@@ -376,44 +254,6 @@ defmodule ReactiveDag.SliceTest do
   end
 
   describe "end to end — a selection reaches the scanner" do
-    defmodule Recorder do
-      @behaviour ReactiveDag.Source
-
-      @impl true
-      def poll(opts) do
-        send(self(), {:polled_with, opts})
-        {:ok, %{changed: []}}
-      end
-    end
-
-    defmodule Standing do
-      use Ash.Resource,
-        domain: ReactiveDag.SliceTest.Domain,
-        data_layer: Ash.DataLayer.Ets,
-        extensions: [ReactiveDag.Node]
-
-      ets do
-      end
-
-      attributes do
-        attribute :key, :string, primary_key?: true, allow_nil?: false, public?: true
-        attribute :fiscal_year, :string, public?: true
-      end
-
-      actions do
-        defaults [:read, :destroy]
-        create :upsert, upsert?: true, accept: [:key, :fiscal_year]
-      end
-
-      reactive do
-        id(:standing)
-        # a STANDING arg, so the test proves a selection composes with the
-        # declaration rather than replacing it
-        poll(ReactiveDag.SliceTest.Recorder, args: [recent: true])
-        slice(:fiscal_year, values: ["FY25/26"], poll_as: :fiscal)
-      end
-    end
-
     test "the slice arrives under poll_as, and the declared args survive" do
       # the whole point, through the real path: `poll_opts/2` translates, and
       # `poll_cell/3` merges caller opts OVER the declared ones — so asking for
@@ -437,32 +277,6 @@ defmodule ReactiveDag.SliceTest do
       # instead of the source feeding it
       err =
         assert_raise ArgumentError, fn ->
-          defmodule NotASource do
-            use Ash.Resource,
-              domain: ReactiveDag.SliceTest.Domain,
-              data_layer: Ash.DataLayer.Ets,
-              extensions: [ReactiveDag.Node]
-
-            ets do
-            end
-
-            attributes do
-              attribute :key, :string, primary_key?: true, allow_nil?: false, public?: true
-              attribute :fiscal_year, :string, public?: true
-            end
-
-            actions do
-              defaults [:read, :destroy]
-              create :upsert, upsert?: true, accept: [:key, :fiscal_year]
-            end
-
-            reactive do
-              id(:not_a_source)
-              leaf?(true)
-              slice(:fiscal_year, poll_as: :fiscal)
-            end
-          end
-
           ReactiveDag.Node.cells(NotASource)
         end
 
