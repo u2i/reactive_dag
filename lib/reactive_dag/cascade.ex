@@ -1073,7 +1073,15 @@ defmodule ReactiveDag.Cascade do
     resource = meta[:resource]
     key_attr = meta[:payload_key] || :key
 
-    before = read_as_of(resource, key_attr, key, at, opts)
+    # JUST BEFORE the change, not at it. `recorded_at` is the instant the new
+    # period OPENS, so reading as of that moment returns the row after the
+    # change — and comparing it to now reports nothing moved, which is how a
+    # MOVED row claimed only its destination and silently stranded the group it
+    # left.
+    #
+    # A microsecond is the smallest step `:utc_datetime_usec` can express, so
+    # `at - 1µs` lands in the preceding period whatever its length.
+    before = read_as_of(resource, key_attr, key, DateTime.add(at, -1, :microsecond), opts)
     now = read_as_of(resource, key_attr, key, nil, opts)
 
     if is_nil(before) and is_nil(now) do
