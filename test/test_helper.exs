@@ -15,4 +15,21 @@
 #
 #     for i in $(seq 1 30); do mix test --max-cases 128 --seed $RANDOM; done
 #
-ExUnit.start()
+# The Postgres tests are OPT-IN and excluded by default: the suite must stay
+# runnable on a machine with no container. `mix test.postgres` (or
+# `--include postgres` with the URL set) turns them on.
+#
+# Started here rather than in the case template because a repo is an
+# application-level process — starting it per module would fight the sandbox.
+if url = System.get_env("REACTIVE_DAG_TEST_DATABASE_URL") do
+  Application.put_env(:reactive_dag, ReactiveDag.TestRepo,
+    Keyword.put(Application.get_env(:reactive_dag, ReactiveDag.TestRepo, []), :url, url)
+  )
+
+  {:ok, _} = ReactiveDag.TestRepo.start_link()
+  Ecto.Adapters.SQL.Sandbox.mode(ReactiveDag.TestRepo, :manual)
+
+  ExUnit.start()
+else
+  ExUnit.start(exclude: [:postgres])
+end

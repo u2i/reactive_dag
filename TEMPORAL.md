@@ -320,3 +320,48 @@ rather than one, which for a sweep is acceptable.
 Worth stating plainly: this is the same two-reads-and-diff shape the single-row
 path uses. The grain join is not a different mechanism, just the same one
 applied to a projection rather than a key.
+
+## Testing against real Postgres
+
+`mix test.postgres` — starts a PG18 container, creates the database and the
+`btree_gist` extension, runs the suite with the `:postgres` tag included.
+Plain `mix test` excludes that tag and is unaffected.
+
+### Why both substrates, rather than porting the suite
+
+The 64 resource files run on ETS and should stay there. A DSL test's fixture
+IS the resource, defined inline in the test body, and ETS holds one with no
+migration. Porting them would mean hand-writing DDL for 64 files to test the
+DSL, which is not what those files are about.
+
+What Postgres is for is the places where ETS CANNOT give a trustworthy answer:
+
+  * `WITHOUT OVERLAPS` primary keys are PG18 with no ETS analogue. ETS stores
+    `valid_at` as a plain field and never enforces non-overlap — a write
+    Postgres would REJECT succeeds there.
+
+  * The temporal upsert is entirely different code. Postgres cannot
+    `INSERT ... ON CONFLICT` against an exclusion PK, so AshPostgres emits
+    data-modifying CTEs that split the period by hand
+    (`valid_at * tstzrange($1, NULL)`, with
+    `multirange(old) - multirange(new)` preserving the leftover). None of that
+    machinery exists on ETS.
+
+  * `Ash.Query.as_of` lowering to a SQL period predicate. The historical read
+    is the whole mechanism of the grain join's move case.
+
+MEASURED, `test/stale_grain_postgres_test.exs`: all three hold, and the move
+case claims both units through real SQL history.
+
+### Two things that cost time
+
+`setup_all` cannot skip a module. ExUnit treats `:skip` as a TAG, and a value
+returned from `setup_all` lands in the context where nothing acts on it — every
+test body then ran on into a missing repo and reported as FAILING. A
+compile-time `@moduletag skip:` is what actually skips. This matters because
+"no database configured" must not read as "the code is broken".
+
+DDL must bypass the sandbox. It has to outlive the per-test transaction that
+gets rolled back, so `exec/2` opens its own short-lived connection while
+`exec_sandboxed/2` uses the test's. Isolation was then verified directly
+rather than assumed: one test writes a row, the next asserts it sees zero.
