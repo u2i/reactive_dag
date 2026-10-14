@@ -17,91 +17,29 @@ defmodule ReactiveDag.RetainIfVanishedTest do
       Nothing marks the key as already handled, so the subtraction keeps finding
       it. That is the re-reporting trap that sank the richer design in #81.
   """
-  use ExUnit.Case, async: false
+  use ReactiveDag.PostgresCase
+
+  alias ReactiveDag.Fixtures.RetainGraph
+  alias ReactiveDag.Fixtures.RetainGraph.{Docs, Marked, Plain}
 
   alias ReactiveDag.Node.Rows
 
-  defmodule Domain do
-    use Ash.Domain, validate_config_inclusion?: false
-
-    resources do
-      allow_unregistered?(true)
-    end
-  end
-
-  defmodule Docs do
-    use Ash.Resource, domain: Domain, data_layer: Ash.DataLayer.Ets, extensions: [ReactiveDag.Node]
-
-    ets do
-    end
-
-    attributes do
-      attribute :key, :string, primary_key?: true, allow_nil?: false, public?: true
-      attribute :body, :string, public?: true
-      attribute :content_md5, :string, public?: true
-      attribute :fingerprint, :string, public?: true
-    end
-
-    actions do
-      defaults [:read, :destroy]
-
-      create :upsert do
-        upsert?(true)
-        accept([:key, :body, :content_md5, :fingerprint])
-      end
-    end
-
-    reactive do
-      id(:docs)
-      leaf?(true)
-      fingerprint([:content_md5])
-      retain_if_vanished(true)
-    end
-  end
-
-  # the default: a vanished key's row is destroyed
-  defmodule Plain do
-    use Ash.Resource, domain: Domain, data_layer: Ash.DataLayer.Ets, extensions: [ReactiveDag.Node]
-
-    ets do
-    end
-
-    attributes do
-      attribute :key, :string, primary_key?: true, allow_nil?: false, public?: true
-      attribute :body, :string, public?: true
-      attribute :content_md5, :string, public?: true
-      attribute :fingerprint, :string, public?: true
-    end
-
-    actions do
-      defaults [:read, :destroy]
-
-      create :upsert do
-        upsert?(true)
-        accept([:key, :body, :content_md5, :fingerprint])
-      end
-    end
-
-    reactive do
-      id(:plain)
-      leaf?(true)
-      fingerprint([:content_md5])
-    end
+  setup_all do
+    migrate!(RetainGraph.Domain)
+    :ok
   end
 
   setup do
+    pid = Ecto.Adapters.SQL.Sandbox.start_owner!(ReactiveDag.TestRepo, shared: true)
+    on_exit(fn -> Ecto.Adapters.SQL.Sandbox.stop_owner(pid) end)
+
+    truncate(RetainGraph.tables())
     for r <- [Docs, Plain], row <- Ash.read!(r), do: Ash.destroy!(row)
     :ok
   end
 
   @doc false
   # a host's marking policy: keep the row, record that the upstream dropped it
-  def tombstone(keys) do
-    for key <- keys,
-        row = Enum.find(Ash.read!(__MODULE__.Marked), &(&1.key == key)) do
-      row |> Ash.Changeset.for_update(:update, %{status: "tombstoned"}) |> Ash.update!()
-    end
-  end
 
   defp cell(mod) do
     [c] = ReactiveDag.Node.cells(mod)
@@ -207,40 +145,6 @@ defmodule ReactiveDag.RetainIfVanishedTest do
   end
 
   describe "mark: — keep the row AND say the upstream dropped it" do
-    defmodule Marked do
-      use Ash.Resource,
-        domain: ReactiveDag.RetainIfVanishedTest.Domain,
-        data_layer: Ash.DataLayer.Ets,
-        extensions: [ReactiveDag.Node]
-
-      ets do
-      end
-
-      attributes do
-        attribute :key, :string, primary_key?: true, allow_nil?: false, public?: true
-        attribute :body, :string, public?: true
-        attribute :content_md5, :string, public?: true
-        attribute :status, :string, public?: true
-        attribute :fingerprint, :string, public?: true
-      end
-
-      actions do
-        defaults [:read, :destroy, update: [:status]]
-
-        create :upsert do
-          upsert?(true)
-          accept([:key, :body, :content_md5, :status, :fingerprint])
-        end
-      end
-
-      reactive do
-        id(:marked)
-        leaf?(true)
-        fingerprint([:content_md5])
-        retain_if_vanished(mark: &ReactiveDag.RetainIfVanishedTest.tombstone/1)
-      end
-    end
-
     setup do
       for row <- Ash.read!(Marked), do: Ash.destroy!(row)
       :ok
@@ -291,7 +195,7 @@ defmodule ReactiveDag.RetainIfVanishedTest do
       assert_raise ArgumentError, fn ->
         defmodule BadRetain do
           use Ash.Resource,
-            domain: ReactiveDag.RetainIfVanishedTest.Domain,
+            domain: ReactiveDag.Fixtures.RetainGraph.Domain,
             data_layer: Ash.DataLayer.Ets,
             extensions: [ReactiveDag.Node]
 
