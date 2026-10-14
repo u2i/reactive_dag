@@ -8,188 +8,30 @@ defmodule ReactiveDag.InsightsTest do
   assembles them into the shape a dashboard, a mix task, or an alerting check
   asks for — deliberately with no UI dependency of any kind.
   """
-  use ExUnit.Case, async: false
+  use ReactiveDag.PostgresCase
+
+  alias ReactiveDag.Fixtures.ExpenseGraph
+
+  alias ReactiveDag.Fixtures.ExpenseGraph.{
+    CategoryHealth,
+    CategoryTotals,
+    Expenses,
+    Publish
+  }
 
   alias ReactiveDag.{Cascade, Insights, ScanRun}
 
-  defmodule Domain do
-    use Ash.Domain, validate_config_inclusion?: false
-
-    resources do
-      allow_unregistered?(true)
-    end
+  setup_all do
+    migrate!(ExpenseGraph.Domain)
+    :ok
   end
-
-  defmodule Expenses do
-    use Ash.Resource,
-      domain: Domain,
-      data_layer: Ash.DataLayer.Ets,
-      extensions: [ReactiveDag.Node]
-
-    ets do
-      private?(true)
-    end
-
-    attributes do
-      attribute(:key, :string, primary_key?: true, allow_nil?: false, public?: true)
-      attribute(:category, :string, public?: true)
-      attribute(:amount, :float, public?: true)
-    end
-
-    actions do
-      defaults([:read, :destroy])
-
-      create :create do
-        accept([:key, :category, :amount])
-      end
-    end
-
-    reactive do
-      id(:expenses)
-      op(:source)
-      leaf?(true)
-    end
-  end
-
-  defmodule CategoryTotals do
-    use Ash.Resource,
-      domain: Domain,
-      data_layer: Ash.DataLayer.Ets,
-      extensions: [ReactiveDag.Node]
-
-    ets do
-      private?(true)
-    end
-
-    attributes do
-      attribute(:key, :string, primary_key?: true, allow_nil?: false, public?: true)
-      attribute(:category, :string, public?: true)
-      attribute(:total, :float, public?: true)
-      attribute(:n, :integer, public?: true)
-    end
-
-    identities do
-      identity(:by_key, [:key], pre_check_with: ReactiveDag.InsightsTest.Domain)
-    end
-
-    actions do
-      defaults([:read, :destroy])
-
-      create :upsert do
-        upsert?(true)
-        upsert_identity(:by_key)
-        accept([:key, :category, :total, :n])
-      end
-    end
-
-    reactive do
-      id(:category_totals)
-      op(:fold)
-
-      recompute_by(:category, to: :expenses, from: :category)
-      reduce(into: [sum: [amount: :total], count: :n])
-    end
-  end
-
-  defmodule CategoryHealth do
-    use Ash.Resource,
-      domain: Domain,
-      data_layer: Ash.DataLayer.Ets,
-      extensions: [ReactiveDag.Node]
-
-    ets do
-    end
-
-    attributes do
-      attribute(:key, :string, primary_key?: true, allow_nil?: false, public?: true)
-      attribute(:status, :string, public?: true)
-    end
-
-    actions do
-      defaults([:read, :destroy])
-
-      create :upsert do
-        upsert?(true)
-        accept([:key, :status])
-      end
-    end
-
-    reactive do
-      id(:category_health)
-      op(:check)
-
-      reduce(
-        over: :category_totals,
-        group_by: :key,
-        into: fn _cat, [row | _] ->
-          %{status: if(row.total < 1000.0, do: "present", else: "failing")}
-        end
-      )
-    end
-  end
-
-  defmodule NoopOp do
-    @behaviour ReactiveDag.Op
-    @impl true
-    def recompute(_cell, _keys), do: {:ok, []}
-  end
-
-  # A node that owns a table, over a `compose` LEG that does not. The leg is the
-  # tableless cell that still exists: its work is real and its keys flow, but it
-  # is an intermediate — `meta.resource` is nil, so there is no table to read and
-  # "nothing lives here" is the honest answer rather than a failure to look.
-  #
-  # The `:elsewhere` state used to be reached through the write-elsewhere shape
-  # (`Simple`, no attributes, a compute module). A derived NODE may no longer be
-  # tableless, so it is reached through the one shape that legitimately has no
-  # resource — which is what `Insights.rows_kind/1` has always keyed on.
-  defmodule Publish do
-    use Ash.Resource,
-      domain: Domain,
-      data_layer: Ash.DataLayer.Ets,
-      extensions: [ReactiveDag.Node]
-
-    ets do
-      private?(true)
-    end
-
-    attributes do
-      attribute(:key, :string, primary_key?: true, allow_nil?: false, public?: true)
-    end
-
-    actions do
-      defaults([:read, :destroy])
-
-      create :upsert do
-        upsert?(true)
-        upsert_identity(:by_key)
-        accept([:key])
-      end
-    end
-
-    identities do
-      identity(:by_key, [:key])
-    end
-
-    reactive do
-      id(:publish)
-      compute(ReactiveDag.InsightsTest.NoopOp)
-
-      compose :fold do
-        as(:published_rows)
-        compute(ReactiveDag.InsightsTest.NoopOp)
-        ref(:expenses)
-      end
-    end
-  end
-
-  # `FakeRepo` here was a hand-written stand-in for the FRONTIER table — an
-  # insert, a `SELECT DISTINCT cell_id`, a claiming delete. None of those
-  # statements are issued any more, and `Insights.pending/1` reads suspensions
-  # instead, which it had no clause for. `FakeSuspensionRepo` is the shared fake
-  # that does model them, so this file uses it rather than growing a second one.
 
   setup do
+    pid = Ecto.Adapters.SQL.Sandbox.start_owner!(ReactiveDag.TestRepo, shared: true)
+    on_exit(fn -> Ecto.Adapters.SQL.Sandbox.stop_owner(pid) end)
+
+    truncate(ExpenseGraph.tables())
+
     # A poll or a write now ENQUEUES a cascade rather than leaving a mark,
     # so without this the library reaches for Oban and these tests fail on
     # a missing instance rather than on anything they are about.
@@ -210,7 +52,7 @@ defmodule ReactiveDag.InsightsTest do
     :ok
   end
 
-  defp plan, do: ReactiveDag.Node.graph([Expenses, CategoryTotals, CategoryHealth])
+  defp plan, do: ExpenseGraph.plan(:with_health)
 
   describe "structure" do
     test "levels/1 groups cells by depth, in execution order" do
@@ -367,7 +209,7 @@ defmodule ReactiveDag.InsightsTest do
     end
 
     test "a cell that keeps no rows of its own reports :elsewhere" do
-      plan = ReactiveDag.Node.graph([Expenses, Publish])
+      plan = ExpenseGraph.plan(:with_publish)
       status = Insights.cell_status(plan, "published_rows")
 
       assert status.rows == :elsewhere
@@ -380,7 +222,7 @@ defmodule ReactiveDag.InsightsTest do
     end
 
     test "and it is not confused with a failed read" do
-      plan = ReactiveDag.Node.graph([Expenses, Publish])
+      plan = ExpenseGraph.plan(:with_publish)
 
       refute Insights.cell_status(plan, "published_rows").rows == :unreadable
     end
