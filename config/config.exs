@@ -21,6 +21,11 @@ config :ash, default_string_length_count: :codepoints
 if config_env() == :test do
   config :reactive_dag, ecto_repos: [ReactiveDag.TestRepo]
 
+  # The `ash_ai` stub the LLM fixture's prompt action calls. Read with
+  # `compile_env` there, because `prompt/2` expands it at module-definition
+  # time — a runtime lookup would run before the module exists.
+  config :reactive_dag, :fixture_req_llm, ReactiveDag.Fixtures.StubReqLLM
+
   # Same database, ordinary pool — see `ReactiveDag.MigrationRepo`.
   config :reactive_dag, ReactiveDag.MigrationRepo,
     url:
