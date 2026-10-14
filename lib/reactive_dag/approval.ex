@@ -5,7 +5,7 @@ defmodule ReactiveDag.Approval do
   A row points at the approval that covers it. The approval says which version
   it covered. Whether the sign-off still applies is a comparison:
 
-      approved?(row) = row.<reference>.version_id == row.version_id
+      approved?(row) = row.<reference>.recorded_at == row.recorded_at
 
   The content moves, the versions stop matching, the sign-off lapses. Nothing
   had to erase it.
@@ -27,7 +27,7 @@ defmodule ReactiveDag.Approval do
   an approval that expires — these are different HOST RESOURCES, not different
   configurations here. The contract is:
 
-    * the approving resource has a `version_id`;
+    * the approving resource has a `recorded_at`;
     * the approved node has a column pointing at it.
 
   Nothing else is read, so nothing else can be constrained. Different cells may
@@ -189,7 +189,15 @@ defmodule ReactiveDag.Approval do
     end
   end
 
-  defp version_of(record), do: Map.get(record, :version_id)
+  # WHEN THE APPROVED CONTENT WAS RECORDED. The comparison is the same one the
+  # moduledoc describes — an equality that stops holding cannot be forgotten —
+  # asked of a timestamp rather than an opaque id.
+  #
+  # The property is preserved exactly: content moves, `recorded_at` moves, the
+  # sign-off lapses with nothing having to erase it. A timestamp also answers a
+  # question an id cannot — whether the approval was at or after a given state —
+  # though the library itself only ever asks for equality.
+  defp version_of(record), do: Map.get(record, :recorded_at)
 
   defp keys_for(%{row_uuid: "*"}), do: ["*"]
   defp keys_for(%{row_uuid: uuid}), do: [uuid]
@@ -197,9 +205,11 @@ defmodule ReactiveDag.Approval do
   defp versions_for(_suspensions, %{row_uuid: "*"}), do: %{}
 
   defp versions_for(suspensions, %{row_uuid: uuid}) do
-    case Enum.find(suspensions, &(&1.version_id != "*")) do
+    case suspensions
+         |> Enum.reject(&is_nil(&1.recorded_at))
+         |> Enum.min_by(& &1.recorded_at, DateTime, fn -> nil end) do
       nil -> %{}
-      %{version_id: vid} -> %{uuid => vid}
+      %{recorded_at: at} -> %{uuid => at}
     end
   end
 end

@@ -101,7 +101,17 @@ defmodule ReactiveDag.Migration do
       # nullable instead would reintroduce the null-never-equals-itself problem
       # the tenant column documents above.
       add(:row_uuid, :text, null: false, default: "*")
-      add(:version_id, :text, null: false, default: "*")
+      # WHEN THE CHANGE WAS RECORDED — the instant a resumption reads the row
+      # back at, to derive what moved.
+      #
+      # NULLABLE, unlike `row_uuid` and `tenant` above, and for a reason that
+      # does not apply to those: nothing ever matches on this column. It is
+      # written and read back, never filtered, so the null-never-equals-itself
+      # problem cannot arise. NULL means "this change could not be attributed"
+      # — a source that cannot say which of its items moved — and resumption
+      # recomputes the whole cell. That is more honest than a `"*"` sentinel,
+      # which can collide with a real value and has to be remembered.
+      add(:recorded_at, :utc_datetime_usec)
 
       # WHY IT STOPPED: 'expensive' or 'approval'. One table serves both,
       # because the situation is the same — a cascade reached here and could

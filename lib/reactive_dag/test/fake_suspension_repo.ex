@@ -92,7 +92,7 @@ defmodule ReactiveDag.Test.FakeSuspensionRepo do
 
   def query!(
         "INSERT INTO " <> _,
-        [id, tenant, waiting, resource, row_uuid, version_id, reason, lap]
+        [id, tenant, waiting, resource, row_uuid, recorded_at, reason, lap]
       ) do
     Agent.update(
       __MODULE__,
@@ -103,7 +103,7 @@ defmodule ReactiveDag.Test.FakeSuspensionRepo do
           waiting: waiting,
           resource: resource,
           row_uuid: row_uuid,
-          version_id: version_id,
+          recorded_at: recorded_at,
           reason: reason,
           lap: lap
         }
@@ -115,14 +115,14 @@ defmodule ReactiveDag.Test.FakeSuspensionRepo do
   end
 
   # `at/1` — every suspension at one point, oldest first.
-  def query!("SELECT id, version_id, reason" <> _, [tenant, waiting, resource, row_uuid]) do
+  def query!("SELECT id, recorded_at, reason" <> _, [tenant, waiting, resource, row_uuid]) do
     rows =
       recorded()
       |> Enum.filter(
         &(&1.tenant == tenant and &1.waiting == waiting and &1.resource == resource and
             &1.row_uuid == row_uuid)
       )
-      |> Enum.map(&[&1.id, &1.version_id, &1.reason, &1.lap])
+      |> Enum.map(&[&1.id, &1.recorded_at, &1.reason, &1.lap])
 
     %{rows: rows, num_rows: length(rows)}
   end

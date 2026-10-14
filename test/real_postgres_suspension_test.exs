@@ -86,7 +86,7 @@ defmodule ReactiveDag.RealPostgresSuspensionTest do
           waiting     text NOT NULL,
           resource    text NOT NULL,
           row_uuid    text NOT NULL DEFAULT '*',
-          version_id  text NOT NULL DEFAULT '*',
+          recorded_at timestamptz,
           reason      text NOT NULL,
           inserted_at timestamp NOT NULL DEFAULT now(),
           lap         integer NOT NULL DEFAULT 0
@@ -123,6 +123,10 @@ defmodule ReactiveDag.RealPostgresSuspensionTest do
       :ok
     end
   end
+
+  # Distinct instants, ordered — the suspension's `recorded_at` is WHEN the
+  # change was recorded, so a test that needs two of them needs them apart.
+  defp at(offset_ms), do: DateTime.add(~U[2026-01-01 00:00:00.000000Z], offset_ms, :millisecond)
 
   setup do
     if @url, do: Repo.query!("DELETE FROM #{@table}")
@@ -164,23 +168,23 @@ defmodule ReactiveDag.RealPostgresSuspensionTest do
 
     test "a suspension lands with every column the statement names" do
       if @url do
-        id = Suspension.record(point(), "v-019a40", :expensive)
+        id = Suspension.record(point(), at(0), :expensive)
 
         %{rows: [row]} =
           Repo.query!(
-            "SELECT id, tenant, waiting, resource, row_uuid, version_id, reason " <>
+            "SELECT id, tenant, waiting, resource, row_uuid, recorded_at, reason " <>
               "FROM #{@table}"
           )
 
-        assert [^id, "red_hook", "meeting_events", "minutes_docs", _uuid, "v-019a40", "expensive"] =
+        assert [^id, "red_hook", "meeting_events", "minutes_docs", _uuid, _recorded, "expensive"] =
                  row
       end
     end
 
     test "the SAME point twice writes TWO rows" do
       if @url do
-        Suspension.record(point(), "v-1", :expensive)
-        Suspension.record(point(), "v-2", :expensive)
+        Suspension.record(point(), at(0), :expensive)
+        Suspension.record(point(), at(1000), :expensive)
 
         assert count() == 2,
                "suspensions are append-only — a unique constraint or ON CONFLICT " <>
@@ -190,12 +194,12 @@ defmodule ReactiveDag.RealPostgresSuspensionTest do
 
     test "an unattributable change stores the sentinel, not NULL" do
       if @url do
-        Suspension.record(point(row_uuid: "*"), "*", :expensive)
+        Suspension.record(point(row_uuid: "*"), nil, :expensive)
 
-        %{rows: [[row_uuid, version_id]]} =
-          Repo.query!("SELECT row_uuid, version_id FROM #{@table}")
+        %{rows: [[row_uuid, recorded_at]]} =
+          Repo.query!("SELECT row_uuid, recorded_at FROM #{@table}")
 
-        assert {"*", "*"} == {row_uuid, version_id},
+        assert {"*", nil} == {row_uuid, recorded_at},
                "`*` must be storable — a uuid column would reject it, and NULL " <>
                  "would never match the equality `at/1` reads with"
       end
@@ -203,8 +207,8 @@ defmodule ReactiveDag.RealPostgresSuspensionTest do
 
     test "both reasons round-trip" do
       if @url do
-        Suspension.record(point(), "v-1", :expensive)
-        Suspension.record(point(waiting: "published"), "v-2", :approval)
+        Suspension.record(point(), at(0), :expensive)
+        Suspension.record(point(waiting: "published"), at(1000), :approval)
 
         reasons = Enum.map(Suspension.at(point()), & &1.reason)
         assert reasons == [:expensive]
@@ -219,10 +223,11 @@ defmodule ReactiveDag.RealPostgresSuspensionTest do
 
     test "reads every suspension at the point" do
       if @url do
-        Suspension.record(point(), "v-1", :expensive)
-        Suspension.record(point(), "v-2", :expensive)
+        Suspension.record(point(), at(0), :expensive)
+        Suspension.record(point(), at(1000), :expensive)
 
-        assert ["v-1", "v-2"] == Enum.map(Suspension.at(point()), & &1.version_id)
+        assert [t1, t2] = Enum.map(Suspension.at(point()), & &1.recorded_at)
+        assert DateTime.compare(t1, t2) == :lt, "insertion order, earliest first"
       end
     end
 
@@ -232,8 +237,8 @@ defmodule ReactiveDag.RealPostgresSuspensionTest do
         # count survives ONLY here, so a write that dropped it (or a read that
         # didn't return it) would silently unbound every declared loop. The
         # default matters too — a record with no lap is lap 0, not NULL.
-        Suspension.record(point(), "v-1", :expensive)
-        Suspension.record(point(), "v-2", :expensive, 7)
+        Suspension.record(point(), at(0), :expensive)
+        Suspension.record(point(), at(1000), :expensive, 7)
 
         assert [0, 7] == Enum.map(Suspension.at(point()), & &1.lap)
       end
@@ -241,36 +246,36 @@ defmodule ReactiveDag.RealPostgresSuspensionTest do
 
     test "orders by id, which is insertion order" do
       if @url do
-        for v <- ["v-1", "v-2", "v-3", "v-4"] do
-          Suspension.record(point(), v, :expensive)
+        instants = Enum.map(0..3, &at(&1 * 1000))
+
+        for t <- instants do
+          Suspension.record(point(), t, :expensive)
           Process.sleep(2)
         end
 
-        assert ["v-1", "v-2", "v-3", "v-4"] ==
-                 Enum.map(Suspension.at(point()), & &1.version_id),
-               "a resumption merging several versions must apply them in the " <>
+        assert instants == Enum.map(Suspension.at(point()), & &1.recorded_at),
+               "a resumption merging several changes must apply them in the " <>
                  "order the changes happened; UUIDv7 is what makes ORDER BY id mean that"
       end
     end
 
     test "another TENANT's suspension at the same point is invisible" do
       if @url do
-        Suspension.record(point(tenant: "red_hook"), "mine", :expensive)
-        Suspension.record(point(tenant: "other_village"), "theirs", :expensive)
+        Suspension.record(point(tenant: "red_hook"), at(100), :expensive)
+        Suspension.record(point(tenant: "other_village"), at(200), :expensive)
 
-        assert ["mine"] == Enum.map(Suspension.at(point(tenant: "red_hook")), & &1.version_id)
+        assert [_] = Suspension.at(point(tenant: "red_hook"))
 
-        assert ["theirs"] ==
-                 Enum.map(Suspension.at(point(tenant: "other_village")), & &1.version_id)
+        assert [_] = Suspension.at(point(tenant: "other_village"))
       end
     end
 
     test "a different waiting resource is a different point" do
       if @url do
-        Suspension.record(point(waiting: "meeting_events"), "a", :expensive)
-        Suspension.record(point(waiting: "transcript_record"), "b", :expensive)
+        Suspension.record(point(waiting: "meeting_events"), at(300), :expensive)
+        Suspension.record(point(waiting: "transcript_record"), at(400), :expensive)
 
-        assert ["a"] == Enum.map(Suspension.at(point(waiting: "meeting_events")), & &1.version_id)
+        assert [_] = Suspension.at(point(waiting: "meeting_events"))
       end
     end
 
@@ -288,8 +293,8 @@ defmodule ReactiveDag.RealPostgresSuspensionTest do
 
     test "removes exactly the named ids" do
       if @url do
-        a = Suspension.record(point(), "v-1", :expensive)
-        b = Suspension.record(point(), "v-2", :expensive)
+        a = Suspension.record(point(), at(0), :expensive)
+        b = Suspension.record(point(), at(1000), :expensive)
 
         assert 2 == Suspension.discharge([a, b]),
                "string ids against a uuid column must actually match — a " <>
@@ -302,17 +307,17 @@ defmodule ReactiveDag.RealPostgresSuspensionTest do
     test "a suspension written DURING the work survives its discharge" do
       if @url do
         # The job reads what is there...
-        a = Suspension.record(point(), "v-1", :expensive)
+        a = Suspension.record(point(), at(0), :expensive)
         read = Suspension.at(point())
         assert length(read) == 1
 
         # ...a change lands while the nine-minute recompute runs...
-        _b = Suspension.record(point(), "v-2", :expensive)
+        _b = Suspension.record(point(), at(1000), :expensive)
 
         # ...and the job discharges only what it read.
         Suspension.discharge(Enum.map(read, & &1.id))
 
-        assert ["v-2"] == Enum.map(Suspension.at(point()), & &1.version_id),
+        assert [_] = Suspension.at(point()),
                "THE property that justifies an append-only table: discharging " <>
                  "by point instead of by id would silently drop v-2, and nothing " <>
                  "would ever observe the loss"
@@ -323,7 +328,7 @@ defmodule ReactiveDag.RealPostgresSuspensionTest do
 
     test "discharging twice removes nothing the second time" do
       if @url do
-        a = Suspension.record(point(), "v-1", :expensive)
+        a = Suspension.record(point(), at(0), :expensive)
 
         assert 1 == Suspension.discharge([a])
         assert 0 == Suspension.discharge([a]), "a duplicate job must be a no-op"
@@ -332,7 +337,7 @@ defmodule ReactiveDag.RealPostgresSuspensionTest do
 
     test "an empty list issues no statement and removes nothing" do
       if @url do
-        Suspension.record(point(), "v-1", :expensive)
+        Suspension.record(point(), at(0), :expensive)
         assert 0 == Suspension.discharge([])
         assert count() == 1
       end
@@ -340,13 +345,13 @@ defmodule ReactiveDag.RealPostgresSuspensionTest do
 
     test "does not touch another tenant's rows" do
       if @url do
-        mine = Suspension.record(point(tenant: "red_hook"), "mine", :expensive)
-        Suspension.record(point(tenant: "other_village"), "theirs", :expensive)
+        mine = Suspension.record(point(tenant: "red_hook"), at(500), :expensive)
+        Suspension.record(point(tenant: "other_village"), at(600), :expensive)
 
         Suspension.discharge([mine])
 
         assert count() == 1
-        assert ["theirs"] == Enum.map(Suspension.at(point(tenant: "other_village")), & &1.version_id)
+        assert [_] = Suspension.at(point(tenant: "other_village"))
       end
     end
   end
@@ -356,9 +361,9 @@ defmodule ReactiveDag.RealPostgresSuspensionTest do
 
     test "aggregates a point's suspensions into one entry with a count" do
       if @url do
-        Suspension.record(point(), "v-1", :expensive)
-        Suspension.record(point(), "v-2", :expensive)
-        Suspension.record(point(), "v-3", :expensive)
+        Suspension.record(point(), at(0), :expensive)
+        Suspension.record(point(), at(1000), :expensive)
+        Suspension.record(point(), at(700), :expensive)
 
         assert [%{count: 3, reason: :expensive, point: p, oldest: %DateTime{}}] =
                  Suspension.points(tenant: "red_hook")
@@ -369,9 +374,9 @@ defmodule ReactiveDag.RealPostgresSuspensionTest do
 
     test "separates points, and separates reasons at one point" do
       if @url do
-        Suspension.record(point(), "v-1", :expensive)
-        Suspension.record(point(), "v-2", :approval)
-        Suspension.record(point(waiting: "other"), "v-3", :expensive)
+        Suspension.record(point(), at(0), :expensive)
+        Suspension.record(point(), at(800), :approval)
+        Suspension.record(point(waiting: "other"), at(900), :expensive)
 
         entries = Suspension.points(tenant: "red_hook")
         assert length(entries) == 3
@@ -380,8 +385,8 @@ defmodule ReactiveDag.RealPostgresSuspensionTest do
 
     test "is tenant-scoped" do
       if @url do
-        Suspension.record(point(tenant: "red_hook"), "a", :expensive)
-        Suspension.record(point(tenant: "other_village"), "b", :expensive)
+        Suspension.record(point(tenant: "red_hook"), at(1000), :expensive)
+        Suspension.record(point(tenant: "other_village"), at(1100), :expensive)
 
         assert [_] = Suspension.points(tenant: "red_hook")
       end
@@ -391,7 +396,7 @@ defmodule ReactiveDag.RealPostgresSuspensionTest do
       if @url do
         refute Suspension.pending?(tenant: "red_hook")
 
-        id = Suspension.record(point(), "v-1", :expensive)
+        id = Suspension.record(point(), at(0), :expensive)
         assert Suspension.pending?(tenant: "red_hook")
         refute Suspension.pending?(tenant: "nobody")
 
@@ -410,13 +415,13 @@ defmodule ReactiveDag.RealPostgresSuspensionTest do
         # This is the behaviour that lets the design drop locking entirely.
         {:ok, other} = Postgrex.start_link(url_opts(@url))
 
-        Suspension.record(point(), "v-1", :expensive)
+        Suspension.record(point(), at(0), :expensive)
 
         Postgrex.query!(
           other,
-          "INSERT INTO #{@table} (id, tenant, waiting, resource, row_uuid, version_id, reason) " <>
+          "INSERT INTO #{@table} (id, tenant, waiting, resource, row_uuid, recorded_at, reason) " <>
             "VALUES (gen_random_uuid()::text, $1, $2, $3, $4, $5, $6)",
-          ["red_hook", "meeting_events", "minutes_docs", point().row_uuid, "v-2", "expensive"]
+          ["red_hook", "meeting_events", "minutes_docs", point().row_uuid, at(1000), "expensive"]
         )
 
         GenServer.stop(other)

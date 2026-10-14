@@ -83,7 +83,7 @@ defmodule ReactiveDag.Suspension do
 
   @type t :: %{
           id: String.t(),
-          version_id: String.t(),
+          recorded_at: DateTime.t() | nil,
           reason: reason(),
           lap: non_neg_integer()
         }
@@ -110,16 +110,17 @@ defmodule ReactiveDag.Suspension do
   `ReactiveDag.Cascade` refuses to record a lap past its budget, which is what
   bounds the chain.
   """
-  @spec record(point(), String.t(), reason(), non_neg_integer()) :: String.t()
-  def record(%{} = point, version_id, reason, lap \\ 0)
-      when is_binary(version_id) and reason in [:expensive, :approval] and is_integer(lap) and
+  @spec record(point(), DateTime.t() | nil, reason(), non_neg_integer()) :: String.t()
+  def record(%{} = point, recorded_at, reason, lap \\ 0)
+      when (is_nil(recorded_at) or is_struct(recorded_at, DateTime)) and
+             reason in [:expensive, :approval] and is_integer(lap) and
              lap >= 0 do
     id = uuid_v7()
 
     query!(
       """
       INSERT INTO #{table()}
-        (id, tenant, waiting, resource, row_uuid, version_id, reason, lap, inserted_at)
+        (id, tenant, waiting, resource, row_uuid, recorded_at, reason, lap, inserted_at)
       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, now())
       """,
       [
@@ -128,7 +129,7 @@ defmodule ReactiveDag.Suspension do
         point.waiting,
         point.resource,
         point.row_uuid,
-        version_id,
+        recorded_at,
         Atom.to_string(reason),
         lap
       ]
@@ -152,15 +153,20 @@ defmodule ReactiveDag.Suspension do
     %{rows: rows} =
       query!(
         """
-        SELECT id, version_id, reason, lap FROM #{table()}
+        SELECT id, recorded_at, reason, lap FROM #{table()}
         WHERE tenant = $1 AND waiting = $2 AND resource = $3 AND row_uuid = $4
         ORDER BY id
         """,
         [point.tenant, point.waiting, point.resource, point.row_uuid]
       )
 
-    Enum.map(rows, fn [id, version_id, reason, lap] ->
-      %{id: id, version_id: version_id, reason: String.to_existing_atom(reason), lap: lap || 0}
+    Enum.map(rows, fn [id, recorded_at, reason, lap] ->
+      %{
+        id: id,
+        recorded_at: as_utc(recorded_at),
+        reason: String.to_existing_atom(reason),
+        lap: lap || 0
+      }
     end)
   end
 
