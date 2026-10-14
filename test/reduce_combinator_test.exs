@@ -11,97 +11,23 @@ defmodule ReactiveDag.ReduceCombinatorTest do
   reading the table, and the change detection under test is
   `ReactiveDag.Node.Payload`'s comparison rather than a closure's opinion.
   """
-  use ExUnit.Case, async: false
+  use ReactiveDag.PostgresCase
+
+  alias ReactiveDag.Fixtures.ReduceCombinatorGraph
+  alias ReactiveDag.Fixtures.ReduceCombinatorGraph.{Lines, Summary}
 
   alias ReactiveDag.Node.Recompute
 
-  defmodule Domain do
-    use Ash.Domain, validate_config_inclusion?: false
-
-    resources do
-      allow_unregistered?(true)
-    end
-  end
-
-  defmodule Lines do
-    use Ash.Resource,
-      domain: Domain,
-      data_layer: Ash.DataLayer.Ets,
-      extensions: [ReactiveDag.Node]
-
-    ets do
-      private?(true)
-    end
-
-    attributes do
-      attribute :k, :string, primary_key?: true, allow_nil?: false, public?: true
-      attribute :fp, :string, public?: true
-      attribute :flagged, :boolean, public?: true, default: false
-    end
-
-    actions do
-      defaults [:read, :destroy]
-
-      create :create do
-        accept([:k, :fp, :flagged])
-      end
-    end
-
-    reactive do
-      id(:lines)
-      op(:source)
-      leaf?(true)
-    end
-  end
-
-  # fn slots over a node that owns its rows.
-  defmodule Summary do
-    use Ash.Resource,
-      domain: Domain,
-      data_layer: Ash.DataLayer.Ets,
-      extensions: [ReactiveDag.Node]
-
-    ets do
-      private?(true)
-    end
-
-    attributes do
-      attribute :key, :string, primary_key?: true, allow_nil?: false, public?: true
-      attribute :fp, :string, public?: true
-    end
-
-    actions do
-      defaults [:read, :destroy]
-
-      create :upsert do
-        upsert?(true)
-        upsert_identity(:by_key)
-        accept([:key, :fp])
-      end
-    end
-
-    identities do
-      identity :by_key, [:key]
-    end
-
-    reactive do
-      id(:summary)
-      op(:map)
-
-      reduce(
-        over: :lines,
-        query: fn q, dirty ->
-          send(ReactiveDag.ReduceCombinatorTest, {:query, dirty})
-          q
-        end,
-        group_by: fn line -> line.k end,
-        key: fn k -> k end,
-        into: fn _k, [line | _] -> %{fp: line.fp} end
-      )
-    end
+  setup_all do
+    migrate!(ReduceCombinatorGraph.Domain)
+    :ok
   end
 
   setup do
+    pid = Ecto.Adapters.SQL.Sandbox.start_owner!(ReactiveDag.TestRepo, shared: true)
+    on_exit(fn -> Ecto.Adapters.SQL.Sandbox.stop_owner(pid) end)
+
+    truncate(ReduceCombinatorGraph.tables())
     Process.register(self(), ReactiveDag.ReduceCombinatorTest)
 
     for {k, fp} <- [{"a", "new-h1"}, {"b", "old-h2"}, {"c", "new-h3"}] do
@@ -152,7 +78,7 @@ defmodule ReactiveDag.ReduceCombinatorTest do
   test "into: returning a LIST raises instructively — that shape is expand:" do
     defmodule ListInto do
       use Ash.Resource,
-        domain: ReactiveDag.ReduceCombinatorTest.Domain,
+        domain: ReactiveDag.Fixtures.ReduceCombinatorGraph.Domain,
         data_layer: Ash.DataLayer.Ets,
         extensions: [ReactiveDag.Node]
 

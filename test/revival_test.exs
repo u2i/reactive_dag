@@ -16,48 +16,23 @@ defmodule ReactiveDag.RevivalTest do
   other half: over-reporting would make every poll look like a change, which is
   the cost the engine exists to avoid.
   """
-  use ExUnit.Case, async: false
+  use ReactiveDag.PostgresCase
+
+  alias ReactiveDag.Fixtures.RevivalGraph
+  alias ReactiveDag.Fixtures.RevivalGraph.{Docs, Marked}
 
   alias ReactiveDag.Node.Rows
 
-  defmodule Domain do
-    use Ash.Domain, validate_config_inclusion?: false
-
-    resources do
-      allow_unregistered?(true)
-    end
-  end
-
-  defmodule Docs do
-    use Ash.Resource, domain: Domain, data_layer: Ash.DataLayer.Ets, extensions: [ReactiveDag.Node]
-
-    ets do
-    end
-
-    attributes do
-      attribute :key, :string, primary_key?: true, allow_nil?: false, public?: true
-      attribute :content_md5, :string, public?: true
-      attribute :status, :string, public?: true
-      attribute :fingerprint, :string, public?: true
-    end
-
-    actions do
-      defaults [:read, :destroy, update: [:status]]
-
-      create :upsert do
-        upsert?(true)
-        accept([:key, :content_md5, :status, :fingerprint])
-      end
-    end
-
-    reactive do
-      id(:docs)
-      leaf?(true)
-      fingerprint([:content_md5])
-    end
+  setup_all do
+    migrate!(RevivalGraph.Domain)
+    :ok
   end
 
   setup do
+    pid = Ecto.Adapters.SQL.Sandbox.start_owner!(ReactiveDag.TestRepo, shared: true)
+    on_exit(fn -> Ecto.Adapters.SQL.Sandbox.stop_owner(pid) end)
+
+    truncate(RevivalGraph.tables())
     for row <- Ash.read!(Docs), do: Ash.destroy!(row)
     :ok
   end
@@ -81,47 +56,6 @@ defmodule ReactiveDag.RevivalTest do
 
   defp live_keys do
     Docs |> Ash.read!() |> Enum.reject(&(&1.status == "tombstoned")) |> Enum.map(& &1.key)
-  end
-
-  # a node declaring the marking policy, rather than passing :retire per call
-  defmodule Marked do
-    use Ash.Resource,
-      domain: ReactiveDag.RevivalTest.Domain,
-      data_layer: Ash.DataLayer.Ets,
-      extensions: [ReactiveDag.Node]
-
-    ets do
-    end
-
-    attributes do
-      attribute :key, :string, primary_key?: true, allow_nil?: false, public?: true
-      attribute :content_md5, :string, public?: true
-      attribute :status, :string, public?: true
-      attribute :fingerprint, :string, public?: true
-    end
-
-    actions do
-      defaults [:read, :destroy, update: [:status]]
-
-      create :upsert do
-        upsert?(true)
-        accept([:key, :content_md5, :status, :fingerprint])
-      end
-    end
-
-    reactive do
-      id(:marked)
-      leaf?(true)
-      fingerprint([:content_md5])
-      retain_if_vanished(mark: &ReactiveDag.RevivalTest.mark_gone/1)
-    end
-  end
-
-  @doc false
-  def mark_gone(keys) do
-    for key <- keys, row = Enum.find(Ash.read!(Marked), &(&1.key == key)) do
-      row |> Ash.Changeset.for_update(:update, %{status: "tombstoned"}) |> Ash.update!()
-    end
   end
 
   describe "a returning key propagates" do
