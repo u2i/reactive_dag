@@ -21,138 +21,31 @@ defmodule ReactiveDag.RecomputeByTest do
   Consumed at COMPILE time: lowered to `over:` + `group_by:` + `key_rule`, and
   never traversed at recompute. A node reads its ONE input, materializes rows,
   and consumers query those rows rather than re-deriving them up the chain.
+
+  Runs on the shared `RenamedColumnGraph` fixture against a real database. That
+  fixture is deliberately separate from `ExpenseGraph`: here the input column
+  (`expense_cat`) is named differently from the unit (`category`), and the
+  mismatch IS the subject — a graph whose two columns agreed could not tell a
+  working mapping from one that silently matched on name.
   """
-  use ExUnit.Case, async: false
+  use ReactiveDag.PostgresCase
 
   alias ReactiveDag.{Cascade}
+  alias ReactiveDag.Fixtures.RenamedColumnGraph
+  alias ReactiveDag.Fixtures.RenamedColumnGraph.{CategoryTotals, Expenses}
   alias ReactiveDag.Node.Recompute
 
-  defmodule Domain do
-    use Ash.Domain, validate_config_inclusion?: false
-
-    resources do
-      allow_unregistered?(true)
-    end
+  setup_all do
+    migrate!(RenamedColumnGraph.Domain)
+    :ok
   end
-
-  defmodule Expenses do
-    use Ash.Resource,
-      domain: Domain,
-      data_layer: Ash.DataLayer.Ets,
-      extensions: [ReactiveDag.Node]
-
-    ets do
-      private?(true)
-    end
-
-    attributes do
-      attribute :key, :string, primary_key?: true, allow_nil?: false, public?: true
-      # deliberately NOT named like the rollup's column — the pair maps it
-      attribute :expense_cat, :string, public?: true
-      attribute :amount, :float, public?: true
-    end
-
-    actions do
-      defaults [:read, :destroy]
-
-      create :create do
-        accept([:key, :expense_cat, :amount])
-      end
-
-      update :revise do
-        accept([:amount])
-      end
-    end
-
-    reactive do
-      id(:expenses)
-      op(:source)
-      leaf?(true)
-    end
-  end
-
-  defmodule CategoryTotals do
-    use Ash.Resource,
-      domain: Domain,
-      data_layer: Ash.DataLayer.Ets,
-      extensions: [ReactiveDag.Node]
-
-    ets do
-      private?(true)
-    end
-
-    attributes do
-      attribute :key, :string, primary_key?: true, allow_nil?: false, public?: true
-      attribute :category, :string, public?: true
-      attribute :total, :float, public?: true
-      attribute :n, :integer, public?: true
-    end
-
-    identities do
-      identity :by_key, [:key], pre_check_with: ReactiveDag.RecomputeByTest.Domain
-    end
-
-    actions do
-      defaults [:read, :destroy]
-
-      create :upsert do
-        upsert?(true)
-        upsert_identity(:by_key)
-        accept([:key, :category, :total, :n])
-      end
-    end
-
-    reactive do
-      id(:category_totals)
-      op(:fold)
-
-      # THE UNIT: a change to an expense's :expense_cat invalidates my
-      # :category unit — redo it whole. Supplies the edge, the grouping and
-      # the claim rule.
-      recompute_by :category, to: :expenses, from: :expense_cat
-
-      reduce into: [sum: [amount: :total], count: :n]
-    end
-  end
-
-  defmodule FakeRepo do
-    def start_link, do: Agent.start_link(fn -> MapSet.new() end, name: __MODULE__)
-
-    def query!("INSERT INTO " <> _, params) do
-      params
-      |> Enum.chunk_every(7)
-      |> Enum.each(fn [cell, _tenant, key, _r, _t, _held, vid] -> Agent.update(__MODULE__, &MapSet.put(&1, {cell, key})) end)
-
-      %{rows: []}
-    end
-
-    def query!("SELECT DISTINCT cell_id" <> _, _params) do
-      ids = Agent.get(__MODULE__, & &1) |> Enum.map(&elem(&1, 0)) |> Enum.uniq()
-      %{rows: Enum.map(ids, &[&1])}
-    end
-
-    def query!("DELETE FROM " <> _, [cell | _tenant]) do
-      keys =
-        Agent.get_and_update(__MODULE__, fn set ->
-          {mine, rest} = Enum.split_with(set, fn {c, _} -> c == cell end)
-          {Enum.map(mine, &elem(&1, 1)), MapSet.new(rest)}
-        end)
-
-      %{rows: Enum.map(keys, &[&1, nil])}
-    end
-
-    def query!("SELECT COUNT" <> _, _params), do: %{rows: [[Agent.get(__MODULE__, &MapSet.size/1)]]}
-  end
-
 
   setup do
-    start_supervised!(%{id: FakeRepo, start: {FakeRepo, :start_link, []}})
-    prev_repo = Application.get_env(:reactive_dag, :repo)
-    Application.put_env(:reactive_dag, :repo, FakeRepo)
+    pid = Ecto.Adapters.SQL.Sandbox.start_owner!(ReactiveDag.TestRepo, shared: true)
+    on_exit(fn -> Ecto.Adapters.SQL.Sandbox.stop_owner(pid) end)
 
-    on_exit(fn ->
-      Application.put_env(:reactive_dag, :repo, prev_repo)
-    end)
+    migrate_library_tables!()
+    truncate(RenamedColumnGraph.tables())
 
     for {k, cat, amt} <- [
           {"e1", "travel", 100.0},
@@ -167,7 +60,7 @@ defmodule ReactiveDag.RecomputeByTest do
     :ok
   end
 
-  defp plan, do: ReactiveDag.Node.graph([Expenses, CategoryTotals])
+  defp plan, do: RenamedColumnGraph.plan()
 
   defp drain(plan),
     do: ReactiveDag.Test.Pending.cascade(plan)
@@ -237,7 +130,7 @@ defmodule ReactiveDag.RecomputeByTest do
   test "`recompute_by :cell` is the whole-cell unit (what key_rule :all said)" do
     defmodule ByAmount do
       use Ash.Resource,
-        domain: ReactiveDag.RecomputeByTest.Domain,
+        domain: ReactiveDag.Fixtures.RenamedColumnGraph.Domain,
         data_layer: Ash.DataLayer.Ets,
         extensions: [ReactiveDag.Node]
 
@@ -263,9 +156,9 @@ defmodule ReactiveDag.RecomputeByTest do
         id(:by_amount)
         # whole-cell unit: any change re-prices everything, so the reduce
         # still says how rows are folded
-        recompute_by :cell, to: :expenses
+        recompute_by(:cell, to: :expenses)
 
-        reduce group_by: [:amount], into: [count: :n]
+        reduce(group_by: [:amount], into: [count: :n])
       end
     end
 
@@ -283,13 +176,13 @@ defmodule ReactiveDag.RecomputeByTest do
     test "naming no input at all" do
       defmodule NoEdge do
         use Ash.Resource,
-          domain: ReactiveDag.RecomputeByTest.Domain,
+          domain: ReactiveDag.Fixtures.RenamedColumnGraph.Domain,
           data_layer: Ash.DataLayer.Simple,
           extensions: [ReactiveDag.Node]
 
         reactive do
           id(:no_edge)
-          reduce group_by: [:category], into: [count: :n]
+          reduce(group_by: [:category], into: [count: :n])
         end
       end
 
@@ -302,16 +195,16 @@ defmodule ReactiveDag.RecomputeByTest do
     test "naming the input twice" do
       defmodule TwiceDeclared do
         use Ash.Resource,
-          domain: ReactiveDag.RecomputeByTest.Domain,
+          domain: ReactiveDag.Fixtures.RenamedColumnGraph.Domain,
           data_layer: Ash.DataLayer.Simple,
           extensions: [ReactiveDag.Node]
 
         reactive do
           id(:twice_declared)
 
-          recompute_by :category, to: :expenses, from: :expense_cat
+          recompute_by(:category, to: :expenses, from: :expense_cat)
 
-          reduce over: :expenses, into: [count: :n]
+          reduce(over: :expenses, into: [count: :n])
         end
       end
 
@@ -324,16 +217,16 @@ defmodule ReactiveDag.RecomputeByTest do
     test "a unit with no `from:` and no group_by to cover it" do
       defmodule HalfPair do
         use Ash.Resource,
-          domain: ReactiveDag.RecomputeByTest.Domain,
+          domain: ReactiveDag.Fixtures.RenamedColumnGraph.Domain,
           data_layer: Ash.DataLayer.Simple,
           extensions: [ReactiveDag.Node]
 
         reactive do
           id(:half_pair)
 
-          recompute_by :category, to: :expenses
+          recompute_by(:category, to: :expenses)
 
-          reduce into: [count: :n]
+          reduce(into: [count: :n])
         end
       end
 
@@ -346,13 +239,13 @@ defmodule ReactiveDag.RecomputeByTest do
     test "a plain over: still requires group_by" do
       defmodule NoGroup do
         use Ash.Resource,
-          domain: ReactiveDag.RecomputeByTest.Domain,
+          domain: ReactiveDag.Fixtures.RenamedColumnGraph.Domain,
           data_layer: Ash.DataLayer.Simple,
           extensions: [ReactiveDag.Node]
 
         reactive do
           id(:no_group)
-          reduce over: :expenses, into: [count: :n]
+          reduce(over: :expenses, into: [count: :n])
         end
       end
 
