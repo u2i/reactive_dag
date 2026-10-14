@@ -273,7 +273,7 @@ defmodule ReactiveDag.InsightsTest do
 
       ReactiveDag.Suspension.record(
         %{tenant: "*", waiting: "expenses", resource: "expenses", row_uuid: "e1"},
-        "v1",
+        ~U[2026-01-01 00:00:01.000000Z],
         :expensive
       )
 
@@ -300,7 +300,7 @@ defmodule ReactiveDag.InsightsTest do
           resource: "some_other_graph",
           row_uuid: "x"
         },
-        "v1",
+        ~U[2026-01-01 00:00:01.000000Z],
         :expensive
       )
 
