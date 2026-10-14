@@ -614,12 +614,12 @@ defmodule ReactiveDag.Cascade do
 
     entries =
       case work.keys do
-        ["*"] -> [{"*", "*", nil}]
-        keys -> Enum.map(keys, &{&1, Map.get(work.versions, &1, "*"), &1})
+        ["*"] -> [{"*", nil, nil}]
+        keys -> Enum.map(keys, &{&1, Map.get(work.versions, &1), &1})
       end
 
     points =
-      for {row_uuid, version_id, _key} <- entries do
+      for {row_uuid, recorded_at, _key} <- entries do
         source = work.from || cell_id
 
         point = %{
@@ -629,7 +629,7 @@ defmodule ReactiveDag.Cascade do
           row_uuid: row_uuid
         }
 
-        Suspension.record(point, version_id, reason, lap)
+        Suspension.record(point, recorded_at, reason, lap)
 
         Map.put(point, :reason, reason)
       end
@@ -869,12 +869,12 @@ defmodule ReactiveDag.Cascade do
     if "*" in merged, do: ["*"], else: Enum.sort(merged)
   end
 
-  # An entry is a bare key or `{key, version_id}`. Splitting here means the rest
-  # of the walk deals in one shape.
+  # An entry is a bare key or `{key, recorded_at}`. Splitting here means the
+  # rest of the walk deals in one shape.
   defp split_entries(entries, base_versions) do
     Enum.reduce(entries, {[], base_versions}, fn
-      {key, version_id}, {keys, versions} when is_binary(version_id) ->
-        {[key | keys], Map.put(versions, key, version_id)}
+      {key, %DateTime{} = recorded_at}, {keys, versions} ->
+        {[key | keys], Map.put(versions, key, recorded_at)}
 
       {key, _}, {keys, versions} ->
         {[key | keys], versions}

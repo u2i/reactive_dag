@@ -266,12 +266,12 @@ defmodule ReactiveDag.CascadeTest do
         ])
 
       {:ok, report} =
-        Cascade.run(plan, [%{cell: "leaf", keys: ["k1"], versions: %{"k1" => "v-1"}}])
+        Cascade.run(plan, [%{cell: "leaf", keys: ["k1"], versions: %{"k1" => ~U[2026-01-01 00:00:01.000000Z]}}])
 
       assert Ran.count("slow") == 0, "the expensive cell must NOT run inline"
       assert Ran.count("after_slow") == 0, "and nothing below it runs either"
 
-      assert [%{waiting: "slow", resource: "leaf", version_id: "v-1", reason: "expensive"}] =
+      assert [%{waiting: "slow", resource: "leaf", recorded_at: ~U[2026-01-01 00:00:01.000000Z], reason: "expensive"}] =
                FakeRepo.recorded()
 
       assert [%{waiting: "slow", reason: :expensive}] = report.suspended
@@ -317,13 +317,14 @@ defmodule ReactiveDag.CascadeTest do
 
       {:ok, _} =
         Cascade.run(plan, [
-          %{cell: "leaf", keys: ["a", "b", "c"], versions: %{"a" => "v-a", "b" => "v-b"}}
+          %{cell: "leaf", keys: ["a", "b", "c"], versions: %{"a" => ~U[2026-01-01 00:00:01.000000Z], "b" => ~U[2026-01-01 00:00:02.000000Z]}}
         ])
 
       recorded = FakeRepo.recorded()
       assert length(recorded) == 3, "the row is what a resumption narrows by"
 
-      assert ["v-a", "v-b", "*"] == Enum.map(recorded, & &1.version_id),
+      assert [~U[2026-01-01 00:00:01.000000Z], ~U[2026-01-01 00:00:02.000000Z], nil] ==
+               Enum.map(recorded, & &1.recorded_at),
              "a key with no version suspends with the sentinel, not a nil"
     end
 

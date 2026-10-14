@@ -304,7 +304,7 @@ if Code.ensure_loaded?(Oban.Worker) do
 
     # `"*"` subsumes: one unattributable suspension means the whole cell.
     defp keys_from(suspensions, point) do
-      if point.row_uuid == "*" or Enum.any?(suspensions, &(&1.version_id == "*")) do
+      if point.row_uuid == "*" or Enum.any?(suspensions, &is_nil(&1.recorded_at)) do
         ["*"]
       else
         [point.row_uuid]
@@ -313,14 +313,17 @@ if Code.ensure_loaded?(Oban.Worker) do
 
     defp version_map(_suspensions, ["*"]), do: %{}
 
-    # The EARLIEST version for the key — `at/1` returns them in insertion order,
-    # so the first is the change that succeeded the last settled state. That is
-    # what a consumer must reprice from; a later one describes a state the graph
-    # never saw settled.
+    # The EARLIEST recorded instant for the key — the change that succeeded the
+    # last settled state. A later one describes a state the graph never saw
+    # settled, so repricing from it would skip the intervening change.
+    #
+    # `min_by` rather than "the first `at/1` returned": earliest-is-smallest is
+    # intrinsic to a timestamp, where the old version id relied on the read
+    # coming back in insertion order to mean anything.
     defp version_map(suspensions, [key]) do
-      case Enum.find(suspensions, &(&1.version_id != "*")) do
+      case suspensions |> Enum.reject(&is_nil(&1.recorded_at)) |> Enum.min_by(& &1.recorded_at, DateTime, fn -> nil end) do
         nil -> %{}
-        %{version_id: vid} -> %{key => vid}
+        %{recorded_at: at} -> %{key => at}
       end
     end
 
