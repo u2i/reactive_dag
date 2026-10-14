@@ -52,7 +52,6 @@ defmodule ReactiveDag.UuidKeyIntegrationTest do
     migrate_library_tables!()
     truncate(UuidKeyGraph.tables())
     prev = Application.get_env(:reactive_dag, :repo)
-    Application.put_env(:reactive_dag, :repo, FakeRepo)
 
     on_exit(fn ->
       if prev,

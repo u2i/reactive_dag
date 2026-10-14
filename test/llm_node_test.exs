@@ -60,12 +60,6 @@ defmodule ReactiveDag.LlmNodeTest do
     on_exit(fn -> Application.delete_env(:reactive_dag, :fixture_llm) end)
 
     start_supervised!(%{id: FakeLLM, start: {FakeLLM, :start_link, []}})
-    prev_repo = Application.get_env(:reactive_dag, :repo)
-    Application.put_env(:reactive_dag, :repo, FakeRepo)
-
-    on_exit(fn ->
-      Application.put_env(:reactive_dag, :repo, prev_repo)
-    end)
 
     People |> Ash.Changeset.for_create(:create, %{key: "p1", name: "Ada"}) |> Ash.create!()
 

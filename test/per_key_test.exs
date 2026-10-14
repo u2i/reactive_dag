@@ -47,12 +47,6 @@ defmodule ReactiveDag.PerKeyTest do
     migrate_library_tables!()
     truncate(PerKeyGraph.tables())
     start_supervised!(%{id: Calls, start: {Calls, :start_link, []}})
-    prev_repo = Application.get_env(:reactive_dag, :repo)
-    Application.put_env(:reactive_dag, :repo, FakeRepo)
-
-    on_exit(fn ->
-      Application.put_env(:reactive_dag, :repo, prev_repo)
-    end)
 
     for {k, body} <- [{"t1", "first call"}, {"t2", "second call"}] do
       Transcripts

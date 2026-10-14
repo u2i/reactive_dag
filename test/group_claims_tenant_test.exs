@@ -25,107 +25,22 @@ defmodule ReactiveDag.GroupClaimsTenantTest do
   that exist to express the GROUPING, and threading a tenant through each would
   put the plan's identity into signatures that are otherwise about fields.
   """
-  use ExUnit.Case, async: false
+  use ReactiveDag.PostgresCase
 
-  defmodule Domain do
-    use Ash.Domain, validate_config_inclusion?: false
+  alias ReactiveDag.Fixtures.GroupClaimsTenantGraph
+  alias ReactiveDag.Fixtures.GroupClaimsTenantGraph.{Lines, Rollup}
 
-    resources do
-      allow_unregistered?(true)
-    end
+  setup_all do
+    migrate!(GroupClaimsTenantGraph.Domain)
+    :ok
   end
 
-  defmodule Lines do
-    use Ash.Resource,
-      domain: Domain,
-      data_layer: Ash.DataLayer.Ets,
-      extensions: [ReactiveDag.Node]
+  setup do
+    pid = Ecto.Adapters.SQL.Sandbox.start_owner!(ReactiveDag.TestRepo, shared: true)
+    on_exit(fn -> Ecto.Adapters.SQL.Sandbox.stop_owner(pid) end)
 
-    ets do
-      private?(true)
-    end
-
-    multitenancy do
-      strategy :attribute
-      attribute :org_id
-    end
-
-    attributes do
-      uuid_primary_key(:id)
-      attribute :org_id, :string, public?: true
-      attribute :line_key, :string, allow_nil?: false, public?: true
-      attribute :fund, :string, public?: true
-      attribute :amount, :integer, public?: true
-    end
-
-    identities do
-      identity :by_org_line, [:org_id, :line_key], pre_check_with: Domain
-    end
-
-    actions do
-      defaults [:read, :destroy]
-
-      create :upsert,
-        upsert?: true,
-        upsert_identity: :by_org_line,
-        accept: [:org_id, :line_key, :fund, :amount]
-    end
-
-    reactive do
-      id(:lines)
-      leaf?(true)
-      payload_key(:line_key)
-      row_key([:org_id, :line_key])
-    end
-  end
-
-  defmodule Rollup do
-    use Ash.Resource,
-      domain: Domain,
-      data_layer: Ash.DataLayer.Ets,
-      extensions: [ReactiveDag.Node]
-
-    ets do
-      private?(true)
-    end
-
-    multitenancy do
-      strategy :attribute
-      attribute :org_id
-    end
-
-    attributes do
-      uuid_primary_key(:id)
-      attribute :org_id, :string, public?: true
-      attribute :fund, :string, allow_nil?: false, public?: true
-      attribute :total, :integer, public?: true
-    end
-
-    identities do
-      identity :by_org_fund, [:org_id, :fund], pre_check_with: Domain
-    end
-
-    actions do
-      defaults [:read, :destroy]
-
-      create :upsert,
-        upsert?: true,
-        upsert_identity: :by_org_fund,
-        accept: [:org_id, :fund, :total]
-    end
-
-    reactive do
-      id(:rollup)
-      op(:fold)
-      payload_key(:fund)
-      row_key([:org_id, :fund])
-
-      # THE narrowing declaration: a changed line invalidates its FUND's unit,
-      # not the whole cell. Lowers to `key_rule :group` plus the `over:` and
-      # `group_by:` the reduce needs.
-      recompute_by(:fund, to: :lines, from: :fund)
-      reduce(into: [sum: [amount: :total]])
-    end
+    truncate(GroupClaimsTenantGraph.tables())
+    :ok
   end
 
   defp seed(org, line_key, fund, amount) do
