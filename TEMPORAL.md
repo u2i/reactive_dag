@@ -178,7 +178,9 @@ period that is already open.
 
   * What does `as_of` return for an instant inside a closed period? The
     staleness query needs the prior boundary, not just point-in-time.
-  * Does the in-place write need the prior row in hand (to read its lower
-    bound), and is that read already on the write path? `Payload` fetches
-    `prior` for `moved?/3`, so probably yes — but the period column has to be
-    selected, which it is not today.
+  * ~~Does the in-place write need the prior row, and is that read already on
+    the write path?~~ **Yes, and it is free.** `spike/temporal_prior_period.exs`:
+    an ordinary `Ash.read_one!` — the exact call `Payload.existing/4` makes —
+    returns the period as `%Ash.Range{lower: ~U[...], upper: nil}`. No extra
+    query, no field selection, no API change. `prior.valid_at.lower` is the
+    `as_of` an in-place write needs.
