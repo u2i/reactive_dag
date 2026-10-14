@@ -7,94 +7,12 @@ defmodule ReactiveDag.StaleTest do
   leave a row stale with nothing recording the fact, and the engine has no way
   to know. The comparison does.
   """
-  use ExUnit.Case, async: false
+  use ReactiveDag.PostgresCase
+
+  alias ReactiveDag.Fixtures.StaleGraph
+  alias ReactiveDag.Fixtures.StaleGraph.{Derived, Source}
 
   alias ReactiveDag.Stale
-
-  defmodule Domain do
-    use Ash.Domain, validate_config_inclusion?: false
-    resources(do: allow_unregistered?(true))
-  end
-
-  defmodule Source do
-    use Ash.Resource,
-      domain: ReactiveDag.StaleTest.Domain,
-      data_layer: Ash.DataLayer.Ets,
-      extensions: [ReactiveDag.Node]
-
-    ets(do: private?(true))
-
-    temporal do
-      attribute :valid_at
-      recorded_at :recorded_at
-    end
-
-    attributes do
-      attribute :key, :string, primary_key?: true, allow_nil?: false, public?: true
-      attribute :amount, :float, public?: true
-
-      attribute :recorded_at, :utc_datetime_usec,
-        public?: true,
-        default: &DateTime.utc_now/0,
-        update_default: &DateTime.utc_now/0
-    end
-
-    actions do
-      defaults [:read, :destroy]
-      # `recorded_at` MUST be named in `upsert_fields`, or an upsert that
-      # changes a value leaves the stamp at its create value — and staleness,
-      # which compares those stamps, reports nothing moved. Measured; see
-      # `spike/temporal_upsert_recorded_at.exs`.
-      create :upsert,
-        upsert?: true,
-        accept: [:key, :amount],
-        upsert_fields: [:amount, :recorded_at]
-    end
-
-    reactive do
-      id(:source)
-      leaf?(true)
-    end
-  end
-
-  defmodule Derived do
-    use Ash.Resource,
-      domain: ReactiveDag.StaleTest.Domain,
-      data_layer: Ash.DataLayer.Ets,
-      extensions: [ReactiveDag.Node]
-
-    ets(do: private?(true))
-
-    temporal do
-      attribute :valid_at
-      recorded_at :recorded_at
-    end
-
-    attributes do
-      attribute :key, :string, primary_key?: true, allow_nil?: false, public?: true
-      attribute :doubled, :float, public?: true
-
-      attribute :recorded_at, :utc_datetime_usec,
-        public?: true,
-        default: &DateTime.utc_now/0,
-        update_default: &DateTime.utc_now/0
-    end
-
-    actions do
-      defaults [:read, :destroy]
-
-      create :upsert,
-        upsert?: true,
-        accept: [:key, :doubled],
-        upsert_fields: [:doubled, :recorded_at]
-    end
-
-    reactive do
-      id(:derived)
-      depends_on([:source])
-      compute(ReactiveDag.StaleTest.Double)
-    end
-  end
 
   defmodule Double do
     @behaviour ReactiveDag.Op
@@ -108,7 +26,16 @@ defmodule ReactiveDag.StaleTest do
     resource |> Ash.Changeset.for_create(:upsert, attrs) |> Ash.create!()
   end
 
+  setup_all do
+    migrate!(StaleGraph.Domain)
+    :ok
+  end
+
   setup do
+    pid = Ecto.Adapters.SQL.Sandbox.start_owner!(ReactiveDag.TestRepo, shared: true)
+    on_exit(fn -> Ecto.Adapters.SQL.Sandbox.stop_owner(pid) end)
+
+    truncate(StaleGraph.tables())
     for r <- [Source, Derived], row <- Ash.read!(r), do: Ash.destroy!(row)
     :ok
   end

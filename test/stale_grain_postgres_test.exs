@@ -146,6 +146,16 @@ defmodule ReactiveDag.StaleGrainPostgresTest do
     resource |> Ash.Changeset.for_create(:upsert, attrs) |> Ash.create!()
   end
 
+  test "the rule lowers to :group, so the grain join is what gets asked" do
+    assert [{"lines", "rollups", :group}] = Stale.edges(plan())
+  end
+
+  test "nothing derived yet is not stale — it is unstarted" do
+    write(Lines, %{key: "l1", fy: "FY24", amount: 10.0})
+
+    assert {:ok, []} = Stale.on_edge(plan(), "lines", "rollups")
+  end
+
   test "the GENERATED table really is WITHOUT OVERLAPS" do
     # Guards the fixture itself. On a plain primary key every other test in
     # this file would still pass while testing nothing about history — the

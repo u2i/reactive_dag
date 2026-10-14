@@ -13,49 +13,12 @@ defmodule ReactiveDag.TenantedCountsTest do
   someone asked why the question marks were there — 33 of 35 cells were
   affected and nothing said so.
   """
-  use ExUnit.Case, async: false
+  use ReactiveDag.PostgresCase
+
+  alias ReactiveDag.Fixtures.TenantedCountsGraph
+  alias ReactiveDag.Fixtures.TenantedCountsGraph.{Scoped}
 
   alias ReactiveDag.{Insights, Node.Rows, Plan}
-
-  defmodule Domain do
-    use Ash.Domain, validate_config_inclusion?: false
-
-    resources do
-      allow_unregistered?(true)
-    end
-  end
-
-  defmodule Scoped do
-    use Ash.Resource, domain: Domain, data_layer: Ash.DataLayer.Ets, extensions: [ReactiveDag.Node]
-
-    ets do
-    end
-
-    multitenancy do
-      strategy(:attribute)
-      attribute(:org)
-    end
-
-    attributes do
-      attribute :key, :string, primary_key?: true, allow_nil?: false, public?: true
-      attribute :org, :string, allow_nil?: false, public?: true
-      attribute :status, :string, public?: true
-    end
-
-    actions do
-      defaults [:read, :destroy]
-
-      create :upsert do
-        upsert?(true)
-        accept([:key, :org, :status])
-      end
-    end
-
-    reactive do
-      id(:scoped)
-      leaf?(true)
-    end
-  end
 
   defp cell do
     %ReactiveDag.Cell{
@@ -67,7 +30,17 @@ defmodule ReactiveDag.TenantedCountsTest do
     }
   end
 
+  setup_all do
+    migrate!(TenantedCountsGraph.Domain)
+    :ok
+  end
+
   setup do
+    pid = Ecto.Adapters.SQL.Sandbox.start_owner!(ReactiveDag.TestRepo, shared: true)
+    on_exit(fn -> Ecto.Adapters.SQL.Sandbox.stop_owner(pid) end)
+
+    truncate(TenantedCountsGraph.tables())
+
     for {key, org, status} <- [
           {"a", "acme", "present"},
           {"b", "acme", "failing"},

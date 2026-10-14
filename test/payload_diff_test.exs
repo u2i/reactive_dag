@@ -15,35 +15,24 @@ defmodule ReactiveDag.Node.PayloadDiffTest do
   equivalence is what these tests are really about: a diff must not read
   differently depending on where it was born.
   """
-  use ExUnit.Case, async: false
+  use ReactiveDag.PostgresCase
+
+  alias ReactiveDag.Fixtures.PayloadDiffUnitGraph
+  alias ReactiveDag.Fixtures.PayloadDiffUnitGraph.{Line}
 
   alias ReactiveDag.Node.{Payload, Diff}
 
-  defmodule Domain do
-    use Ash.Domain, validate_config_inclusion?: false
-
-    resources do
-      allow_unregistered?(true)
-    end
+  setup_all do
+    migrate!(PayloadDiffUnitGraph.Domain)
+    :ok
   end
 
-  defmodule Line do
-    use Ash.Resource, domain: Domain, data_layer: Ash.DataLayer.Ets
+  setup do
+    pid = Ecto.Adapters.SQL.Sandbox.start_owner!(ReactiveDag.TestRepo, shared: true)
+    on_exit(fn -> Ecto.Adapters.SQL.Sandbox.stop_owner(pid) end)
 
-    ets do
-      private?(true)
-    end
-
-    attributes do
-      attribute :line_key, :string, primary_key?: true, allow_nil?: false, public?: true
-      attribute :fund, :string, public?: true
-      attribute :value, :integer, public?: true
-    end
-
-    actions do
-      defaults [:read, :destroy]
-      create :upsert, upsert?: true, accept: [:line_key, :fund, :value]
-    end
+    truncate(PayloadDiffUnitGraph.tables())
+    :ok
   end
 
   defp put(key, attrs), do: Payload.upsert(Line, :line_key, key, attrs, :upsert)
