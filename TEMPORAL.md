@@ -327,12 +327,36 @@ applied to a projection rather than a key.
 `btree_gist` extension, runs the suite with the `:postgres` tag included.
 Plain `mix test` excludes that tag and is unaffected.
 
+### The DDL is GENERATED from the DSL
+
+`PostgresCase.migrate!/1` hands the test's own resources to
+`AshPostgres.MigrationGenerator`, runs what it generates, and drops the tables
+after. Nothing about the schema is written twice.
+
+I first wrote these tables by hand, on the assumption that the generator needs
+a compiled application's resource list and so has nothing to work from for
+resources declared inline in a test body. That was WRONG, and checking took
+one command: `generate/2` takes DOMAINS and asks
+`Ash.Domain.Info.resources/1`. Inline resources are fine. The one real
+requirement is a domain that LISTS them — `allow_unregistered?` reports an
+empty resource list, so the generator finds nothing to generate.
+
+Generating matters more here than it would elsewhere. These tests exist to
+catch what ETS cannot answer, and hand-written DDL that drifts from what the
+generator emits hides exactly that class of bug behind a table shaped
+differently from the real one. A test running against a PLAIN primary key
+would pass every assertion while testing nothing about history — the table
+holds one version per key, exactly as ETS does. (There is still an assertion
+that the generated PK really is `WITHOUT OVERLAPS`: it proves the DSL's
+`temporal` block reached the schema rather than being silently ignored.)
+
 ### Why both substrates, rather than porting the suite
 
-The 64 resource files run on ETS and should stay there. A DSL test's fixture
-IS the resource, defined inline in the test body, and ETS holds one with no
-migration. Porting them would mean hand-writing DDL for 64 files to test the
-DSL, which is not what those files are about.
+The 64 resource files run on ETS and should stay there — but the reason is
+NOT that porting is impractical. With `migrate!/1` it is now mechanical. The
+reason is that those files test the DSL, and ETS answers DSL questions
+correctly and faster. Postgres earns its place only where the substrates
+disagree.
 
 What Postgres is for is the places where ETS CANNOT give a trustworthy answer:
 
@@ -353,7 +377,7 @@ What Postgres is for is the places where ETS CANNOT give a trustworthy answer:
 MEASURED, `test/stale_grain_postgres_test.exs`: all three hold, and the move
 case claims both units through real SQL history.
 
-### Two things that cost time
+### Three things that cost time
 
 `setup_all` cannot skip a module. ExUnit treats `:skip` as a TAG, and a value
 returned from `setup_all` lands in the context where nothing acts on it — every
@@ -365,3 +389,16 @@ DDL must bypass the sandbox. It has to outlive the per-test transaction that
 gets rolled back, so `exec/2` opens its own short-lived connection while
 `exec_sandboxed/2` uses the test's. Isolation was then verified directly
 rather than assumed: one test writes a row, the next asserts it sees zero.
+
+The MIGRATOR needs its own repo. It runs through whatever repo it is given and
+cannot take a connection of its own, so against the sandboxed test repo it
+either finds no owner (nothing holds a checkout in `setup_all`) or wraps the
+DDL in a transaction the first test rolls back. `ReactiveDag.MigrationRepo` is
+the same database with an ordinary pool, started on demand and stopped
+straight after.
+
+And the migration VERSION must be the file's own timestamp, not a counter. A
+counter collides with versions `schema_migrations` already holds from an
+earlier module, and the migrator then SKIPS the migration silently — leaving
+the test to fail on a table that was never created, which reads like a bug in
+the code under test rather than in the harness.
