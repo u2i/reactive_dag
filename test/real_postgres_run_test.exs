@@ -21,6 +21,13 @@ defmodule ReactiveDag.RealPostgresRunTest do
   """
   use ExUnit.Case, async: false
 
+  # Tagged like the rest of the Postgres suite, so a bare `mix test` excludes
+  # it rather than running it without a database. It gates per-test on `@url`
+  # internally, but not every test does — one asserted on repo isolation and
+  # failed outright when there was no repo, which made a container-less run
+  # red for a reason that had nothing to do with the code.
+  @moduletag :postgres
+
   alias ReactiveDag.Run
 
   @url System.get_env("REACTIVE_DAG_TEST_DATABASE_URL")
