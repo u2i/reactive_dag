@@ -20,134 +20,24 @@ defmodule ReactiveDag.RetireVanishedTest do
   matches a genuinely NEW unit, so it would force whole-cell forever. Fixing it
   exactly needs input-key → unit provenance, which is a schema addition.
   """
-  use ExUnit.Case, async: false
+  use ReactiveDag.PostgresCase
 
   alias ReactiveDag.{Cascade}
+  alias ReactiveDag.Fixtures.ExpenseGraph
+  alias ReactiveDag.Fixtures.ExpenseGraph.{CategoryTotals, Expenses}
   alias ReactiveDag.Node.Recompute
 
-  defmodule Domain do
-    use Ash.Domain, validate_config_inclusion?: false
-
-    resources do
-      allow_unregistered?(true)
-    end
-  end
-
-  defmodule Expenses do
-    use Ash.Resource,
-      domain: Domain,
-      data_layer: Ash.DataLayer.Ets,
-      extensions: [ReactiveDag.Node]
-
-    ets do
-      private?(true)
-    end
-
-    attributes do
-      attribute :key, :string, primary_key?: true, allow_nil?: false, public?: true
-      attribute :category, :string, public?: true
-      attribute :amount, :float, public?: true
-    end
-
-    actions do
-      defaults [:read, :destroy]
-
-      create :create do
-        accept([:key, :category, :amount])
-      end
-
-      update :revise do
-        accept([:amount])
-      end
-
-      update :recategorise do
-        accept([:category])
-      end
-    end
-
-    reactive do
-      id(:expenses)
-      op(:source)
-      leaf?(true)
-    end
-  end
-
-  defmodule CategoryTotals do
-    use Ash.Resource,
-      domain: Domain,
-      data_layer: Ash.DataLayer.Ets,
-      extensions: [ReactiveDag.Node]
-
-    ets do
-      private?(true)
-    end
-
-    attributes do
-      attribute :key, :string, primary_key?: true, allow_nil?: false, public?: true
-      attribute :category, :string, public?: true
-      attribute :total, :float, public?: true
-      attribute :n, :integer, public?: true
-    end
-
-    identities do
-      identity :by_key, [:key], pre_check_with: ReactiveDag.RetireVanishedTest.Domain
-    end
-
-    actions do
-      # NB :destroy — a node that reconciles needs a way to retire its rows
-      defaults [:read, :destroy]
-
-      create :upsert do
-        upsert?(true)
-        upsert_identity(:by_key)
-        accept([:key, :category, :total, :n])
-      end
-    end
-
-    reactive do
-      id(:category_totals)
-      op(:fold)
-
-      recompute_by :category, to: :expenses, from: :category
-      reduce into: [sum: [amount: :total], count: :n]
-    end
-  end
-
-  defmodule FakeRepo do
-    def start_link, do: Agent.start_link(fn -> MapSet.new() end, name: __MODULE__)
-
-    def query!("INSERT INTO " <> _, params) do
-      params
-      |> Enum.chunk_every(7)
-      |> Enum.each(fn [cell, _tenant, key, _r, _t, _held, vid] -> Agent.update(__MODULE__, &MapSet.put(&1, {cell, key})) end)
-
-      %{rows: []}
-    end
-
-    def query!("SELECT DISTINCT cell_id" <> _, _params) do
-      ids = Agent.get(__MODULE__, & &1) |> Enum.map(&elem(&1, 0)) |> Enum.uniq()
-      %{rows: Enum.map(ids, &[&1])}
-    end
-
-    def query!("DELETE FROM " <> _, [cell | _tenant]) do
-      keys =
-        Agent.get_and_update(__MODULE__, fn set ->
-          {mine, rest} = Enum.split_with(set, fn {c, _} -> c == cell end)
-          {Enum.map(mine, &elem(&1, 1)), MapSet.new(rest)}
-        end)
-
-      %{rows: Enum.map(keys, &[&1, nil])}
-    end
-
-    def query!("SELECT COUNT" <> _, _params), do: %{rows: [[Agent.get(__MODULE__, &MapSet.size/1)]]}
+  setup_all do
+    migrate!(ExpenseGraph.Domain)
+    :ok
   end
 
   setup do
-    start_supervised!(%{id: FakeRepo, start: {FakeRepo, :start_link, []}})
-    prev_repo = Application.get_env(:reactive_dag, :repo)
-    Application.put_env(:reactive_dag, :repo, FakeRepo)
+    pid = Ecto.Adapters.SQL.Sandbox.start_owner!(ReactiveDag.TestRepo, shared: true)
+    on_exit(fn -> Ecto.Adapters.SQL.Sandbox.stop_owner(pid) end)
 
-    on_exit(fn -> Application.put_env(:reactive_dag, :repo, prev_repo) end)
+    migrate_library_tables!()
+    truncate(ExpenseGraph.tables())
 
     for {k, cat, amt} <- [{"e1", "travel", 100.0}, {"e2", "meals", 40.0}] do
       Expenses
@@ -158,7 +48,7 @@ defmodule ReactiveDag.RetireVanishedTest do
     :ok
   end
 
-  defp plan, do: ReactiveDag.Node.graph([Expenses, CategoryTotals])
+  defp plan, do: ExpenseGraph.plan()
   defp cell, do: plan().cells["category_totals"]
   defp rows, do: CategoryTotals |> Ash.read!() |> Enum.map(&{&1.key, &1.total, &1.n}) |> Enum.sort()
 
@@ -311,14 +201,14 @@ defmodule ReactiveDag.RetireVanishedTest do
 
     defmodule Tableless do
       use Ash.Resource,
-        domain: ReactiveDag.RetireVanishedTest.Domain,
+        domain: ReactiveDag.Fixtures.ExpenseGraph.Domain,
         data_layer: Ash.DataLayer.Simple,
         extensions: [ReactiveDag.Node]
 
       reactive do
         id(:tableless)
-        recompute_by :category, to: :expenses, from: :category
-        reduce into: fn cat, items -> %{category: cat, n: length(items)} end
+        recompute_by(:category, to: :expenses, from: :category)
+        reduce(into: fn cat, items -> %{category: cat, n: length(items)} end)
       end
     end
 
