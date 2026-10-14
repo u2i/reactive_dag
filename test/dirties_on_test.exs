@@ -12,368 +12,41 @@ defmodule ReactiveDag.DirtiesOnTest do
   always leaves one. A notifier could not promise that — Ash dispatches
   notifications after commit, so a crash in between would lose the mark.
   """
-  use ExUnit.Case, async: false
+  use ReactiveDag.PostgresCase
 
   alias ReactiveDag.{Cascade}
+  alias ReactiveDag.Fixtures.DirtiesOnGraph
+
+  alias ReactiveDag.Fixtures.DirtiesOnGraph.{
+    Attestations,
+    CategoryTotals,
+    Expenses,
+    Quiet,
+    Rollups,
+    TenantedExpenses
+  }
 
   # Stands in for a host's version resource — `ash_paper_trail` with
   # `change_tracking_mode :full_diff` writes exactly this shape. In-memory here
   # because the point under test is the REFERENCE, not the storage.
-  defmodule Versions do
-    def start_link, do: Agent.start_link(fn -> %{} end, name: __MODULE__)
-
-    def record(record, changeset) do
-      id = "v-" <> to_string(System.unique_integer([:positive]))
-      Agent.update(__MODULE__, &Map.put(&1, id, diff(changeset, record)))
-      id
-    end
-
-    def changes(version_id), do: Agent.get(__MODULE__, &Map.get(&1, version_id))
-
-    defp diff(%Ash.Changeset{action_type: :create}, record),
-      do: Map.new(dump(record), fn {k, v} -> {k, %{"to" => v}} end)
-
-    defp diff(%Ash.Changeset{data: %{__struct__: _} = data}, record) do
-      was = dump(data)
-
-      Map.new(dump(record), fn {k, v} ->
-        case Map.fetch(was, k) do
-          {:ok, ^v} -> {k, %{"unchanged" => v}}
-          {:ok, old} -> {k, %{"from" => old, "to" => v}}
-          :error -> {k, %{"to" => v}}
-        end
-      end)
-    end
-
-    defp diff(_changeset, record), do: Map.new(dump(record), fn {k, v} -> {k, %{"to" => v}} end)
-
-    defp dump(record) do
-      record.__struct__
-      |> Ash.Resource.Info.public_attributes()
-      |> Map.new(fn a -> {to_string(a.name), Map.get(record, a.name)} end)
-    end
-  end
-
-  defmodule Domain do
-    use Ash.Domain, validate_config_inclusion?: false
-
-    resources do
-      allow_unregistered?(true)
-    end
-  end
-
-  # Marks AND schedules. Separate from `Expenses` so the default (mark only)
-  # stays under test — an existing host must not start enqueueing.
-  defmodule Attestations do
-    use Ash.Resource,
-      domain: Domain,
-      data_layer: Ash.DataLayer.Ets,
-      extensions: [ReactiveDag.Node]
-
-    ets do
-    end
-
-    attributes do
-      attribute :key, :string, primary_key?: true, allow_nil?: false, public?: true
-      attribute :verdict, :string, public?: true
-    end
-
-    actions do
-      defaults [:read, :destroy]
-
-      create :create do
-        accept([:key, :verdict])
-      end
-    end
-
-    reactive do
-      id(:attestations)
-      leaf?(true)
-      dirties_on([:create, :destroy])
-      payload_key(:key)
-    end
-  end
-
-  defmodule Expenses do
-    use Ash.Resource,
-      domain: Domain,
-      data_layer: Ash.DataLayer.Ets,
-      extensions: [ReactiveDag.Node]
-
-    ets do
-    end
-
-    # TEMPORAL. A suspension records when a change happened, and resuming reads
-    # the row as of that instant — which is what lets a MOVED row claim both
-    # the unit it joined and the one it left. The period holds the old
-    # membership; current values alone only ever name the destination.
-    temporal do
-      attribute :valid_at
-      recorded_at :recorded_at
-    end
-
-    attributes do
-      attribute :key, :string, primary_key?: true, allow_nil?: false, public?: true
-      attribute :category, :string, public?: true
-      attribute :amount, :float, public?: true
-
-      attribute :recorded_at, :utc_datetime_usec,
-        public?: true,
-        default: &DateTime.utc_now/0,
-        update_default: &DateTime.utc_now/0
-    end
-
-    actions do
-      defaults [:read, :destroy]
-
-      create :create do
-        accept([:key, :category, :amount])
-      end
-
-      update :revise do
-        accept([:amount])
-      end
-
-      update :recategorise do
-        accept([:category])
-      end
-    end
-
-    reactive do
-      id(:expenses)
-      op(:source)
-      leaf?(true)
-      # THE FEATURE: writes here mark this cell dirty, with no host wiring
-      dirties_on([:create, :update, :destroy])
-
-      # A queue row references the version recording the change; the consumer
-      # reads it back to learn WHAT moved. Both halves are the host's, because a
-      # version resource is — `ash_paper_trail` is the usual supplier.
-    end
-  end
-
-  # a composite-PK resource: the cell key is the identity serialization
-  defmodule Rollups do
-    use Ash.Resource,
-      domain: Domain,
-      data_layer: Ash.DataLayer.Ets,
-      extensions: [ReactiveDag.Node]
-
-    ets do
-    end
-
-    attributes do
-      attribute :fund, :string, primary_key?: true, allow_nil?: false, public?: true
-      attribute :fy, :string, primary_key?: true, allow_nil?: false, public?: true
-      attribute :total, :float, public?: true
-    end
-
-    actions do
-      # :destroy exists for test cleanup, but is NOT in `dirties_on` below —
-      # which is what the "only declared action types mark" test relies on.
-      defaults [:read, :destroy]
-
-      create :create do
-        accept([:fund, :fy, :total])
-      end
-    end
-
-    reactive do
-      id(:rollups)
-      op(:source)
-      leaf?(true)
-      dirties_on([:create])
-    end
-  end
-
-  # opt-in: no `dirties_on`, so writes mark nothing
-  defmodule Quiet do
-    use Ash.Resource,
-      domain: Domain,
-      data_layer: Ash.DataLayer.Ets,
-      extensions: [ReactiveDag.Node]
-
-    ets do
-    end
-
-    attributes do
-      attribute :key, :string, primary_key?: true, allow_nil?: false, public?: true
-    end
-
-    actions do
-      defaults [:read]
-
-      create :create do
-        accept([:key])
-      end
-    end
-
-    reactive do
-      id(:quiet)
-      op(:source)
-      leaf?(true)
-    end
-  end
-
-  defmodule CategoryTotals do
-    use Ash.Resource,
-      domain: Domain,
-      data_layer: Ash.DataLayer.Ets,
-      extensions: [ReactiveDag.Node]
-
-    ets do
-    end
-
-    attributes do
-      attribute :key, :string, primary_key?: true, allow_nil?: false, public?: true
-      attribute :category, :string, public?: true
-      attribute :total, :float, public?: true
-      attribute :n, :integer, public?: true
-    end
-
-    identities do
-      identity :by_key, [:key], pre_check_with: ReactiveDag.DirtiesOnTest.Domain
-    end
-
-    actions do
-      defaults [:read, :destroy]
-
-      create :upsert do
-        upsert?(true)
-        upsert_identity(:by_key)
-        accept([:key, :category, :total, :n])
-      end
-    end
-
-    reactive do
-      id(:category_totals)
-      op(:fold)
-
-      recompute_by(:category, to: :expenses, from: :category)
-      reduce(into: [sum: [amount: :total], count: :n])
-    end
-  end
-
-  # A TENANTED write-fed leaf. `dirties_on` runs as an Ash change with no plan in
-  # scope, so the tenant can only come off the changeset — which is where a
-  # tenanted write already put it.
-  defmodule TenantedExpenses do
-    use Ash.Resource,
-      domain: Domain,
-      data_layer: Ash.DataLayer.Ets,
-      extensions: [ReactiveDag.Node]
-
-    ets do
-      private?(true)
-    end
-
-    multitenancy do
-      strategy :attribute
-      attribute :org_id
-    end
-
-    attributes do
-      uuid_primary_key(:id)
-      attribute :key, :string, allow_nil?: false, public?: true
-      attribute :org_id, :string, public?: true
-      attribute :amount, :float, public?: true
-    end
-
-    identities do
-      identity :by_org_key, [:org_id, :key], pre_check_with: Domain
-    end
-
-    actions do
-      defaults [:read, :destroy]
-
-      create :create do
-        accept([:key, :org_id, :amount])
-      end
-    end
-
-    reactive do
-      id(:tenanted_expenses)
-      op(:source)
-      leaf?(true)
-      row_key([:org_id, :key])
-      dirties_on([:create])
-    end
-  end
-
-  defmodule FakeRepo do
-    def start_link, do: Agent.start_link(fn -> %{} end, name: __MODULE__)
-
-    # stores the PRIOR too, so claim can return it — the whole point of #60
-    def query!("INSERT INTO " <> _, params) do
-      params
-      |> Enum.chunk_every(7)
-      |> Enum.each(fn [cell, tenant, key, _r, _t, _held, vid] ->
-        # ON CONFLICT DO NOTHING: the FIRST snapshot wins
-        # ON CONFLICT: MERGE the diffs, via the library's own rule — the earliest
-        # prior side and the latest `to`. `Map.put_new` modelled `DO NOTHING`,
-        # which strands the unit a twice-moved row ended up in.
-        Agent.update(__MODULE__, fn m ->
-          # ON CONFLICT: keep the EARLIEST version id.
-          Map.update(m, {tenant, cell, key}, vid, fn stored -> stored || vid end)
-        end)
-      end)
-
-      %{rows: []}
-    end
-
-    @doc "The tenants marks were written under — `dirties_on` has no plan, so
-    it reads the tenant off the CHANGESET, and this is what checks it did."
-    def tenants,
-      do: Agent.get(__MODULE__, & &1) |> Map.keys() |> Enum.map(&elem(&1, 0)) |> Enum.uniq()
-
-    def query!("SELECT DISTINCT cell_id" <> _, _params) do
-      ids = Agent.get(__MODULE__, & &1) |> Map.keys() |> Enum.map(&elem(&1, 1)) |> Enum.uniq()
-      %{rows: Enum.map(ids, &[&1])}
-    end
-
-    def query!("DELETE FROM " <> _, [cell, tenant]) do
-      rows =
-        Agent.get_and_update(__MODULE__, fn m ->
-          {mine, rest} = Enum.split_with(m, fn {{t, c, _}, _} -> t == tenant and c == cell end)
-          {Enum.map(mine, fn {{_t, _c, k}, vid} -> [k, vid] end), Map.new(rest)}
-        end)
-
-      %{rows: rows}
-    end
-
-    def query!("SELECT COUNT" <> _, _params), do: %{rows: [[Agent.get(__MODULE__, &map_size/1)]]}
-
-    # `DrainWorker` takes `Frontier.with_lock/2` — the same cluster-wide advisory
-    # lock the sweep uses, so two nodes never drain at once. Always granted here:
-    # there is one node in a test.
-    def query!("SELECT pg_try_advisory_lock" <> _, _params), do: %{rows: [[true]]}
-    def query!("SELECT pg_advisory_unlock" <> _, _params), do: %{rows: [[true]]}
-
-    # what the frontier currently holds, for assertions
-    # `{cell, key}`, tenant dropped — the shape every existing assertion uses.
-    # `tenants/0` is what checks the tenant.
-    def dirty,
-      do: Agent.get(__MODULE__, &Map.keys/1) |> Enum.map(&{elem(&1, 1), elem(&1, 2)}) |> Enum.sort()
+  setup_all do
+    migrate!(DirtiesOnGraph.Domain)
+    :ok
   end
 
   setup do
-    start_supervised!(%{id: FakeRepo, start: {FakeRepo, :start_link, []}})
-    start_supervised!(%{id: Versions, start: {Versions, :start_link, []}})
-    prev_repo = Application.get_env(:reactive_dag, :repo)
-    Application.put_env(:reactive_dag, :repo, FakeRepo)
+    pid = Ecto.Adapters.SQL.Sandbox.start_owner!(ReactiveDag.TestRepo, shared: true)
+    on_exit(fn -> Ecto.Adapters.SQL.Sandbox.stop_owner(pid) end)
 
-    on_exit(fn ->
-      Application.put_env(:reactive_dag, :repo, prev_repo)
-    end)
+    migrate_library_tables!()
 
     # A `dirties_on` write no longer marks a table a test can read back — it
     # enqueues a cascade. This is the seam that catches those enqueues, so the
     # assertions below can ask what the write ORIGINATED without an Oban.
     ReactiveDag.Test.Pending.capture_enqueues()
 
-    # the ETS tables are shared (not `private?`, since writes may come from
-    # other processes), so start each test from a known-empty state — including
-    # the frontier, which the destroys below would otherwise re-dirty.
+    # start each test from a known-empty state — including the frontier, which
+    # the destroys below would otherwise re-dirty.
     Expenses |> Ash.read!() |> Enum.each(&Ash.destroy!/1)
     CategoryTotals |> Ash.read!() |> Enum.each(&Ash.destroy!/1)
     Rollups |> Ash.read!() |> Enum.each(&Ash.destroy!/1)
