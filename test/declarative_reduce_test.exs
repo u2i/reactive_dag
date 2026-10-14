@@ -6,193 +6,33 @@ defmodule ReactiveDag.DeclarativeReduceTest do
   hatches — covered by the existing combinator tests; this file covers the
   declarative ladder and its assembly/verifier errors.
   """
-  use ExUnit.Case, async: false
+  use ReactiveDag.PostgresCase
+
+  alias ReactiveDag.Fixtures.DeclarativeReduceGraph
+
+  alias ReactiveDag.Fixtures.DeclarativeReduceGraph.{
+    BudgetRollups,
+    FiscalLines,
+    GfTotals,
+    LineMarks,
+    MixedRollup,
+    OverVerdict,
+    SomeVerdict
+  }
 
   alias ReactiveDag.Node.Recompute
 
-  defmodule Domain do
-    use Ash.Domain, validate_config_inclusion?: false
-
-    resources do
-      allow_unregistered?(true)
-    end
-  end
-
-  # the input node: a leaf whose resource holds the raw lines.
-  defmodule FiscalLines do
-    use Ash.Resource,
-      domain: Domain,
-      data_layer: Ash.DataLayer.Ets,
-      extensions: [ReactiveDag.Node]
-
-    ets do
-      private?(true)
-    end
-
-    attributes do
-      attribute :key, :string, primary_key?: true, allow_nil?: false, public?: true
-      attribute :fund, :string, public?: true
-      attribute :fy, :integer, public?: true
-      attribute :amount, :float, public?: true
-    end
-
-    actions do
-      defaults [:read, :destroy]
-
-      create :create do
-        accept([:key, :fund, :fy, :amount])
-      end
-
-      read :only_gf do
-        filter expr(fund == "gf")
-      end
-    end
-
-    reactive do
-      id(:fiscal_lines)
-      op(:source)
-      leaf?(true)
-    end
-  end
-
-  # THE ASH-FIRST NODE: no read:, attribute group_by, declarative fold, no key:.
-  defmodule BudgetRollups do
-    use Ash.Resource,
-      domain: Domain,
-      data_layer: Ash.DataLayer.Ets,
-      extensions: [ReactiveDag.Node]
-
-    ets do
-      private?(true)
-    end
-
-    attributes do
-      attribute :key, :string, primary_key?: true, allow_nil?: false, public?: true
-      attribute :fund, :string, public?: true
-      attribute :fy, :integer, public?: true
-      attribute :total, :float, public?: true
-      attribute :n, :integer, public?: true
-    end
-
-    identities do
-      identity :by_key, [:key], pre_check_with: ReactiveDag.DeclarativeReduceTest.Domain
-    end
-
-    actions do
-      defaults [:read, :destroy]
-
-      create :upsert do
-        upsert?(true)
-        upsert_identity(:by_key)
-        accept([:key, :fund, :fy, :total, :n])
-      end
-    end
-
-    reactive do
-      id(:budget_rollups)
-      op(:fold)
-      key_rule(:all)
-
-      reduce(
-        over: :fiscal_lines,
-        group_by: [:fund, :fy],
-        into: [sum: [amount: :total], count: :n]
-      )
-    end
-  end
-
-  # named read action + key_prefix + single-attr group + fn into over the
-  # declarative group term (proves the tuple contract holds across forms).
-  defmodule GfTotals do
-    use Ash.Resource,
-      domain: Domain,
-      data_layer: Ash.DataLayer.Ets,
-      extensions: [ReactiveDag.Node]
-
-    ets do
-      private?(true)
-    end
-
-    attributes do
-      attribute :key, :string, primary_key?: true, allow_nil?: false, public?: true
-      attribute :fund, :string, public?: true
-      attribute :total, :float, public?: true
-    end
-
-    identities do
-      identity :by_key, [:key], pre_check_with: ReactiveDag.DeclarativeReduceTest.Domain
-    end
-
-    actions do
-      defaults [:read, :destroy]
-
-      create :upsert do
-        upsert?(true)
-        upsert_identity(:by_key)
-        accept([:key, :fund, :total])
-      end
-    end
-
-    reactive do
-      id(:gf_totals)
-      op(:fold)
-      key_rule(:all)
-
-      reduce(
-        over: :fiscal_lines,
-        read: :only_gf,
-        group_by: :fund,
-        key_prefix: "roll",
-        into: [sum: [amount: :total]]
-      )
-    end
-  end
-
-  # same-grain enrichment (:identity): the auto-scoping proof — its dirty keys
-  # ARE the over node's keys, so the default read must filter to them.
-  defmodule LineMarks do
-    use Ash.Resource,
-      domain: Domain,
-      data_layer: Ash.DataLayer.Ets,
-      extensions: [ReactiveDag.Node]
-
-    ets do
-      private?(true)
-    end
-
-    attributes do
-      attribute :key, :string, primary_key?: true, allow_nil?: false, public?: true
-      attribute :n, :integer, public?: true
-      attribute :amount_seen, :float, public?: true
-    end
-
-    identities do
-      identity :by_key, [:key], pre_check_with: ReactiveDag.DeclarativeReduceTest.Domain
-    end
-
-    actions do
-      defaults [:read, :destroy]
-
-      create :upsert do
-        upsert?(true)
-        upsert_identity(:by_key)
-        accept([:key, :n, :amount_seen])
-      end
-    end
-
-    reactive do
-      id(:line_marks)
-      op(:map)
-
-      reduce(
-        over: :fiscal_lines,
-        group_by: :key,
-        into: [count: :n, first: [amount: :amount_seen]]
-      )
-    end
+  setup_all do
+    migrate!(DeclarativeReduceGraph.Domain)
+    :ok
   end
 
   setup do
+    pid = Ecto.Adapters.SQL.Sandbox.start_owner!(ReactiveDag.TestRepo, shared: true)
+    on_exit(fn -> Ecto.Adapters.SQL.Sandbox.stop_owner(pid) end)
+
+    truncate(DeclarativeReduceGraph.tables())
+
     for {k, fund, fy, amount} <- [
           {"l1", "gf", 2025, 10.0},
           {"l2", "gf", 2025, 5.0},
@@ -267,43 +107,6 @@ defmodule ReactiveDag.DeclarativeReduceTest do
   test "a fn into: over a declarative group_by pattern-matches the group TUPLE" do
     # mixed form: declarative read + group, fn fold — the tuple contract holds,
     # and the key derives exactly as any payload row's would.
-    defmodule MixedRollup do
-      use Ash.Resource,
-        domain: ReactiveDag.DeclarativeReduceTest.Domain,
-        data_layer: Ash.DataLayer.Ets,
-        extensions: [ReactiveDag.Node]
-
-      ets do
-      end
-
-      attributes do
-        attribute :key, :string, primary_key?: true, allow_nil?: false, public?: true
-        attribute :status, :string, public?: true
-      end
-
-      actions do
-        defaults [:read, :destroy]
-
-        create :upsert do
-          upsert?(true)
-          accept([:key, :status])
-        end
-      end
-
-      reactive do
-        id(:mixed_rollup)
-        op(:fold)
-        key_rule(:all)
-
-        reduce(
-          over: :fiscal_lines,
-          group_by: [:fund, :fy],
-          into: fn {_fund, _fy}, lines ->
-            %{status: if(length(lines) > 1, do: "present", else: "thin")}
-          end
-        )
-      end
-    end
 
     plan = ReactiveDag.Node.graph([FiscalLines, MixedRollup])
     {:ok, changed} = Recompute.recompute(plan.cells["mixed_rollup"], ["*"])
@@ -318,68 +121,9 @@ defmodule ReactiveDag.DeclarativeReduceTest do
       # `verify_owns_rows/2` at its own `defmodule` — a warning here, since a
       # runtime-defined module reports verifier errors as async diagnostics.
       # Giving it a table would delete the assertion below.
-      defmodule SomeVerdict do
-        use Ash.Resource,
-          domain: ReactiveDag.DeclarativeReduceTest.Domain,
-          data_layer: Ash.DataLayer.Simple,
-          extensions: [ReactiveDag.Node]
-
-        reactive do
-          id(:some_verdict)
-          op(:reconcile)
-          key_rule(:all)
-
-          reduce(
-            over: :fiscal_lines,
-            group_by: :key,
-            into: fn _k, _ -> %{status: "present"} end
-          )
-        end
-      end
 
       # the READER, which owns its rows — so the raise below is unambiguously
       # about what it reads over, not about where its own answer would go.
-      defmodule OverVerdict do
-        use Ash.Resource,
-          domain: ReactiveDag.DeclarativeReduceTest.Domain,
-          data_layer: Ash.DataLayer.Ets,
-          extensions: [ReactiveDag.Node]
-
-        ets do
-          private?(true)
-        end
-
-        attributes do
-          attribute :key, :string, primary_key?: true, allow_nil?: false, public?: true
-          attribute :status, :string, public?: true
-        end
-
-        actions do
-          defaults [:read, :destroy]
-
-          create :upsert do
-            upsert?(true)
-            upsert_identity(:by_key)
-            accept([:key, :status])
-          end
-        end
-
-        identities do
-          identity :by_key, [:key]
-        end
-
-        reactive do
-          id(:over_verdict)
-          op(:fold)
-          key_rule(:all)
-
-          reduce(
-            over: :some_verdict,
-            group_by: :key,
-            into: fn _k, _ -> %{status: "present"} end
-          )
-        end
-      end
 
       assert_raise ArgumentError, ~r/declares no attributes — nothing to read/s, fn ->
         ReactiveDag.Node.graph([FiscalLines, SomeVerdict, OverVerdict])
@@ -389,7 +133,7 @@ defmodule ReactiveDag.DeclarativeReduceTest do
     test "a named read action that doesn't exist raises, listing the real ones" do
       defmodule BadAction do
         use Ash.Resource,
-          domain: ReactiveDag.DeclarativeReduceTest.Domain,
+          domain: ReactiveDag.Fixtures.DeclarativeReduceGraph.Domain,
           data_layer: Ash.DataLayer.Ets,
           extensions: [ReactiveDag.Node]
 
@@ -441,7 +185,7 @@ defmodule ReactiveDag.DeclarativeReduceTest do
     test "a declarative attribute the over resource lacks raises, listing its attributes" do
       defmodule BadAttr do
         use Ash.Resource,
-          domain: ReactiveDag.DeclarativeReduceTest.Domain,
+          domain: ReactiveDag.Fixtures.DeclarativeReduceGraph.Domain,
           data_layer: Ash.DataLayer.Ets,
           extensions: [ReactiveDag.Node]
 
@@ -506,7 +250,7 @@ defmodule ReactiveDag.DeclarativeReduceTest do
     test "declarative into without a declarative group_by is rejected" do
       defmodule IntoNeedsGroup do
         use Ash.Resource,
-          domain: ReactiveDag.DeclarativeReduceTest.Domain,
+          domain: ReactiveDag.Fixtures.DeclarativeReduceGraph.Domain,
           data_layer: Ash.DataLayer.Simple,
           extensions: [ReactiveDag.Node]
 
@@ -530,7 +274,7 @@ defmodule ReactiveDag.DeclarativeReduceTest do
     test "an unknown fold kind is rejected, naming the supported set" do
       defmodule BadKind do
         use Ash.Resource,
-          domain: ReactiveDag.DeclarativeReduceTest.Domain,
+          domain: ReactiveDag.Fixtures.DeclarativeReduceGraph.Domain,
           data_layer: Ash.DataLayer.Simple,
           extensions: [ReactiveDag.Node]
 
@@ -555,7 +299,7 @@ defmodule ReactiveDag.DeclarativeReduceTest do
     test "a fold dest that isn't a payload attribute is rejected (payload-loop nodes)" do
       defmodule BadDest do
         use Ash.Resource,
-          domain: ReactiveDag.DeclarativeReduceTest.Domain,
+          domain: ReactiveDag.Fixtures.DeclarativeReduceGraph.Domain,
           data_layer: Ash.DataLayer.Ets,
           extensions: [ReactiveDag.Node]
 
@@ -587,7 +331,7 @@ defmodule ReactiveDag.DeclarativeReduceTest do
     test "key_prefix alongside an explicit key fn is rejected" do
       defmodule PrefixAndFn do
         use Ash.Resource,
-          domain: ReactiveDag.DeclarativeReduceTest.Domain,
+          domain: ReactiveDag.Fixtures.DeclarativeReduceGraph.Domain,
           data_layer: Ash.DataLayer.Simple,
           extensions: [ReactiveDag.Node]
 

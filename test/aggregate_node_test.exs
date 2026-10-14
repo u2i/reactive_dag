@@ -5,122 +5,23 @@ defmodule ReactiveDag.AggregateNodeTest do
   node's resource is the group's resource (one row per group); each parent row's aggregate values are its
   payload.
   """
-  use ExUnit.Case, async: false
+  use ReactiveDag.PostgresCase
+
+  alias ReactiveDag.Fixtures.AggregateGraph
+  alias ReactiveDag.Fixtures.AggregateGraph.{FundFy, FundLine, PlantMonth, Reading}
 
   alias ReactiveDag.Node.Recompute
 
-  defmodule Domain do
-    use Ash.Domain, validate_config_inclusion?: false
-
-    resources do
-      allow_unregistered? true
-    end
-  end
-
-  # a fine-grained input for the identity-keyed aggregate below
-  defmodule FundLine do
-    use Ash.Resource, domain: Domain, data_layer: Ash.DataLayer.Ets, extensions: [ReactiveDag.Node]
-
-    ets do
-      private?(true)
-    end
-
-    attributes do
-      attribute :key, :string, primary_key?: true, allow_nil?: false, public?: true
-      attribute :fund, :string, public?: true
-      attribute :amount, :float, public?: true
-    end
-
-    actions do
-      defaults [:read]
-
-      create :create do
-        accept([:key, :fund, :amount])
-      end
-    end
-
-    reactive do
-      id(:fund_lines)
-      op(:source)
-      leaf?(true)
-    end
-  end
-
-  # the GROUP resource: one row per (plant, month). It has_many raw readings.
-  defmodule PlantMonth do
-    use Ash.Resource, domain: Domain, data_layer: Ash.DataLayer.Ets, extensions: [ReactiveDag.Node]
-
-    ets do
-      private?(true)
-    end
-
-    attributes do
-      attribute :key, :string, primary_key?: true, allow_nil?: false, public?: true
-      attribute :avg_flow, :float, public?: true
-      attribute :day_count, :integer, public?: true
-    end
-
-    relationships do
-      has_many :readings, ReactiveDag.AggregateNodeTest.Reading do
-        source_attribute :key
-        destination_attribute :pm_key
-      end
-    end
-
-    identities do
-      identity :by_key, [:key], pre_check_with: ReactiveDag.AggregateNodeTest.Domain
-    end
-
-    actions do
-      defaults [:read, :destroy]
-
-      create :seed do
-        accept([:key])
-      end
-
-      create :upsert do
-        upsert?(true)
-        upsert_identity(:by_key)
-        accept([:key, :avg_flow, :day_count])
-      end
-    end
-
-    # PURE-ASH aggregate: the datastore avgs/counts the :readings relationship.
-    reactive do
-      op(:fold)
-      key_rule(:all)
-
-      aggregate(
-        over: :readings,
-        avg: [flow: :avg_flow],
-        count: :day_count
-      )
-    end
-  end
-
-  defmodule Reading do
-    use Ash.Resource, domain: Domain, data_layer: Ash.DataLayer.Ets
-
-    ets do
-      private?(true)
-    end
-
-    attributes do
-      attribute :id, :string, primary_key?: true, allow_nil?: false, public?: true
-      attribute :pm_key, :string, public?: true
-      attribute :flow, :float, public?: true
-    end
-
-    actions do
-      defaults [:read, :destroy]
-
-      create :create do
-        accept([:id, :pm_key, :flow])
-      end
-    end
+  setup_all do
+    migrate!(AggregateGraph.Domain)
+    :ok
   end
 
   setup do
+    pid = Ecto.Adapters.SQL.Sandbox.start_owner!(ReactiveDag.TestRepo, shared: true)
+    on_exit(fn -> Ecto.Adapters.SQL.Sandbox.stop_owner(pid) end)
+
+    truncate(AggregateGraph.tables())
     # two groups; readings belong to them by pm_key.
     for k <- ["north|2024-01", "south|2024-01"],
         do: PlantMonth |> Ash.Changeset.for_create(:seed, %{key: k}) |> Ash.create!()
@@ -167,51 +68,6 @@ defmodule ReactiveDag.AggregateNodeTest do
   # key rules. What differs is only WHO aggregates (Postgres vs the BEAM).
 
   test "an aggregate node is IDENTITY-KEYED by a composite primary key, like reduce" do
-    defmodule FundFy do
-      use Ash.Resource,
-        domain: ReactiveDag.AggregateNodeTest.Domain,
-        data_layer: Ash.DataLayer.Ets,
-        extensions: [ReactiveDag.Node]
-
-      ets do
-        private?(true)
-      end
-
-      attributes do
-        attribute :fund, :string, primary_key?: true, allow_nil?: false, public?: true
-        attribute :fy, :string, primary_key?: true, allow_nil?: false, public?: true
-        attribute :total, :float, public?: true
-        attribute :n, :integer, public?: true
-      end
-
-      relationships do
-        has_many :lines, ReactiveDag.AggregateNodeTest.FundLine do
-          source_attribute :fund
-          destination_attribute :fund
-        end
-      end
-
-      actions do
-        defaults [:read]
-
-        create :seed do
-          accept([:fund, :fy])
-        end
-
-        create :upsert do
-          upsert?(true)
-          accept([:fund, :fy, :total, :n])
-        end
-      end
-
-      reactive do
-        id(:fund_fy)
-        op(:fold)
-        key_rule(:all)
-        aggregate(over: :lines, sum: [amount: :total], count: :n)
-      end
-    end
-
     for {f, y} <- [{"gf", "2025"}, {"water", "2026"}] do
       FundFy |> Ash.Changeset.for_create(:seed, %{fund: f, fy: y}) |> Ash.create!()
     end
@@ -244,7 +100,7 @@ defmodule ReactiveDag.AggregateNodeTest do
 
     defmodule BadDest do
       use Ash.Resource,
-        domain: ReactiveDag.AggregateNodeTest.Domain,
+        domain: ReactiveDag.Fixtures.AggregateGraph.Domain,
         data_layer: Ash.DataLayer.Ets,
         extensions: [ReactiveDag.Node]
 
@@ -258,7 +114,7 @@ defmodule ReactiveDag.AggregateNodeTest do
       end
 
       relationships do
-        has_many :readings, ReactiveDag.AggregateNodeTest.Reading do
+        has_many :readings, ReactiveDag.Fixtures.AggregateGraph.Reading do
           source_attribute :key
           destination_attribute :pm_key
         end

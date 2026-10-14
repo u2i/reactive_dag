@@ -18,120 +18,29 @@ defmodule ReactiveDag.UnionNodeTest do
   independently, and the composite key carries its own provenance, so a claim
   scopes to exactly the input that fired.
   """
-  use ExUnit.Case, async: false
+  use ReactiveDag.PostgresCase
+
+  alias ReactiveDag.Fixtures.UnionGraph
+  alias ReactiveDag.Fixtures.UnionGraph.{AllVerdicts, CategoryHealth, FundBalance, Tableless, WithHeadroom}
 
   require Ash.Query
   alias ReactiveDag.Node.Recompute
-
-  defmodule Domain do
-    use Ash.Domain, validate_config_inclusion?: false
-
-    resources do
-      allow_unregistered?(true)
-    end
-  end
-
-  # two verdict-shaped inputs — ordinary nodes, each with a :status column
-  defmodule CategoryHealth do
-    use Ash.Resource,
-      domain: Domain,
-      data_layer: Ash.DataLayer.Ets,
-      extensions: [ReactiveDag.Node]
-
-    ets do
-    end
-
-    attributes do
-      attribute :key, :string, primary_key?: true, allow_nil?: false, public?: true
-      attribute :status, :string, public?: true
-    end
-
-    actions do
-      defaults [:read, :destroy]
-
-      create :upsert do
-        upsert?(true)
-        accept([:key, :status])
-      end
-    end
-
-    reactive do
-      id(:category_health)
-      leaf?(true)
-    end
-  end
-
-  defmodule FundBalance do
-    use Ash.Resource,
-      domain: Domain,
-      data_layer: Ash.DataLayer.Ets,
-      extensions: [ReactiveDag.Node]
-
-    ets do
-    end
-
-    attributes do
-      attribute :key, :string, primary_key?: true, allow_nil?: false, public?: true
-      attribute :status, :string, public?: true
-      # a column the tuple never had room for — the union can project it
-      attribute :headroom, :float, public?: true
-    end
-
-    actions do
-      defaults [:read, :destroy]
-
-      create :upsert do
-        upsert?(true)
-        accept([:key, :status, :headroom])
-      end
-    end
-
-    reactive do
-      id(:fund_balance)
-      leaf?(true)
-    end
-  end
-
-  defmodule AllVerdicts do
-    use Ash.Resource,
-      domain: Domain,
-      data_layer: Ash.DataLayer.Ets,
-      extensions: [ReactiveDag.Node]
-
-    ets do
-    end
-
-    attributes do
-      # composite PK → identity-keyed, so cell keys are "<input>|<key>"
-      attribute :check, :string, primary_key?: true, allow_nil?: false, public?: true
-      attribute :subject, :string, primary_key?: true, allow_nil?: false, public?: true
-      attribute :status, :string, public?: true
-    end
-
-    actions do
-      defaults [:read, :destroy]
-
-      create :upsert do
-        upsert?(true)
-        accept([:check, :subject, :status])
-      end
-    end
-
-    reactive do
-      id(:all_verdicts)
-
-      union(
-        from: [:category_health, :fund_balance],
-        into: [check: :cell, subject: :key, status: :status]
-      )
-    end
-  end
 
   defp seed(resource, attrs) do
     resource |> Ash.Changeset.for_create(:upsert, attrs) |> Ash.create!()
   end
 
+  setup_all do
+    migrate!(UnionGraph.Domain)
+    :ok
+  end
+
   setup do
+    pid = Ecto.Adapters.SQL.Sandbox.start_owner!(ReactiveDag.TestRepo, shared: true)
+    on_exit(fn -> Ecto.Adapters.SQL.Sandbox.stop_owner(pid) end)
+
+    truncate(UnionGraph.tables())
+
     for r <- [AllVerdicts, CategoryHealth, FundBalance],
         row <- Ash.read!(r),
         do: Ash.destroy!(row)
@@ -208,40 +117,6 @@ defmodule ReactiveDag.UnionNodeTest do
   test "a union projects any column its inputs have, not just a status" do
     # the point of reading ROWS: fund_balance carries a headroom, which the
     # coordination tuple's fixed schema had nowhere to put.
-    defmodule WithHeadroom do
-      use Ash.Resource,
-        domain: ReactiveDag.UnionNodeTest.Domain,
-        data_layer: Ash.DataLayer.Ets,
-        extensions: [ReactiveDag.Node]
-
-      ets do
-      end
-
-      attributes do
-        attribute :check, :string, primary_key?: true, allow_nil?: false, public?: true
-        attribute :subject, :string, primary_key?: true, allow_nil?: false, public?: true
-        attribute :status, :string, public?: true
-        attribute :headroom, :float, public?: true
-      end
-
-      actions do
-        defaults [:read, :destroy]
-
-        create :upsert do
-          upsert?(true)
-          accept([:check, :subject, :status, :headroom])
-        end
-      end
-
-      reactive do
-        id(:with_headroom)
-
-        union(
-          from: [:fund_balance],
-          into: [check: :cell, subject: :key, status: :status, headroom: :headroom]
-        )
-      end
-    end
 
     plan = ReactiveDag.Node.graph([FundBalance, WithHeadroom])
     {:ok, _, _} = Recompute.recompute(plan.cells["with_headroom"], ["*"])
@@ -251,21 +126,9 @@ defmodule ReactiveDag.UnionNodeTest do
   end
 
   test "a union over a node with no resource raises at ASSEMBLY, naming the input" do
-    defmodule Tableless do
-      use Ash.Resource,
-        domain: ReactiveDag.UnionNodeTest.Domain,
-        data_layer: Ash.DataLayer.Simple,
-        extensions: [ReactiveDag.Node]
-
-      reactive do
-        id(:tableless)
-        leaf?(true)
-      end
-    end
-
     defmodule OverTableless do
       use Ash.Resource,
-        domain: ReactiveDag.UnionNodeTest.Domain,
+        domain: ReactiveDag.Fixtures.UnionGraph.Domain,
         data_layer: Ash.DataLayer.Ets,
         extensions: [ReactiveDag.Node]
 
