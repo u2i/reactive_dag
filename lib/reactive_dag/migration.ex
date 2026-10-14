@@ -298,4 +298,43 @@ defmodule ReactiveDag.Migration do
   def drop_dirty(opts \\ []) do
     drop_if_exists(table(dirty_table_name(opts)))
   end
+
+  @doc """
+  Swap a suspension table's `version_id` for `recorded_at`.
+
+  ITS OWN ENTRY POINT, for the reason `runs_up/1` documents: every existing
+  host has already run `up/1`, so extending it would be a no-op on exactly the
+  hosts that need the change.
+
+  A suspension used to carry an opaque `version_id` — a reference a host
+  resolved back to a diff through its own version table. Under temporal
+  resources there is nothing to resolve: the diff is READ from history, by
+  reading the row as of the instant the suspension recorded. So the column
+  becomes the instant itself.
+
+  ## Sequencing
+
+  Outstanding suspensions do NOT survive this. A `version_id` cannot be
+  translated into a `recorded_at` — they name different things, one a row in
+  the host's version table and the other a point in time — so the old values
+  are dropped rather than converted into plausible-looking wrong ones.
+
+  Run it with the queue drained, same as `drop_dirty/1`: let suspensions
+  resume on the old code, deploy the new code, then migrate. A suspension
+  caught mid-flight is outstanding WORK, and this leaves it unresumable.
+
+  `recorded_at` is NULLABLE where `version_id` was `NOT NULL DEFAULT "*"`.
+  Nothing ever matches on it, so the null-never-equals-itself problem the
+  other columns' defaults exist to avoid cannot arise here — and NULL says
+  "this change could not be attributed" without a sentinel that can collide
+  with a real value.
+  """
+  def suspensions_to_recorded_at(opts \\ []) do
+    name = table_name(opts)
+
+    alter table(name) do
+      remove(:version_id)
+      add(:recorded_at, :utc_datetime_usec)
+    end
+  end
 end
