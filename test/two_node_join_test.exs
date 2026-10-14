@@ -26,173 +26,16 @@ defmodule ReactiveDag.TwoNodeJoinTest do
   claimed (`.actual == 95.0`) and never the column being destroyed, so it passed
   for the whole life of the bug. Every test here asserts BOTH columns.
   """
-  use ExUnit.Case, async: false
+  use ReactiveDag.PostgresCase
+
+  alias ReactiveDag.Fixtures.TwoNodeJoinGraph
+  alias ReactiveDag.Fixtures.TwoNodeJoinGraph.{Actuals, Budgets, Variance}
 
   alias ReactiveDag.{Cascade}
   alias ReactiveDag.Node.Recompute
 
-  defmodule Domain do
-    use Ash.Domain, validate_config_inclusion?: false
-
-    resources do
-      allow_unregistered?(true)
-    end
-  end
-
-  defmodule Budgets do
-    use Ash.Resource,
-      domain: Domain,
-      data_layer: Ash.DataLayer.Ets,
-      extensions: [ReactiveDag.Node]
-
-    ets do
-      private?(true)
-    end
-
-    attributes do
-      attribute :key, :string, primary_key?: true, allow_nil?: false, public?: true
-      # deliberately NOT named like the right side's column
-      attribute :account_code, :string, public?: true
-      attribute :amount, :float, public?: true
-    end
-
-    actions do
-      defaults [:read, :destroy]
-
-      create :create do
-        accept([:key, :account_code, :amount])
-      end
-
-      update :revise do
-        accept([:amount])
-      end
-    end
-
-    reactive do
-      id(:budgets)
-      op(:source)
-      leaf?(true)
-    end
-  end
-
-  defmodule Actuals do
-    use Ash.Resource,
-      domain: Domain,
-      data_layer: Ash.DataLayer.Ets,
-      extensions: [ReactiveDag.Node]
-
-    ets do
-      private?(true)
-    end
-
-    attributes do
-      attribute :key, :string, primary_key?: true, allow_nil?: false, public?: true
-      attribute :acct, :string, public?: true
-      attribute :amount, :float, public?: true
-    end
-
-    actions do
-      defaults [:read, :destroy]
-
-      create :create do
-        accept([:key, :acct, :amount])
-      end
-
-      update :revise do
-        accept([:amount])
-      end
-    end
-
-    reactive do
-      id(:actuals)
-      op(:source)
-      leaf?(true)
-    end
-  end
-
-  defmodule Variance do
-    use Ash.Resource,
-      domain: Domain,
-      data_layer: Ash.DataLayer.Ets,
-      extensions: [ReactiveDag.Node]
-
-    ets do
-      private?(true)
-    end
-
-    attributes do
-      attribute :key, :string, primary_key?: true, allow_nil?: false, public?: true
-      attribute :budget, :float, public?: true
-      attribute :actual, :float, public?: true
-    end
-
-    identities do
-      identity :by_key, [:key], pre_check_with: ReactiveDag.TwoNodeJoinTest.Domain
-    end
-
-    actions do
-      defaults [:read, :destroy]
-
-      create :upsert do
-        upsert?(true)
-        upsert_identity(:by_key)
-        accept([:key, :budget, :actual])
-      end
-    end
-
-    reactive do
-      id(:variance)
-      op(:reconcile)
-
-      # NO `depends_on` — `left_over:`/`right_over:` already name both inputs,
-      # and the library derives the edges from them (one per side). Restating
-      # them would be a second answer to one question, and duplicates the edge.
-      join(
-        left_over: :budgets,
-        right_over: :actuals,
-        left: :account_code,
-        right: :acct,
-        outer: true,
-        into: [left: [amount: :budget], right: [amount: :actual]]
-      )
-    end
-  end
-
   # The drain needs a repo for the frontier; these tests are about the JOIN, so
   # the dirty set lives in an Agent and coordination writes go nowhere.
-  defmodule FakeRepo do
-    def start_link, do: Agent.start_link(fn -> MapSet.new() end, name: __MODULE__)
-
-    def query!("INSERT INTO " <> _, params) do
-      params
-      # 5 params per entry: cell, key, reason, enqueued_at, prior
-      |> Enum.chunk_every(7)
-      |> Enum.each(fn [cell, _tenant, key, _r, _t, _held, vid] ->
-        Agent.update(__MODULE__, &MapSet.put(&1, {cell, key}))
-      end)
-
-      %{rows: []}
-    end
-
-    def query!("SELECT DISTINCT cell_id" <> _, _params) do
-      ids = Agent.get(__MODULE__, & &1) |> Enum.map(&elem(&1, 0)) |> Enum.uniq()
-      %{rows: Enum.map(ids, &[&1])}
-    end
-
-    def query!("DELETE FROM " <> _, [cell | _tenant]) do
-      keys =
-        Agent.get_and_update(__MODULE__, fn set ->
-          {mine, rest} = Enum.split_with(set, fn {c, _} -> c == cell end)
-          {Enum.map(mine, &elem(&1, 1)), MapSet.new(rest)}
-        end)
-
-      # RETURNING key, prior — so each row is a PAIR
-      %{rows: Enum.map(keys, &[&1, nil])}
-    end
-
-    def query!("SELECT COUNT" <> _, _params),
-      do: %{rows: [[Agent.get(__MODULE__, &MapSet.size/1)]]}
-  end
 
   defmodule NullWriter do
     @behaviour ReactiveDag.CoordinationWriter
@@ -202,20 +45,26 @@ defmodule ReactiveDag.TwoNodeJoinTest do
     def delete(_cell_id, _keys), do: :ok
   end
 
+  setup_all do
+    migrate!(TwoNodeJoinGraph.Domain)
+    :ok
+  end
+
   setup do
+    pid = Ecto.Adapters.SQL.Sandbox.start_owner!(ReactiveDag.TestRepo, shared: true)
+    on_exit(fn -> Ecto.Adapters.SQL.Sandbox.stop_owner(pid) end)
+
+    migrate_library_tables!()
+    truncate(TwoNodeJoinGraph.tables())
     # `start_supervised!`, not `start_link`: the agent is registered under a global
     # name and linked to the test process, so it exits ASYNCHRONOUSLY when a test
     # ends — and the next test can call `start_link` before the name is released,
     # failing setup with `{:error, {:already_started, …}}`. ExUnit's supervisor waits
     # for the exit, so the name is free by the time the next test starts.
-    start_supervised!(%{id: FakeRepo, start: {FakeRepo, :start_link, []}})
-    prev_repo = Application.get_env(:reactive_dag, :repo)
     prev_writer = Application.get_env(:reactive_dag, :coordination_writer)
-    Application.put_env(:reactive_dag, :repo, FakeRepo)
     Application.put_env(:reactive_dag, :coordination_writer, NullWriter)
 
     on_exit(fn ->
-      Application.put_env(:reactive_dag, :repo, prev_repo)
       Application.put_env(:reactive_dag, :coordination_writer, prev_writer)
     end)
 
