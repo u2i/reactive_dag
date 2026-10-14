@@ -107,7 +107,12 @@ defmodule ReactiveDag.MixProject do
       # so an LLM node needs no library code (see guides/llm-nodes.md). Never a
       # runtime dependency — hosts that want LLM nodes add ash_ai themselves.
       {:ash_ai, "~> 0.8", only: :test},
-      {:ex_doc, "~> 0.34", only: :dev, runtime: false}
+      {:ex_doc, "~> 0.34", only: :dev, runtime: false},
+      # DEV-ONLY, and only for `mix spark.formatter`: Spark's formatter module
+      # is gated behind `Code.ensure_loaded?(Sourceror)`, so without this the
+      # task that generates `spark_locals_without_parens` does not exist. It
+      # regenerates a list in `.formatter.exs`; nothing at runtime reads it.
+      {:sourceror, "~> 1.0", only: :dev, runtime: false}
     ]
   end
 end
