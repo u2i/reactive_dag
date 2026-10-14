@@ -93,11 +93,19 @@ defmodule ReactiveDag.Stale do
       oldest child. An aggregate has no per-key correspondence to join on, so
       the honest answer is the whole cell or nothing.
 
-    * `{:group, …}` / `:group` — NOT YET. A grain join is the right shape and a
-      better one than today's key-string parsing (typed columns, indexable),
-      but it needs the grain's columns on both sides and this does not read
-      them yet. Returns `{:error, :unsupported_rule}` rather than falling back
-      to `:identity`, which would silently under-claim.
+    * `:group` — a GRAIN JOIN. The parent is read twice: as of the oldest
+      child's `recorded_at` (what the children were derived against) and as of
+      now. Each parent row's two versions are diffed, and the diff is projected
+      through the grain to units. A row that CHANGED GROUP yields both — the
+      unit it joined and the unit it left — because the projection sees both
+      sides of the change. That is the whole reason this rung is not
+      `:identity`: a move invalidates two units, and only one of them contains
+      the row now.
+
+    * `{:group, from: :key}` — `{:error, :unsupported_rule}`. This one resolves
+      units from the KEY's segments rather than from columns, so there is
+      nothing to join on. Naming it separately rather than lumping it with
+      `:group` keeps the refusal honest about which case is unbuilt.
   """
   @spec on_edge(Plan.t(), Cell.id(), Cell.id(), keyword()) ::
           {:ok, [String.t()]} | :all | {:error, term()}
@@ -142,10 +150,101 @@ defmodule ReactiveDag.Stale do
     end
   end
 
-  defp compare(_parent, _child, rule, _plan, _opts) when rule in [:group] or is_tuple(rule),
-    do: {:error, {:unsupported_rule, rule}}
+  defp compare(parent, child, :group, plan, opts) do
+    with {:grain, {group_plan, grain_resource}} <- {:grain, grain_of(child)},
+         {:ok, children} <- stamps(child, plan, opts),
+         {:ok, parents} <- stamps(parent, plan, opts) do
+      case children |> Map.values() |> min_at() do
+        # No children yet: nothing has been derived, so nothing is BEHIND.
+        # Distinct from "every unit is stale" — an empty consumer is a job not
+        # yet started, not one that fell behind.
+        nil ->
+          {:ok, []}
+
+        since ->
+          moved =
+            for {key, parent_at} <- parents,
+                parent_at != nil,
+                DateTime.compare(parent_at, since) == :gt,
+                do: key
+
+          units = units_moved_since(parent, child, moved, since, group_plan, grain_resource, plan, opts)
+
+          {:ok, units}
+      end
+    else
+      {:grain, nil} -> {:error, {:no_grain, child.id}}
+      other -> other
+    end
+  end
 
   defp compare(_parent, _child, rule, _plan, _opts), do: {:error, {:unsupported_rule, rule}}
+
+  # The grain join proper: for each parent row that recorded after `since`,
+  # diff its version AT `since` against its version NOW, and project the diff
+  # through the grain.
+  #
+  # Both sides, deliberately. `Diff.groups/3` reads `before` AND `after` of each
+  # change, so a row that moved from FY24 to FY25 yields both units. Claiming
+  # only the unit it landed in would leave the one it left holding a total that
+  # still counts it.
+  defp units_moved_since(parent, child, keys, since, group_plan, grain_resource, plan, opts) do
+    key_attr = parent.meta[:payload_key] || :key
+    read_opts = Keyword.take(Plan.frontier_opts(plan) ++ opts, [:tenant])
+    key_fn = unit_key_fn(child)
+    resource = parent.meta[:resource]
+
+    for key <- keys,
+        unit <- units_for_key(resource, key_attr, key, since, group_plan, grain_resource, read_opts),
+        uniq: true,
+        do: key_fn.(unit)
+  end
+
+  defp units_for_key(resource, key_attr, key, since, group_plan, grain_resource, read_opts) do
+    # `since` is the instant the oldest child was recorded. The parent version
+    # the children saw is the one valid JUST BEFORE any later write — reading AT
+    # a write's own instant returns the row AFTER it, so this would diff a row
+    # against itself.
+    was = read_as_of(resource, key_attr, key, DateTime.add(since, -1, :microsecond), read_opts)
+    now = read_as_of(resource, key_attr, key, nil, read_opts)
+
+    was
+    |> ReactiveDag.Node.Diff.between(now)
+    |> ReactiveDag.Node.Diff.groups(group_plan, grain_resource)
+  end
+
+  defp read_as_of(resource, key_attr, key, at, opts) do
+    resource
+    |> Ash.Query.do_filter([{key_attr, key}])
+    |> then(&if at, do: Ash.Query.as_of(&1, at), else: &1)
+    |> Ash.read_one(opts)
+    |> case do
+      {:ok, record} -> record
+      _ -> nil
+    end
+  end
+
+  # The grain declaration, read off the CHILD — it is the consumer that declares
+  # the unit its inputs roll up into. Same source the cascade reads, so the
+  # sweep and the propagation cannot disagree about what a unit is.
+  defp grain_of(%Cell{meta: meta}) do
+    with %{} = src <- meta[:over_source],
+         group_plan when is_list(group_plan) <- src[:group_key_plan],
+         resource when not is_nil(resource) <- src[:resource] do
+      {group_plan, resource}
+    else
+      _ -> nil
+    end
+  end
+
+  defp unit_key_fn(%Cell{meta: meta}) do
+    spec = meta[:reduce] || meta[:join]
+
+    ReactiveDag.Node.Recompute.Declarative.key_fn(
+      spec && Map.get(spec, :key),
+      spec && Map.get(spec, :key_prefix)
+    )
+  end
 
   # `%{key => recorded_at}` for a cell's rows, as of now.
   defp stamps(%Cell{meta: meta} = cell, plan, opts) do
