@@ -13,9 +13,25 @@ defmodule ReactiveDag.BasisTest do
   it wrong and changing the canonicalization silently invalidates every stored
   digest on deploy, which presents as a data problem rather than a deploy one.
   """
-  use ExUnit.Case, async: true
+  use ReactiveDag.PostgresCase
+
+  alias ReactiveDag.Fixtures.BasisGraph
+  alias ReactiveDag.Fixtures.BasisGraph.{Holdings, Machines}
 
   alias ReactiveDag.Basis
+
+  setup_all do
+    migrate!(BasisGraph.Domain)
+    :ok
+  end
+
+  setup do
+    pid = Ecto.Adapters.SQL.Sandbox.start_owner!(ReactiveDag.TestRepo, shared: true)
+    on_exit(fn -> Ecto.Adapters.SQL.Sandbox.stop_owner(pid) end)
+
+    truncate(BasisGraph.tables())
+    :ok
+  end
 
   describe "digest/2" do
     test "row ORDER does not matter — the set is what is digested" do
@@ -120,96 +136,8 @@ defmodule ReactiveDag.BasisTest do
     # The row and its basis come from the SAME `into:`. That matters: a basis
     # computed anywhere else could describe a different moment than the row it
     # sits beside, and the whole mechanism rests on them agreeing.
-    defmodule Domain do
-      use Ash.Domain, validate_config_inclusion?: false
-
-      resources do
-        allow_unregistered?(true)
-      end
-    end
-
-    defmodule Machines do
-      use Ash.Resource,
-        domain: Domain,
-        data_layer: Ash.DataLayer.Ets,
-        extensions: [ReactiveDag.Node]
-
-      ets do
-      end
-
-      attributes do
-        attribute :key, :string, primary_key?: true, allow_nil?: false, public?: true
-        attribute :owner, :string, public?: true
-        attribute :serial, :string, public?: true
-      end
-
-      actions do
-        defaults [:read, :destroy]
-
-        create :create do
-          accept([:key, :owner, :serial])
-        end
-
-        update :revise do
-          accept([:serial])
-        end
-      end
-
-      reactive do
-        id(:machines)
-        leaf?(true)
-      end
-    end
 
     # "these are ALL my machines" — a per-owner claim that needs signing
-    defmodule Holdings do
-      use Ash.Resource,
-        domain: Domain,
-        data_layer: Ash.DataLayer.Ets,
-        extensions: [ReactiveDag.Node]
-
-      ets do
-      end
-
-      attributes do
-        attribute :key, :string, primary_key?: true, allow_nil?: false, public?: true
-        attribute :owner, :string, public?: true
-        attribute :count, :integer, public?: true
-        # emerges WITH the row, from the same rows the row summarises
-        attribute :basis, :string, public?: true
-        # a host would carry these too; a signature writes them
-        attribute :signed_by, :string, public?: true
-        attribute :signed_basis, :string, public?: true
-      end
-
-      actions do
-        defaults [:read, :destroy]
-
-        create :upsert do
-          upsert?(true)
-          accept([:key, :owner, :count, :basis])
-        end
-
-        update :sign do
-          accept([:signed_by, :signed_basis])
-        end
-      end
-
-      reactive do
-        id(:holdings)
-        recompute_by(:owner, to: :machines, from: :owner)
-
-        reduce(
-          into: fn {owner}, machines ->
-            %{
-              owner: owner,
-              count: length(machines),
-              basis: ReactiveDag.Basis.digest(machines, fields: [:key, :serial])
-            }
-          end
-        )
-      end
-    end
 
     setup do
       Machines |> Ash.read!() |> Enum.each(&Ash.destroy!/1)

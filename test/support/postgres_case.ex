@@ -86,9 +86,14 @@ defmodule ReactiveDag.PostgresCase do
       |> Enum.map(&AshPostgres.DataLayer.Info.table/1)
       |> Enum.reject(&is_nil/1)
 
-    # Already migrated by another module in this run? Then the tables are
-    # there and shared — nothing to do. Checked rather than assumed, because
-    # the generated migration is a plain `create table` that would fail.
+    # Already migrated — by another module in this run, or by an earlier run
+    # against this long-lived container? Then the tables are there and shared.
+    #
+    # Checked against the DATABASE rather than `schema_migrations`, because the
+    # two can disagree: adding a resource to an existing fixture leaves the
+    # recorded version unchanged while the new table is absent, and trusting
+    # the version would skip the migration that creates it. Measured — that is
+    # how `fx_gated_notes` went missing.
     if Enum.all?(tables, &table_exists?/1) do
       tables
     else
@@ -133,7 +138,9 @@ defmodule ReactiveDag.PostgresCase do
         # `schema_migrations` persists across runs in a long-lived container,
         # so the version must be stable for a given domain AND distinct between
         # domains. A hash of the domain name is both.
-        version = 20_000_000_000_000 + :erlang.phash2(domain, 1_000_000_000)
+        # Keyed on the domain AND its current table set, so adding a resource
+        # to a fixture produces a NEW version and the migration runs again.
+        version = 20_000_000_000_000 + :erlang.phash2({domain, tables}, 1_000_000_000)
 
         Ecto.Migrator.run(ReactiveDag.MigrationRepo, [{version, path}], :up,
           all: true,

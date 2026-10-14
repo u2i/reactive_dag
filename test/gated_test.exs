@@ -34,7 +34,10 @@ defmodule ReactiveDag.GatedTest do
   one a reimplementation is most likely to get wrong, because append-only
   suspensions naturally produce the queue-of-steps the old design refused.
   """
-  use ExUnit.Case, async: false
+  use ReactiveDag.PostgresCase
+
+  alias ReactiveDag.Fixtures.GatedGraph
+  alias ReactiveDag.Fixtures.GatedGraph.{Notes, Versioned}
 
   alias ReactiveDag.Test.FakeSuspensionRepo
 
@@ -52,7 +55,17 @@ defmodule ReactiveDag.GatedTest do
   # resumption can narrow to what moved rather than recomputing everything.
   def fake_changes(_version_id), do: %{}
 
+  setup_all do
+    migrate!(GatedGraph.Domain)
+    :ok
+  end
+
   setup do
+    pid = Ecto.Adapters.SQL.Sandbox.start_owner!(ReactiveDag.TestRepo, shared: true)
+    on_exit(fn -> Ecto.Adapters.SQL.Sandbox.stop_owner(pid) end)
+
+    migrate_library_tables!()
+    truncate(GatedGraph.tables())
     start_supervised!(FakeSuspensionRepo)
     FakeSuspensionRepo.install()
 
@@ -81,49 +94,8 @@ defmodule ReactiveDag.GatedTest do
   end
 
   describe "the actor decides" do
-    defmodule Domain do
-      use Ash.Domain, validate_config_inclusion?: false
-
-      resources do
-        allow_unregistered?(true)
-      end
-    end
-
     # The host's answer to "was this a person". A real one would check a struct
     # or a role; this is the shape, which is all the library depends on.
-    defmodule Notes do
-      use Ash.Resource,
-        domain: ReactiveDag.GatedTest.Domain,
-        data_layer: Ash.DataLayer.Ets,
-        extensions: [ReactiveDag.Node]
-
-      ets do
-        private?(true)
-      end
-
-      attributes do
-        attribute :key, :string, primary_key?: true, allow_nil?: false, public?: true
-        attribute :body, :string, public?: true
-      end
-
-      actions do
-        defaults [:read, :destroy]
-        create :upsert, upsert?: true, accept: [:key, :body]
-      end
-
-      reactive do
-        id(:notes)
-        leaf?(true)
-        payload_key(:key)
-        dirties_on([:create, :update])
-        # `gated` alone is what lowers to the :approval suspend reason —
-        # `suspends` is the :expensive one, and declaring it here would make the
-        # cascade stop for the wrong reason (`:expensive` wins when both are set).
-        gated(human?: {ReactiveDag.GatedTest, :person?, []})
-        # Required of any suspending cell: a resumption has to be able to read
-        # back the change that stopped it, or it recomputes the whole cell.
-      end
-    end
 
     test "a MACHINE change is held" do
       # No actor: the graph, a worker, an extractor. Nothing claimed to be a
@@ -179,47 +151,6 @@ defmodule ReactiveDag.GatedTest do
     # An enqueued cascade says WHICH entity changed; the version says WHAT the
     # change was. The cascade is consumed and gone, so the version is the only
     # thing that can explain an approved or rejected change afterwards.
-    defmodule Versioned do
-      use Ash.Resource,
-        domain: ReactiveDag.GatedTest.Domain,
-        data_layer: Ash.DataLayer.Ets,
-        extensions: [ReactiveDag.Node]
-
-      ets do
-        private?(true)
-      end
-
-      temporal do
-        attribute :valid_at
-        recorded_at :recorded_at
-      end
-
-      attributes do
-        attribute :key, :string, primary_key?: true, allow_nil?: false, public?: true
-        attribute :body, :string, public?: true
-
-        attribute :recorded_at, :utc_datetime_usec,
-          public?: true,
-          default: &DateTime.utc_now/0,
-          update_default: &DateTime.utc_now/0
-      end
-
-      actions do
-        defaults [:read, :destroy]
-        create :upsert, upsert?: true, accept: [:key, :body]
-      end
-
-      reactive do
-        id(:versioned)
-        leaf?(true)
-        payload_key(:key)
-        dirties_on([:create, :update])
-        gated(true)
-        # Nothing to declare: the resource's own period is the record. A
-        # consumer that needs to narrow reads the row as of the instant the
-        # enqueue carries.
-      end
-    end
 
     test "the change carries WHEN it happened, and a reviewer gets it back" do
       # Was read off the held frontier row via `awaiting/1`, then rode as a
