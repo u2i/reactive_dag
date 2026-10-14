@@ -35,6 +35,7 @@ defmodule ReactiveDag.Fixtures.ExpenseGraph do
       resource ReactiveDag.Fixtures.ExpenseGraph.Expenses
       resource ReactiveDag.Fixtures.ExpenseGraph.CategoryTotals
       resource ReactiveDag.Fixtures.ExpenseGraph.CategoryHealth
+      resource ReactiveDag.Fixtures.ExpenseGraph.Publish
     end
   end
 
@@ -172,6 +173,74 @@ defmodule ReactiveDag.Fixtures.ExpenseGraph do
     end
   end
 
+  defmodule NoopOp do
+    @moduledoc """
+    A compute that changes nothing.
+
+    `Publish` is about STRUCTURE — a `compose` leg that owns no table — so the
+    computation itself must not be a variable.
+    """
+    @moduledoc """
+    A compute that changes nothing.
+
+    The node under test is about STRUCTURE — a `compose` leg that owns no
+    table — so the computation itself must not be a variable.
+    """
+    @behaviour ReactiveDag.Op
+    @impl true
+    def recompute(_cell, _keys), do: {:ok, []}
+  end
+
+  # A node that owns a table, over a `compose` LEG that does not. The leg is the
+  # tableless cell that still exists: its work is real and its keys flow, but it
+  # is an intermediate — `meta.resource` is nil, so there is no table to read and
+  # "nothing lives here" is the honest answer rather than a failure to look.
+  #
+  # The `:elsewhere` state used to be reached through the write-elsewhere shape
+  # (`Simple`, no attributes, a compute module). A derived NODE may no longer be
+  # tableless, so it is reached through the one shape that legitimately has no
+  # resource — which is what `Insights.rows_kind/1` has always keyed on.
+  defmodule Publish do
+    use Ash.Resource,
+      domain: ReactiveDag.Fixtures.ExpenseGraph.Domain,
+      data_layer: AshPostgres.DataLayer,
+      extensions: [ReactiveDag.Node]
+
+    postgres do
+      table "fx_publish"
+      repo(ReactiveDag.TestRepo)
+    end
+
+    attributes do
+      attribute(:key, :string, primary_key?: true, allow_nil?: false, public?: true)
+    end
+
+    actions do
+      defaults([:read, :destroy])
+
+      create :upsert do
+        upsert?(true)
+        upsert_identity(:by_key)
+        accept([:key])
+      end
+    end
+
+    identities do
+      identity(:by_key, [:key])
+    end
+
+    reactive do
+      id(:publish)
+      compute(ReactiveDag.Fixtures.ExpenseGraph.NoopOp)
+
+      compose :fold do
+        as(:published_rows)
+        compute(ReactiveDag.Fixtures.ExpenseGraph.NoopOp)
+        ref(:expenses)
+      end
+    end
+  end
+
   @doc """
   The assembled plan.
 
@@ -181,6 +250,9 @@ defmodule ReactiveDag.Fixtures.ExpenseGraph do
   def plan, do: ReactiveDag.Node.graph([Expenses, CategoryTotals])
   def plan(:with_health), do: ReactiveDag.Node.graph([Expenses, CategoryTotals, CategoryHealth])
 
+  @doc "expenses -> publish, whose `compose` leg owns no table."
+  def plan(:with_publish), do: ReactiveDag.Node.graph([Expenses, Publish])
+
   @doc "The tables this fixture owns, for truncation between tests."
-  def tables, do: ["fx_expenses", "fx_category_totals", "fx_category_health"]
+  def tables, do: ["fx_expenses", "fx_category_totals", "fx_category_health", "fx_publish"]
 end
