@@ -20,118 +20,28 @@ defmodule ReactiveDag.KeylessJoinSideTest do
   The fix asks `Payload.lookup/1`, like everywhere else, and reads a keyless side by
   its `row_key` columns rather than degrading the claim to `"*"`.
   """
-  use ExUnit.Case, async: false
+  use ReactiveDag.PostgresCase
+
+  alias ReactiveDag.Fixtures.KeylessJoinGraph
+  alias ReactiveDag.Fixtures.KeylessJoinGraph.{EdrAgent, Machine, Observation}
 
   alias ReactiveDag.{Cascade}
-
-  defmodule Domain do
-    use Ash.Domain, validate_config_inclusion?: false
-    resources(do: allow_unregistered?(true))
-  end
-
-  # Both sides keyed by a natural column, with NO key column — the #223 shape.
-  defmodule Machine do
-    use Ash.Resource, domain: Domain, data_layer: Ash.DataLayer.Ets, extensions: [ReactiveDag.Node]
-    ets(do: private?(true))
-
-    attributes do
-      uuid_primary_key :id
-      attribute :serial, :string, allow_nil?: false, public?: true
-      attribute :hostname, :string, public?: true
-    end
-
-    identities do
-      identity :by_serial, [:serial], pre_check_with: ReactiveDag.KeylessJoinSideTest.Domain
-    end
-
-    actions do
-      defaults [:read, :destroy]
-
-      create :upsert do
-        upsert?(true)
-        upsert_identity(:by_serial)
-        accept([:serial, :hostname])
-      end
-    end
-
-    reactive do
-      id(:machine_register)
-      op(:source)
-      leaf?(true)
-      payload_key(false)
-      row_key([:serial])
-    end
-  end
-
-  defmodule EdrAgent do
-    use Ash.Resource, domain: Domain, data_layer: Ash.DataLayer.Ets, extensions: [ReactiveDag.Node]
-    ets(do: private?(true))
-
-    attributes do
-      uuid_primary_key :id
-      attribute :serial, :string, allow_nil?: false, public?: true
-      attribute :version, :string, public?: true
-    end
-
-    identities do
-      identity :by_serial, [:serial], pre_check_with: ReactiveDag.KeylessJoinSideTest.Domain
-    end
-
-    actions do
-      defaults [:read, :destroy]
-
-      create :upsert do
-        upsert?(true)
-        upsert_identity(:by_serial)
-        accept([:serial, :version])
-      end
-    end
-
-    reactive do
-      id(:edr_agents)
-      op(:source)
-      leaf?(true)
-      payload_key(false)
-      row_key([:serial])
-    end
-  end
-
-  defmodule Observation do
-    use Ash.Resource, domain: Domain, data_layer: Ash.DataLayer.Ets, extensions: [ReactiveDag.Node]
-    ets(do: private?(true))
-
-    attributes do
-      attribute :key, :string, primary_key?: true, allow_nil?: false, public?: true
-      attribute :hostname, :string, public?: true
-      attribute :version, :string, public?: true
-    end
-
-    actions do
-      defaults [:read, :destroy]
-      create :upsert, upsert?: true, accept: [:key, :hostname, :version]
-    end
-
-    reactive do
-      id(:machine_observations)
-      op(:reconcile)
-
-      join(
-        left_over: :machine_register,
-        right_over: :edr_agents,
-        left: :serial,
-        right: :serial,
-        outer: true,
-        into: [left: [hostname: :hostname], right: [version: :version]]
-      )
-    end
-  end
 
   defp plan, do: ReactiveDag.Node.graph([Machine, EdrAgent, Observation])
 
   defp drain,
     do: ReactiveDag.Test.Pending.cascade(plan(), recompute: ReactiveDag.Node.Recompute, key_rule: ReactiveDag.Node.KeyRule)
 
+  setup_all do
+    migrate!(KeylessJoinGraph.Domain)
+    :ok
+  end
+
   setup do
+    pid = Ecto.Adapters.SQL.Sandbox.start_owner!(ReactiveDag.TestRepo, shared: true)
+    on_exit(fn -> Ecto.Adapters.SQL.Sandbox.stop_owner(pid) end)
+
+    truncate(KeylessJoinGraph.tables())
     start_supervised!(ReactiveDag.Test.FakeSuspensionRepo)
     ReactiveDag.Test.FakeSuspensionRepo.install()
 

@@ -7,72 +7,12 @@ defmodule ReactiveDag.RowsPageTest do
   can hold 10,000 rows, which is why the limit goes to the datastore and the
   total comes from a COUNT rather than `length/1` on the page.
   """
-  use ExUnit.Case, async: false
+  use ReactiveDag.PostgresCase
+
+  alias ReactiveDag.Fixtures.RowsPageGraph
+  alias ReactiveDag.Fixtures.RowsPageGraph.{Docs, Totals}
 
   alias ReactiveDag.Node.Rows
-
-  defmodule Domain do
-    use Ash.Domain, validate_config_inclusion?: false
-
-    resources do
-      allow_unregistered?(true)
-    end
-  end
-
-  defmodule Docs do
-    use Ash.Resource, domain: Domain, data_layer: Ash.DataLayer.Ets, extensions: [ReactiveDag.Node]
-
-    ets do
-    end
-
-    attributes do
-      attribute :key, :string, primary_key?: true, allow_nil?: false, public?: true
-      attribute :status, :string, public?: true
-      attribute :payload, :map, public?: true
-    end
-
-    actions do
-      defaults [:read, :destroy]
-
-      create :upsert do
-        upsert?(true)
-        accept([:key, :status, :payload])
-      end
-    end
-
-    reactive do
-      id(:docs)
-      leaf?(true)
-      row_key([:key])
-    end
-  end
-
-  defmodule Totals do
-    use Ash.Resource, domain: Domain, data_layer: Ash.DataLayer.Ets, extensions: [ReactiveDag.Node]
-
-    ets do
-    end
-
-    attributes do
-      attribute :key, :string, primary_key?: true, allow_nil?: false, public?: true
-      attribute :total, :integer, public?: true
-    end
-
-    actions do
-      defaults [:read, :destroy]
-
-      create :upsert do
-        upsert?(true)
-        accept([:key, :total])
-      end
-    end
-
-    reactive do
-      id(:totals)
-      leaf?(true)
-      row_key([:key])
-    end
-  end
 
   defp cell do
     [c] = ReactiveDag.Node.cells(Docs)
@@ -84,7 +24,16 @@ defmodule ReactiveDag.RowsPageTest do
     c
   end
 
+  setup_all do
+    migrate!(RowsPageGraph.Domain)
+    :ok
+  end
+
   setup do
+    pid = Ecto.Adapters.SQL.Sandbox.start_owner!(ReactiveDag.TestRepo, shared: true)
+    on_exit(fn -> Ecto.Adapters.SQL.Sandbox.stop_owner(pid) end)
+
+    truncate(RowsPageGraph.tables())
     # Keys inserted in a SHUFFLED order, so neither insertion order nor its
     # reverse happens to be sorted order. My first version inserted them
     # descending, which ETS returns in insertion order — so removing the

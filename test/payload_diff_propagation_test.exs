@@ -16,139 +16,18 @@ defmodule ReactiveDag.PayloadDiffPropagationTest do
   where it landed, so the unit it left keeps counting a row it no longer holds
   unless the diff names both.
   """
-  use ExUnit.Case, async: false
+  use ReactiveDag.PostgresCase
+
+  alias ReactiveDag.Fixtures.PayloadDiffGraph
+  alias ReactiveDag.Fixtures.PayloadDiffGraph.{Lines, Projected, Rollup}
 
   alias ReactiveDag.{Cascade}
 
   # The frontier's repo. Mirrors `dirties_on_test`'s: it must retain the DIFF a
   # mark carried, since that is half of what this file is about.
-  defmodule Domain do
-    use Ash.Domain, validate_config_inclusion?: false
-
-    resources do
-      allow_unregistered?(true)
-    end
-  end
-
-  # A LEAF whose rows a source writes. Its `fund` is what the rollup groups by,
-  # so changing it moves a row between units.
-  defmodule Lines do
-    use Ash.Resource,
-      domain: Domain,
-      data_layer: Ash.DataLayer.Ets,
-      extensions: [ReactiveDag.Node]
-
-    ets do
-      private?(true)
-    end
-
-    attributes do
-      attribute :key, :string, primary_key?: true, allow_nil?: false, public?: true
-      attribute :fund, :string, public?: true
-      attribute :amount, :integer, public?: true
-    end
-
-    actions do
-      defaults [:read, :destroy]
-      create :upsert, upsert?: true, accept: [:key, :fund, :amount]
-    end
-
-    reactive do
-      id(:lines)
-      leaf?(true)
-      payload_key(:key)
-    end
-  end
-
-  # The middle cell — GRAPH-WRITTEN, through the payload loop. Its rows are what
-  # the rollup above it groups, so its diffs are what must propagate.
-  defmodule Projected do
-    use Ash.Resource,
-      domain: Domain,
-      data_layer: Ash.DataLayer.Ets,
-      extensions: [ReactiveDag.Node]
-
-    ets do
-      private?(true)
-    end
-
-    attributes do
-      attribute :key, :string, primary_key?: true, allow_nil?: false, public?: true
-      attribute :fund, :string, public?: true
-      attribute :amount, :integer, public?: true
-    end
-
-    actions do
-      defaults [:read, :destroy]
-      create :upsert, upsert?: true, accept: [:key, :fund, :amount]
-    end
-
-    reactive do
-      id(:projected)
-      op(:map)
-      payload_key(:key)
-      depends_on([:lines])
-      compute(ReactiveDag.PayloadDiffPropagationTest.Project)
-    end
-  end
-
-  defmodule Rollup do
-    use Ash.Resource,
-      domain: Domain,
-      data_layer: Ash.DataLayer.Ets,
-      extensions: [ReactiveDag.Node]
-
-    ets do
-      private?(true)
-    end
-
-    attributes do
-      attribute :fund, :string, primary_key?: true, allow_nil?: false, public?: true
-      attribute :total, :integer, public?: true
-    end
-
-    actions do
-      defaults [:read, :destroy]
-      create :upsert, upsert?: true, accept: [:fund, :total]
-    end
-
-    reactive do
-      id(:rollup)
-      op(:fold)
-      payload_key(:fund)
-      recompute_by(:fund, to: :projected, from: :fund)
-      reduce(into: [sum: [amount: :total]])
-    end
-  end
 
   # A `compute` op writing its own rows through the payload loop — which is what
   # every real host's extraction cells do.
-  defmodule Project do
-    @behaviour ReactiveDag.Op
-
-    @impl true
-    def recompute(cell, keys, opts \\ []) do
-      lines =
-        case keys do
-          ["*"] -> Ash.read!(Lines)
-          ks -> Enum.filter(Ash.read!(Lines), &(&1.key in ks))
-        end
-
-      changed =
-        for l <- lines,
-            ReactiveDag.Node.Payload.upsert_row(
-              Projected,
-              cell.meta,
-              l.key,
-              %{key: l.key, fund: l.fund, amount: l.amount},
-              opts
-            ) != :unchanged do
-          l.key
-        end
-
-      {:ok, changed}
-    end
-  end
 
   defp plan, do: ReactiveDag.Node.graph([Lines, Projected, Rollup])
 
@@ -161,7 +40,16 @@ defmodule ReactiveDag.PayloadDiffPropagationTest do
     ReactiveDag.Test.Pending.add("lines", [key])
   end
 
+  setup_all do
+    migrate!(PayloadDiffGraph.Domain)
+    :ok
+  end
+
   setup do
+    pid = Ecto.Adapters.SQL.Sandbox.start_owner!(ReactiveDag.TestRepo, shared: true)
+    on_exit(fn -> Ecto.Adapters.SQL.Sandbox.stop_owner(pid) end)
+
+    truncate(PayloadDiffGraph.tables())
     start_supervised!(ReactiveDag.Test.FakeSuspensionRepo)
     ReactiveDag.Test.FakeSuspensionRepo.install()
 
