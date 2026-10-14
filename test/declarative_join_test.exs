@@ -5,99 +5,24 @@ defmodule ReactiveDag.DeclarativeJoinTest do
   and declarative per-side column picks in `into:`, with absent-side nils
   giving left-join/outer gap semantics for free.
   """
-  use ExUnit.Case, async: false
+  use ReactiveDag.PostgresCase
+
+  alias ReactiveDag.Fixtures.DeclarativeJoinGraph
+  alias ReactiveDag.Fixtures.DeclarativeJoinGraph.{Entries, Linked, OuterVariance, Variance}
 
   alias ReactiveDag.Node.Recompute
 
-  defmodule Domain do
-    use Ash.Domain, validate_config_inclusion?: false
-
-    resources do
-      allow_unregistered?(true)
-    end
-  end
-
-  # ONE input holding both sides, discriminated by :kind — the fiscal
-  # declared-vs-observed shape.
-  defmodule Entries do
-    use Ash.Resource,
-      domain: Domain,
-      data_layer: Ash.DataLayer.Ets,
-      extensions: [ReactiveDag.Node]
-
-    ets do
-      private?(true)
-    end
-
-    attributes do
-      attribute :key, :string, primary_key?: true, allow_nil?: false, public?: true
-      attribute :kind, :string, public?: true
-      attribute :acct, :string, public?: true
-      attribute :amount, :float, public?: true
-    end
-
-    actions do
-      defaults [:read, :destroy]
-
-      create :create do
-        accept([:key, :kind, :acct, :amount])
-      end
-    end
-
-    reactive do
-      id(:entries)
-      op(:source)
-      leaf?(true)
-    end
-  end
-
-  # the declarative variance node: [key:, where:] sides + per-side picks.
-  defmodule Variance do
-    use Ash.Resource,
-      domain: Domain,
-      data_layer: Ash.DataLayer.Ets,
-      extensions: [ReactiveDag.Node]
-
-    ets do
-      private?(true)
-    end
-
-    attributes do
-      attribute :key, :string, primary_key?: true, allow_nil?: false, public?: true
-      attribute :budget, :float, public?: true
-      attribute :actual, :float, public?: true
-    end
-
-    identities do
-      identity :by_key, [:key], pre_check_with: ReactiveDag.DeclarativeJoinTest.Domain
-    end
-
-    actions do
-      defaults [:read, :destroy]
-
-      create :upsert do
-        upsert?(true)
-        upsert_identity(:by_key)
-        accept([:key, :budget, :actual])
-      end
-    end
-
-    reactive do
-      id(:variance)
-      op(:reconcile)
-      key_rule(:all)
-
-      join(
-        over: :entries,
-        left: [key: :acct, where: [kind: "budget"]],
-        right: [key: :acct, where: [kind: "actual"]],
-        key_prefix: "va",
-        into: [left: [amount: :budget], right: [amount: :actual]]
-      )
-    end
+  setup_all do
+    migrate!(DeclarativeJoinGraph.Domain)
+    :ok
   end
 
   setup do
+    pid = Ecto.Adapters.SQL.Sandbox.start_owner!(ReactiveDag.TestRepo, shared: true)
+    on_exit(fn -> Ecto.Adapters.SQL.Sandbox.stop_owner(pid) end)
+
+    truncate(DeclarativeJoinGraph.tables())
+
     for {k, kind, acct, amount} <- [
           {"b1", "budget", "A1010", 100.0},
           {"b2", "budget", "A2020", 50.0},
@@ -129,101 +54,12 @@ defmodule ReactiveDag.DeclarativeJoinTest do
   end
 
   test "outer: true also emits right-only keys (nil left) — the rogue-member finding" do
-    defmodule OuterVariance do
-      use Ash.Resource,
-        domain: ReactiveDag.DeclarativeJoinTest.Domain,
-        data_layer: Ash.DataLayer.Ets,
-        extensions: [ReactiveDag.Node]
-
-      ets do
-      end
-
-      attributes do
-        attribute :key, :string, primary_key?: true, allow_nil?: false, public?: true
-        attribute :status, :string, public?: true
-      end
-
-      actions do
-        defaults [:read, :destroy]
-
-        create :upsert do
-          upsert?(true)
-          accept([:key, :status])
-        end
-      end
-
-      reactive do
-        id(:outer_variance)
-        op(:reconcile)
-        key_rule(:all)
-
-        join(
-          over: :entries,
-          left: [key: :acct, where: [kind: "budget"]],
-          right: [key: :acct, where: [kind: "actual"]],
-          outer: true,
-          into: fn acct, budget, actual ->
-            %{
-              key: acct,
-              status:
-                cond do
-                  is_nil(budget) -> "undeclared"
-                  is_nil(actual) -> "unspent"
-                  true -> "present"
-                end
-            }
-          end
-        )
-      end
-    end
-
     plan = ReactiveDag.Node.graph([Entries, OuterVariance])
     {:ok, changed} = Recompute.recompute(plan.cells["outer_variance"], ["*"])
     assert Enum.sort(changed) == ["A1010", "A2020", "A3030"]
   end
 
   test "plain-attribute sides: the two-column case (nil value = not on that side)" do
-    defmodule Linked do
-      use Ash.Resource,
-        domain: ReactiveDag.DeclarativeJoinTest.Domain,
-        data_layer: Ash.DataLayer.Ets,
-        extensions: [ReactiveDag.Node]
-
-      ets do
-      end
-
-      attributes do
-        attribute :key, :string, primary_key?: true, allow_nil?: false, public?: true
-        attribute :status, :string, public?: true
-      end
-
-      actions do
-        defaults [:read, :destroy]
-
-        create :upsert do
-          upsert?(true)
-          accept([:key, :status])
-        end
-      end
-
-      reactive do
-        id(:linked)
-        op(:reconcile)
-        key_rule(:all)
-
-        # every entry is on the left by acct; only actuals land on the right
-        # via a fn (mixing forms is fine — each slot resolves independently)
-        join(
-          over: :entries,
-          left: :acct,
-          right: fn e -> e.kind == "actual" && e.acct end,
-          into: fn acct, _l, r ->
-            %{key: acct, status: if(r, do: "observed", else: "declared-only")}
-          end
-        )
-      end
-    end
-
     plan = ReactiveDag.Node.graph([Entries, Linked])
     {:ok, changed} = Recompute.recompute(plan.cells["linked"], ["*"])
     # left side indexes EVERY entry by acct (last wins per key), so all accts emit
@@ -235,7 +71,7 @@ defmodule ReactiveDag.DeclarativeJoinTest do
 
     defmodule BadSide do
       use Ash.Resource,
-        domain: ReactiveDag.DeclarativeJoinTest.Domain,
+        domain: ReactiveDag.Fixtures.DeclarativeJoinGraph.Domain,
         data_layer: Ash.DataLayer.Ets,
         extensions: [ReactiveDag.Node]
 
@@ -275,7 +111,7 @@ defmodule ReactiveDag.DeclarativeJoinTest do
 
     defmodule BadPicks do
       use Ash.Resource,
-        domain: ReactiveDag.DeclarativeJoinTest.Domain,
+        domain: ReactiveDag.Fixtures.DeclarativeJoinGraph.Domain,
         data_layer: Ash.DataLayer.Ets,
         extensions: [ReactiveDag.Node]
 
