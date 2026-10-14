@@ -9,113 +9,41 @@ defmodule ReactiveDag.TenantScanningTest do
   there. "Found 40 documents, nothing changed" reads like a no-op scan rather
   than a lost one.
   """
-  use ExUnit.Case, async: false
+  use ReactiveDag.PostgresCase
+
+  alias ReactiveDag.Fixtures.TenantScanGraph
+  alias ReactiveDag.Fixtures.TenantScanGraph.{Docs}
 
   alias ReactiveDag.{Cascade, Source}
 
-  defmodule Domain do
-    use Ash.Domain, validate_config_inclusion?: false
-
-    resources do
-      allow_unregistered?(true)
-    end
-  end
-
   # The scanner reports whatever the test asked for via process state, so one
   # module can stand in for every tenant's upstream.
-  defmodule Crawler do
-    @behaviour ReactiveDag.Source
 
-    @impl true
-    def id, do: :crawler
-
-    @impl true
-    def poll(opts) do
-      send(self(), {:polled, opts})
-      {:ok, Process.get(:crawler_keys, [])}
-    end
-  end
-
-  defmodule Docs do
-    use Ash.Resource,
-      domain: Domain,
-      data_layer: Ash.DataLayer.Ets,
-      extensions: [ReactiveDag.Node]
-
-    ets do
-      private?(true)
-    end
-
-    attributes do
-      attribute :key, :string, primary_key?: true, allow_nil?: false, public?: true
-    end
-
-    actions do
-      defaults [:read, :destroy]
-
-      create :upsert do
-        upsert?(true)
-        accept([:key])
-      end
-    end
-
-    reactive do
-      id(:docs)
-      op(:source)
-      leaf?(true)
-      poll(Crawler, every: "0 12 * * *")
-    end
-  end
-
-  defmodule FakeRepo do
-    def start_link, do: Agent.start_link(fn -> [] end, name: __MODULE__)
-
-    def rows, do: Agent.get(__MODULE__, & &1)
-
-    def query!("INSERT INTO " <> _, params) do
-      params
-      |> Enum.chunk_every(7)
-      |> Enum.each(fn [cell, tenant, key, _r, _t, _held, vid] ->
-        Agent.update(__MODULE__, fn rows ->
-          if {tenant, cell, key} in rows, do: rows, else: rows ++ [{tenant, cell, key}]
-        end)
-      end)
-
-      %{rows: []}
-    end
-
-    def query!("SELECT DISTINCT cell_id" <> _, [tenant]) do
-      ids =
-        rows() |> Enum.filter(&(elem(&1, 0) == tenant)) |> Enum.map(&elem(&1, 1)) |> Enum.uniq()
-
-      %{rows: Enum.map(ids, &[&1])}
-    end
-
-    def query!("DELETE FROM " <> _, [cell, tenant]) do
-      keys =
-        Agent.get_and_update(__MODULE__, fn rows ->
-          {mine, rest} = Enum.split_with(rows, fn {t, c, _} -> t == tenant and c == cell end)
-          {Enum.map(mine, &elem(&1, 2)), rest}
-        end)
-
-      %{rows: Enum.map(keys, &[&1, nil])}
-    end
-
-    def query!("SELECT COUNT" <> _, [tenant]) do
-      %{rows: [[Enum.count(rows(), &(elem(&1, 0) == tenant))]]}
-    end
-
-    # the advisory lock — always granted; the KEY is what the test inspects.
-    # `self()` is the test process: `with_lock/2` runs in the caller.
-    def query!("SELECT pg_try_advisory_lock" <> _, [key]) do
+  # The advisory lock is the ONE thing a real database cannot show: it is
+  # always granted, and the KEY it was taken on leaves no trace. So this
+  # intercepts just that statement and reports the key, delegating everything
+  # else to the real repo. `self()` is the test process — `with_lock/2` runs in
+  # the caller.
+  defmodule LockSpy do
+    def query!("SELECT pg_try_advisory_lock" <> _ = sql, [key] = params) do
       send(self(), {:lock, key})
-      %{rows: [[true]]}
+      ReactiveDag.TestRepo.query!(sql, params)
     end
 
-    def query!("SELECT pg_advisory_unlock" <> _, _), do: %{rows: [[true]]}
+    def query!(sql, params \\ []), do: ReactiveDag.TestRepo.query!(sql, params)
+  end
+
+  setup_all do
+    migrate!(TenantScanGraph.Domain)
+    :ok
   end
 
   setup do
+    pid = Ecto.Adapters.SQL.Sandbox.start_owner!(ReactiveDag.TestRepo, shared: true)
+    on_exit(fn -> Ecto.Adapters.SQL.Sandbox.stop_owner(pid) end)
+
+    migrate_library_tables!()
+    truncate(TenantScanGraph.tables())
     # A poll or a write now ENQUEUES a cascade rather than leaving a mark,
     # so without this the library reaches for Oban and these tests fail on
     # a missing instance rather than on anything they are about.
@@ -126,9 +54,7 @@ defmodule ReactiveDag.TenantScanningTest do
     # ends — and the next test can call `start_link` before the name is released,
     # failing setup with `{:error, {:already_started, …}}`. ExUnit's supervisor waits
     # for the exit, so the name is free by the time the next test starts.
-    start_supervised!(%{id: FakeRepo, start: {FakeRepo, :start_link, []}})
     prev = Application.get_env(:reactive_dag, :repo)
-    Application.put_env(:reactive_dag, :repo, FakeRepo)
     on_exit(fn -> Application.put_env(:reactive_dag, :repo, prev) end)
     Ash.bulk_destroy!(Docs, :destroy, %{})
     :ok
@@ -233,6 +159,13 @@ defmodule ReactiveDag.TenantScanningTest do
       assert unscoped == explicit_nil,
              "an explicit nil scope must not move the lock — Keyword.get's default " <>
                "only applies when the key is ABSENT"
+    end
+
+    setup do
+      prev = Application.get_env(:reactive_dag, :repo)
+      Application.put_env(:reactive_dag, :repo, LockSpy)
+      on_exit(fn -> Application.put_env(:reactive_dag, :repo, prev) end)
+      :ok
     end
 
     test "two tenants take DIFFERENT locks, so they do not queue behind each other" do
