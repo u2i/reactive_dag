@@ -12,12 +12,18 @@ defmodule ReactiveDag.PerKeyTest do
   the difference between a whole-cell claim costing one call and costing all of
   them, which is why it earns a rung rather than a guide section.
   """
-  use ExUnit.Case, async: false
+  use ReactiveDag.PostgresCase
 
-  alias ReactiveDag.{Cascade}
-  alias ReactiveDag.Node.Recompute
+  alias ReactiveDag.Fixtures.PerKeyGraph
 
-  # counts calls so the tests can assert on what was actually PAID FOR
+  alias ReactiveDag.Fixtures.PerKeyGraph.{
+    Always,
+    Concurrent,
+    Embeddings,
+    Summaries,
+    Transcripts
+  }
+
   defmodule Calls do
     def start_link, do: Agent.start_link(fn -> [] end, name: __MODULE__)
     def record(key), do: Agent.update(__MODULE__, &[key | &1])
@@ -25,137 +31,21 @@ defmodule ReactiveDag.PerKeyTest do
     def count, do: length(all())
   end
 
-  defmodule Domain do
-    use Ash.Domain, validate_config_inclusion?: false
+  alias ReactiveDag.{Cascade}
+  alias ReactiveDag.Node.Recompute
 
-    resources do
-      allow_unregistered?(true)
-    end
+  # counts calls so the tests can assert on what was actually PAID FOR
+  setup_all do
+    migrate!(PerKeyGraph.Domain)
+    :ok
   end
-
-  defmodule Transcripts do
-    use Ash.Resource,
-      domain: Domain,
-      data_layer: Ash.DataLayer.Ets,
-      extensions: [ReactiveDag.Node]
-
-    ets do
-      private?(true)
-    end
-
-    attributes do
-      attribute :key, :string, primary_key?: true, allow_nil?: false, public?: true
-      attribute :body, :string, public?: true
-      # deliberately NOT in the fingerprint: changing it must not re-bill
-      attribute :note, :string, public?: true
-    end
-
-    actions do
-      defaults [:read, :destroy]
-
-      create :create do
-        accept([:key, :body, :note])
-      end
-
-      update :revise do
-        accept([:body, :note])
-      end
-    end
-
-    reactive do
-      id(:transcripts)
-      op(:source)
-      leaf?(true)
-    end
-  end
-
-  defmodule Summaries do
-    use Ash.Resource,
-      domain: Domain,
-      data_layer: Ash.DataLayer.Ets,
-      extensions: [ReactiveDag.Node]
-
-    ets do
-      private?(true)
-    end
-
-    attributes do
-      attribute :key, :string, primary_key?: true, allow_nil?: false, public?: true
-      attribute :summary, :string, public?: true
-      # where the library stores the input hash
-      attribute :fingerprint, :string, public?: true
-    end
-
-    identities do
-      identity :by_key, [:key], pre_check_with: ReactiveDag.PerKeyTest.Domain
-    end
-
-    actions do
-      defaults [:read, :destroy]
-
-      create :upsert do
-        upsert?(true)
-        upsert_identity(:by_key)
-        accept([:key, :summary, :fingerprint])
-      end
-
-      # AN ORDINARY GENERIC ACTION taking ONE row's fields. That this could be
-      # `AshAi.Actions.prompt/2` is the library's business not at all.
-      action :summarise, :map do
-        argument :text, :string, allow_nil?: false
-
-        run fn input, _ctx ->
-          ReactiveDag.PerKeyTest.Calls.record(input.arguments.text)
-          {:ok, %{"summary" => "summary of #{input.arguments.text}"}}
-        end
-      end
-    end
-
-    reactive do
-      id(:summaries)
-      op(:summarise)
-
-      recompute_by :key, to: :transcripts, from: :key
-
-      per_key :summarise,
-        args: [text: :body],
-        fingerprint: [:body],
-        into: [summary: :summary]
-    end
-  end
-
-  defmodule FakeRepo do
-    def start_link, do: Agent.start_link(fn -> MapSet.new() end, name: __MODULE__)
-
-    def query!("INSERT INTO " <> _, params) do
-      params
-      |> Enum.chunk_every(7)
-      |> Enum.each(fn [cell, _tenant, key, _r, _t, _held, vid] -> Agent.update(__MODULE__, &MapSet.put(&1, {cell, key})) end)
-
-      %{rows: []}
-    end
-
-    def query!("SELECT DISTINCT cell_id" <> _, _params) do
-      ids = Agent.get(__MODULE__, & &1) |> Enum.map(&elem(&1, 0)) |> Enum.uniq()
-      %{rows: Enum.map(ids, &[&1])}
-    end
-
-    def query!("DELETE FROM " <> _, [cell | _tenant]) do
-      keys =
-        Agent.get_and_update(__MODULE__, fn set ->
-          {mine, rest} = Enum.split_with(set, fn {c, _} -> c == cell end)
-          {Enum.map(mine, &elem(&1, 1)), MapSet.new(rest)}
-        end)
-
-      %{rows: Enum.map(keys, &[&1, nil])}
-    end
-
-    def query!("SELECT COUNT" <> _, _params), do: %{rows: [[Agent.get(__MODULE__, &MapSet.size/1)]]}
-  end
-
 
   setup do
-    start_supervised!(%{id: FakeRepo, start: {FakeRepo, :start_link, []}})
+    pid = Ecto.Adapters.SQL.Sandbox.start_owner!(ReactiveDag.TestRepo, shared: true)
+    on_exit(fn -> Ecto.Adapters.SQL.Sandbox.stop_owner(pid) end)
+
+    migrate_library_tables!()
+    truncate(PerKeyGraph.tables())
     start_supervised!(%{id: Calls, start: {Calls, :start_link, []}})
     prev_repo = Application.get_env(:reactive_dag, :repo)
     Application.put_env(:reactive_dag, :repo, FakeRepo)
@@ -268,46 +158,6 @@ defmodule ReactiveDag.PerKeyTest do
   end
 
   test "without `fingerprint:` every recompute calls — the opt-in is explicit" do
-    defmodule Always do
-      use Ash.Resource,
-        domain: ReactiveDag.PerKeyTest.Domain,
-        data_layer: Ash.DataLayer.Ets,
-        extensions: [ReactiveDag.Node]
-
-      ets do
-        private?(true)
-      end
-
-      attributes do
-        attribute :key, :string, primary_key?: true, allow_nil?: false, public?: true
-        attribute :summary, :string, public?: true
-      end
-
-      actions do
-        defaults [:read]
-
-        create :upsert do
-          upsert?(true)
-          accept([:key, :summary])
-        end
-
-        action :summarise, :map do
-          argument :text, :string, allow_nil?: false
-
-          run fn input, _ctx ->
-            ReactiveDag.PerKeyTest.Calls.record(input.arguments.text)
-            {:ok, %{"summary" => "s"}}
-          end
-        end
-      end
-
-      reactive do
-        id(:always)
-        recompute_by :key, to: :transcripts, from: :key
-        per_key :summarise, args: [text: :body], into: [summary: :summary]
-      end
-    end
-
     c = ReactiveDag.Node.graph([Transcripts, Always]).cells["always"]
 
     {:ok, _, m1} = Recompute.recompute(c, ["*"])
@@ -327,7 +177,7 @@ defmodule ReactiveDag.PerKeyTest do
     test "a fingerprint with nowhere to live — the skip could never fire" do
       defmodule NoHome do
         use Ash.Resource,
-          domain: ReactiveDag.PerKeyTest.Domain,
+          domain: ReactiveDag.Fixtures.PerKeyGraph.Domain,
           data_layer: Ash.DataLayer.Simple,
           extensions: [ReactiveDag.Node]
 
@@ -343,9 +193,9 @@ defmodule ReactiveDag.PerKeyTest do
 
         reactive do
           id(:no_home)
-          recompute_by :key, to: :transcripts, from: :key
+          recompute_by(:key, to: :transcripts, from: :key)
           # no :fingerprint attribute on this resource
-          per_key :summarise, fingerprint: [:body], into: [summary: :summary]
+          per_key(:summarise, fingerprint: [:body], into: [summary: :summary])
         end
       end
 
@@ -359,7 +209,7 @@ defmodule ReactiveDag.PerKeyTest do
     test "an `into:` destination that isn't an attribute" do
       defmodule BadInto do
         use Ash.Resource,
-          domain: ReactiveDag.PerKeyTest.Domain,
+          domain: ReactiveDag.Fixtures.PerKeyGraph.Domain,
           data_layer: Ash.DataLayer.Simple,
           extensions: [ReactiveDag.Node]
 
@@ -374,8 +224,8 @@ defmodule ReactiveDag.PerKeyTest do
 
         reactive do
           id(:bad_into)
-          recompute_by :key, to: :transcripts, from: :key
-          per_key :summarise, into: [no_such_column: :summary]
+          recompute_by(:key, to: :transcripts, from: :key)
+          per_key(:summarise, into: [no_such_column: :summary])
         end
       end
 
@@ -388,7 +238,7 @@ defmodule ReactiveDag.PerKeyTest do
     test "naming a non-generic action" do
       defmodule NotGeneric do
         use Ash.Resource,
-          domain: ReactiveDag.PerKeyTest.Domain,
+          domain: ReactiveDag.Fixtures.PerKeyGraph.Domain,
           data_layer: Ash.DataLayer.Simple,
           extensions: [ReactiveDag.Node]
 
@@ -402,8 +252,8 @@ defmodule ReactiveDag.PerKeyTest do
 
         reactive do
           id(:not_generic)
-          recompute_by :key, to: :transcripts, from: :key
-          per_key :read
+          recompute_by(:key, to: :transcripts, from: :key)
+          per_key(:read)
         end
       end
 
@@ -414,6 +264,7 @@ defmodule ReactiveDag.PerKeyTest do
       assert msg =~ "GENERIC"
     end
   end
+
   describe "bounded concurrency" do
     # records max simultaneous in-flight calls, so the tests assert on actual
     # parallelism rather than on the option merely being accepted
@@ -429,64 +280,6 @@ defmodule ReactiveDag.PerKeyTest do
 
       def leave, do: Agent.update(__MODULE__, &%{&1 | now: &1.now - 1})
       def peak, do: Agent.get(__MODULE__, & &1.peak)
-    end
-
-    defmodule Concurrent do
-      use Ash.Resource,
-        domain: ReactiveDag.PerKeyTest.Domain,
-        data_layer: Ash.DataLayer.Ets,
-        extensions: [ReactiveDag.Node]
-
-      # NB: NOT `private?(true)`. A private ETS table is owned by the process
-      # that created it, and `max_concurrency:` writes each row from a task
-      # process — so a private table would silently drop the writes. Real hosts
-      # on AshPostgres are unaffected; this is the fixture matching reality.
-      ets do
-      end
-
-      attributes do
-        attribute :key, :string, primary_key?: true, allow_nil?: false, public?: true
-        attribute :summary, :string, public?: true
-        attribute :fingerprint, :string, public?: true
-      end
-
-      identities do
-        identity :by_key, [:key], pre_check_with: ReactiveDag.PerKeyTest.Domain
-      end
-
-      actions do
-        defaults [:read, :destroy]
-
-        create :upsert do
-          upsert?(true)
-          upsert_identity(:by_key)
-          accept([:key, :summary, :fingerprint])
-        end
-
-        action :summarise, :map do
-          argument :text, :string, allow_nil?: false
-
-          run fn input, _ctx ->
-            ReactiveDag.PerKeyTest.Gauge.enter()
-            # long enough that serial execution could never overlap
-            Process.sleep(40)
-            ReactiveDag.PerKeyTest.Gauge.leave()
-            ReactiveDag.PerKeyTest.Calls.record(input.arguments.text)
-            {:ok, %{"summary" => "s:#{input.arguments.text}"}}
-          end
-        end
-      end
-
-      reactive do
-        id(:concurrent)
-        recompute_by :key, to: :transcripts, from: :key
-
-        per_key :summarise,
-          args: [text: :body],
-          fingerprint: [:body],
-          max_concurrency: 4,
-          into: [summary: :summary]
-      end
     end
 
     setup do
@@ -549,61 +342,13 @@ defmodule ReactiveDag.PerKeyTest do
       assert Calls.count() - before == 1
     end
   end
+
   describe "embeddings (#30 item 5)" do
     # An embeddings NODE is just `per_key` with an embedding action — the
     # result is a list of floats instead of a string, and nothing else changes.
     # No new rung is needed. (For embeddings on the SAME resource as the text,
     # ash_ai's own `vectorize` is the better tool — it hooks the changeset, so
     # it detects change without a fingerprint round-trip.)
-    defmodule Embeddings do
-      use Ash.Resource,
-        domain: ReactiveDag.PerKeyTest.Domain,
-        data_layer: Ash.DataLayer.Ets,
-        extensions: [ReactiveDag.Node]
-
-      ets do
-      end
-
-      attributes do
-        attribute :key, :string, primary_key?: true, allow_nil?: false, public?: true
-        attribute :vector, {:array, :float}, public?: true
-        attribute :fingerprint, :string, public?: true
-      end
-
-      identities do
-        identity :by_key, [:key], pre_check_with: ReactiveDag.PerKeyTest.Domain
-      end
-
-      actions do
-        defaults [:read, :destroy]
-
-        create :upsert do
-          upsert?(true)
-          upsert_identity(:by_key)
-          accept([:key, :vector, :fingerprint])
-        end
-
-        # stands in for an AshAi.EmbeddingModel call
-        action :embed, :map do
-          argument :text, :string, allow_nil?: false
-
-          run fn input, _ctx ->
-            ReactiveDag.PerKeyTest.Calls.record(input.arguments.text)
-            {:ok, %{"vector" => [1.0, byte_size(input.arguments.text) / 1.0, 0.5]}}
-          end
-        end
-      end
-
-      reactive do
-        id(:embeddings)
-        recompute_by :key, to: :transcripts, from: :key
-
-        per_key :embed,
-          args: [text: :body],
-          fingerprint: [:body],
-          into: [vector: :vector]
-      end
-    end
 
     setup do
       Embeddings |> Ash.read!() |> Enum.each(&Ash.destroy!/1)
