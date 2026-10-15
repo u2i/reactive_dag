@@ -1,5 +1,25 @@
 # Changelog
 
+## [0.17.0-rc.73](https://github.com/u2i/reactive_dag/compare/v0.17.0-rc.72...v0.17.0-rc.73) (2026-10-15)
+
+
+### ⚠ BREAKING CHANGES
+
+* an upgrade path for hosts already on the old suspension schema
+
+### Features
+
+* a write only opens a new period when the node says it changed ([82bb4c1](https://github.com/u2i/reactive_dag/commit/82bb4c1da45ef8d1060fdee2bbd3d7b4e747521b))
+* an upgrade path for hosts already on the old suspension schema ([1b2a69d](https://github.com/u2i/reactive_dag/commit/1b2a69daa7060aa3b5adfb2f2ad539f6629e710d))
+* staleness as a query — ReactiveDag.Stale ([3eb5353](https://github.com/u2i/reactive_dag/commit/3eb5353f61454e203f169135476b9f687ab7eba0))
+* the grain join — a moved row marks BOTH units ([d57329c](https://github.com/u2i/reactive_dag/commit/d57329c1774b52c6db43ed2a6d0436720cf60b5a))
+
+
+### Bug Fixes
+
+* a destroy carries ITS OWN instant, not the row's last write ([ccbd6d7](https://github.com/u2i/reactive_dag/commit/ccbd6d73a3cf73a38170f090285aa4b0bf19c2e4))
+* two bugs behind the MOVED-row case, both found by measuring ([1d404c6](https://github.com/u2i/reactive_dag/commit/1d404c68222c1ced993c10bc68e5716559a3e556))
+
 ## [0.17.0-rc.72](https://github.com/u2i/reactive_dag/compare/v0.17.0-rc.71...v0.17.0-rc.72) (2026-09-08)
 
 
